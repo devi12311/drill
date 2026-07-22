@@ -1,0 +1,17 @@
+services:
+  postgres:
+    # pgvector-enabled image (debian-based). Switching from alpine changes
+    # collation, so the dev volume must be wiped when this image changes.
+    image: pgvector/pgvector:pg16
+    container_name: drill-postgres
+    environment:
+      POSTGRES_USER: drill
+      POSTGRES_PASSWORD: drill
+      POSTGRES_DB: drill
+    ports:
+      - "5433:5432"
+    volumes:
+      - drill-pgdata:/var/lib/postgresql/data
+
+volumes:
+  drill-pgdata:
