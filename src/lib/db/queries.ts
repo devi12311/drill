@@ -26,6 +26,15 @@ export async function userExists(userId: string): Promise<boolean> {
   return !!row;
 }
 
+/** Identity + current role for a user (DB is the source of truth for role). */
+export async function getUserById(userId: string) {
+  const [row] = await db
+    .select({ id: users.id, username: users.username, role: users.role })
+    .from(users)
+    .where(eq(users.id, userId));
+  return row ?? null;
+}
+
 // ---- Agents (all user-scoped) ----
 
 export async function listAgents(userId: string) {

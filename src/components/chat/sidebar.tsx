@@ -7,6 +7,7 @@ import {
   LogOut,
   Plus,
   Settings2,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,7 @@ function shortDate(iso: string) {
 
 export function Sidebar({
   username,
+  isAdmin = false,
   agents,
   activeAgentId,
   onSelectAgent,
@@ -53,6 +55,7 @@ export function Sidebar({
   listError,
 }: {
   username: string | null;
+  isAdmin?: boolean;
   agents: AgentSummary[];
   activeAgentId: string | null;
   onSelectAgent: (id: string) => void;
@@ -132,6 +135,16 @@ export function Sidebar({
           <BookMarked className="size-4 text-bone-gray" />
           Resolutions
         </Link>
+
+        {isAdmin && (
+          <Link
+            href="/admin"
+            className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-body-sm text-pale-stone hover:bg-smoke-charcoal hover:text-warm-off-white"
+          >
+            <ShieldCheck className="size-4 text-bone-gray" />
+            Admin
+          </Link>
+        )}
       </div>
 
       <div className="mt-6 min-h-0 flex-1 overflow-y-auto px-3 pb-4">

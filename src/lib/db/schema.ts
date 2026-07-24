@@ -14,6 +14,30 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  // Privilege level. DB is the source of truth; the ADMIN_USERNAMES env
+  // allowlist promotes matching usernames to 'admin' at login/register
+  // (docs/DECISIONS.md). Impersonation keys off this.
+  role: text("role", { enum: ["user", "admin"] })
+    .notNull()
+    .default("user"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/**
+ * Append-only record of privileged admin actions — impersonation start/stop
+ * and role changes. Kept for accountability now that admins can act as other
+ * users. `actorId` is the real admin; `targetUserId` the affected user (if any).
+ */
+export const auditLog = pgTable("audit_log", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  actorId: uuid("actor_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  action: text("action").notNull(),
+  targetUserId: uuid("target_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import { ImpersonationBanner } from "@/components/admin/impersonation-banner";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -29,7 +30,10 @@ export default function RootLayout({
         geistMono.variable,
       )}
     >
-      <body className="h-full flex flex-col overflow-hidden">{children}</body>
+      <body className="h-full flex flex-col overflow-hidden">
+        <ImpersonationBanner />
+        {children}
+      </body>
     </html>
   );
 }

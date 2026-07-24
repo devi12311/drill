@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
 import { hashPassword } from "@/lib/auth/password";
 import { setSession } from "@/lib/auth/session";
+import { resolveRole } from "@/lib/auth/admin";
 
 export async function POST(request: Request) {
   let body: { username?: string; password?: string };
@@ -34,11 +35,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Username already taken" }, { status: 409 });
   }
 
+  // Env allowlist may grant admin at first sign-up (bootstraps the first admin).
+  const role = resolveRole(username, "user");
   const [user] = await db
     .insert(users)
-    .values({ username, passwordHash: await hashPassword(password) })
-    .returning({ id: users.id, username: users.username });
+    .values({ username, passwordHash: await hashPassword(password), role })
+    .returning({ id: users.id, username: users.username, role: users.role });
 
   await setSession(user);
-  return Response.json({ id: user.id, username: user.username });
+  return Response.json({ id: user.id, username: user.username, role: user.role });
 }

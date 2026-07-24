@@ -27,6 +27,7 @@ const AGENT_STORAGE_KEY = "drill.activeAgentId";
 export default function Home() {
   const router = useRouter();
   const [username, setUsername] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
@@ -49,8 +50,9 @@ export default function Home() {
         }
         return res.ok ? res.json() : null;
       })
-      .then((me: { username?: string } | null) => {
+      .then((me: { username?: string; isAdmin?: boolean } | null) => {
         if (me?.username) setUsername(me.username);
+        setIsAdmin(Boolean(me?.isAdmin));
       })
       .catch(() => {});
   }, [router]);
@@ -161,6 +163,7 @@ export default function Home() {
     <main className="flex h-dvh w-full">
       <Sidebar
         username={username}
+        isAdmin={isAdmin}
         agents={agents}
         activeAgentId={activeAgentId}
         onSelectAgent={selectAgent}
