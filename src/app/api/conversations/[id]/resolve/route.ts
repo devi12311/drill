@@ -20,10 +20,20 @@ type Context = { params: Promise<{ id: string }> };
  * condensed transcript back to the user's Holmes agent with a strict JSON
  * response_format. Nothing is saved — the review dialog owns saving.
  */
-export async function POST(_request: Request, context: Context) {
+export async function POST(request: Request, context: Context) {
   const user = await getAuthUser();
   if (!user) return unauthorized();
   const { id } = await context.params;
+
+  // Optional free-text account of how the incident was actually resolved
+  // (the fix often happens outside the chat). Body may be absent/empty.
+  let note: string | undefined;
+  try {
+    const body = (await request.json()) as { note?: unknown };
+    if (typeof body?.note === "string" && body.note.trim()) note = body.note;
+  } catch {
+    // no body / not JSON — resolve without a resolver note
+  }
 
   const conversation = await getConversation(user.id, id);
   if (!conversation) {
@@ -40,6 +50,8 @@ export async function POST(_request: Request, context: Context) {
   if (fixtureMode()) {
     const file = path.join(process.cwd(), "fixtures", "resolution-artifact.json");
     const draft = parseArtifactDraft(await fs.readFile(file, "utf-8"));
+    // Make the note observable end-to-end without a live agent.
+    if (note) draft.resolution_steps = [note.trim(), ...draft.resolution_steps];
     return Response.json({ draft });
   }
 
@@ -52,6 +64,7 @@ export async function POST(_request: Request, context: Context) {
       { url: agent.url, apiKey: agent.apiKey },
       conversation.model,
       turns,
+      note,
     );
     return Response.json({ draft });
   } catch (err) {

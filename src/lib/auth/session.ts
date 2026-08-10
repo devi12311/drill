@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { cookies } from "next/headers";
 import {
   signSession,
@@ -10,6 +11,7 @@ import {
 import { SESSION_COOKIE } from "./session-cookie";
 import { IMPERSONATION_COOKIE } from "./impersonation-cookie";
 import { getUserById } from "@/lib/db/queries";
+import type { SessionUser } from "./me";
 
 export { SESSION_COOKIE };
 
@@ -78,8 +80,13 @@ export async function clearImpersonation(): Promise<void> {
  * The real logged-in user (never the impersonated one), with role from the DB
  * (source of truth — a JWT role claim can be stale after a promote/demote).
  * On DB outage, trusts the JWT claim so auth-only paths keep working.
+ *
+ * Memoized per request with React `cache()`: rendering `/admin` resolves the
+ * session in the `(app)` shell AND again in the admin layout's `getAdminActor`,
+ * which used to mean two identical `getUserById` round-trips per page load.
+ * Request-scoped, so a role change is still picked up on the next request.
  */
-async function getRealUser(): Promise<AuthUser | null> {
+const getRealUser = cache(async function getRealUser(): Promise<AuthUser | null> {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
   if (!token) return null;
@@ -96,7 +103,7 @@ async function getRealUser(): Promise<AuthUser | null> {
     // DB-dependent route will surface its own 503.
     return { id: payload.sub, username: payload.username, role: payload.role };
   }
-}
+});
 
 /**
  * Effective authenticated user for route handlers, or null. When a valid
@@ -133,6 +140,28 @@ export async function getAuthUser(): Promise<AuthUser | null> {
     }
   }
   return real;
+}
+
+/**
+ * `getAuthUser()` projected onto the client-safe `SessionUser` contract. One
+ * implementation feeds both `GET /api/auth/me` and the server-rendered `(app)`
+ * shell, so the browser and the server never disagree about who is logged in.
+ */
+export async function getSessionUser(): Promise<SessionUser | null> {
+  const user = await getAuthUser();
+  if (!user) return null;
+  const impersonating = Boolean(user.impersonatorId);
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    isAdmin: user.role === "admin",
+    impersonating,
+    impersonatorUsername: user.impersonatorUsername ?? null,
+    // Impersonation is only ever honoured for a *currently* admin actor
+    // (see getAuthUser), so the flag alone proves the actor is an admin.
+    actorIsAdmin: user.role === "admin" || impersonating,
+  };
 }
 
 /**

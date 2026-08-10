@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandMark } from "@/components/shell/brand-mark";
 
 export function AuthForm({ mode }: { mode: "login" | "register" }) {
   const router = useRouter();
@@ -37,14 +38,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
   return (
     <main className="flex h-dvh items-center justify-center bg-background px-6">
       <div className="w-full max-w-[380px]">
-        <div className="mb-8">
-          <div className="font-mono text-body font-medium tracking-[0.2em] text-warm-off-white">
-            DRILL
-          </div>
-          <div className="text-caption-tracked mt-1 uppercase text-bone-gray">
-            Root cause, on demand
-          </div>
-        </div>
+        <BrandMark className="mb-8" />
         <form
           onSubmit={submit}
           className="space-y-5 rounded-lg border border-border bg-smoked-onyx p-6"

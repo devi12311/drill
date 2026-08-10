@@ -7,6 +7,7 @@ import {
   ArtifactDetail,
   type ArtifactDetailData,
 } from "@/components/resolutions/artifact-detail";
+import { useSession } from "@/components/session/session-provider";
 
 export default function ResolutionPage({
   params,
@@ -14,8 +15,8 @@ export default function ResolutionPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { user } = useSession();
   const [artifact, setArtifact] = useState<ArtifactDetailData | null>(null);
-  const [username, setUsername] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -28,17 +29,11 @@ export default function ResolutionPage({
       .catch((err) =>
         setError(err instanceof Error ? err.message : "Failed to load"),
       );
-    fetch("/api/auth/me")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((me: { username?: string } | null) =>
-        setUsername(me?.username ?? null),
-      )
-      .catch(() => {});
   }, [id]);
 
   return (
-    <main className="h-dvh overflow-y-auto">
-      <div className="mx-auto w-full max-w-[820px] px-6 py-8">
+    <main className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-[820px] px-6 pb-20 pt-8">
         <Link
           href="/resolutions"
           className="inline-flex items-center gap-2 text-body-sm text-bone-gray hover:text-warm-off-white"
@@ -52,7 +47,10 @@ export default function ResolutionPage({
           ) : !artifact ? (
             <p className="py-8 text-body-sm text-bone-gray">Loading…</p>
           ) : (
-            <ArtifactDetail artifact={artifact} currentUsername={username} />
+            <ArtifactDetail
+              artifact={artifact}
+              currentUsername={user.username}
+            />
           )}
         </div>
       </div>

@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
-import { ImpersonationBanner } from "@/components/admin/impersonation-banner";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -30,10 +29,13 @@ export default function RootLayout({
         geistMono.variable,
       )}
     >
-      <body className="h-full flex flex-col overflow-hidden">
-        <ImpersonationBanner />
-        {children}
-      </body>
+      {/*
+        The column + overflow-hidden is the app frame: the impersonation banner
+        (rendered by the (app) shell) is a flex-shrink-0 band and every page
+        below it claims the rest with `min-h-0 flex-1` — never `h-dvh`, which
+        would push content past the viewport by the banner's height.
+      */}
+      <body className="h-full flex flex-col overflow-hidden">{children}</body>
     </html>
   );
 }

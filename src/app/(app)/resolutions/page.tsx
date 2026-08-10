@@ -8,6 +8,7 @@ import {
   ArtifactCard,
   type ArtifactListItem,
 } from "@/components/resolutions/artifact-card";
+import { CHAT_HOME } from "@/lib/routes";
 
 /**
  * The treasury: every resolved investigation across the team, searchable
@@ -61,10 +62,10 @@ export default function ResolutionsPage() {
   );
 
   return (
-    <main className="h-dvh overflow-y-auto">
-      <div className="mx-auto w-full max-w-[920px] px-6 py-8">
+    <main className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-[920px] px-6 pb-20 pt-8">
       <Link
-        href="/"
+        href={CHAT_HOME}
         className="inline-flex items-center gap-2 text-body-sm text-bone-gray hover:text-warm-off-white"
       >
         <ArrowLeft className="size-3.5" />

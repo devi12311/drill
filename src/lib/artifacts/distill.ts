@@ -120,14 +120,39 @@ export const ARTIFACT_RESPONSE_FORMAT = {
 const DISTILL_PROMPT = `You are distilling a finished, RESOLVED investigation into a knowledge-base artifact for other engineers who will hit the same problem.
 
 Rules:
-- Use ONLY the transcript below. Do NOT run tools. Do NOT invent services, errors, or steps that are not in the transcript.
+- Base symptoms, affected_services, and graph ONLY on the transcript below. Do NOT run tools. Do NOT invent services, errors, or graph relationships that are not evidenced.
 - affected_services: exact names as seen in the cluster/logs.
 - graph: nodes are the involved services/components/datastores/external systems; edge direction is failure propagation (source's failure impacts target). Keep it small and truthful — only relationships evidenced in the transcript.
+- If a "RESOLVER'S ACCOUNT OF THE ACTUAL FIX" section is present, treat it as authoritative for root_cause, resolution_steps, and verification_steps — see that section's own instructions.
 - Use "" or [] for anything genuinely unknown.
 
 Transcript of the investigation:
 
 `;
+
+/** Cap the free-text note so it can't blow the distillation context budget. */
+const NOTE_BUDGET_CHARS = 8_000;
+
+/**
+ * Authoritative fix-context supplied by the engineer who resolved the
+ * incident. Appended AFTER the transcript by {@link distillArtifact} — never
+ * inside {@link buildTranscript}'s truncatable region — so a long
+ * investigation can never silently drop the resolver's own words.
+ */
+function resolverNoteBlock(note: string): string {
+  return `
+
+=== RESOLVER'S ACCOUNT OF THE ACTUAL FIX (AUTHORITATIVE) ===
+The engineer who resolved this incident describes what they actually did below.
+Treat it as ground truth. It may include actions taken OUTSIDE the chat that are
+not visible in the transcript. When it conflicts with or goes beyond the
+transcript, PREFER this account for root_cause, resolution_steps, and
+verification_steps. (Still base symptoms, affected_services, and graph on the
+transcript evidence.)
+
+${note.trim().slice(0, NOTE_BUDGET_CHARS)}
+`;
+}
 
 /**
  * Condense the conversation to user asks + assistant analyses. When over
@@ -195,8 +220,13 @@ export async function distillArtifact(
   agent: AgentTarget,
   model: string,
   turns: { role: string; content: string }[],
+  note?: string,
 ): Promise<ArtifactDraft> {
-  const ask = DISTILL_PROMPT + buildTranscript(turns);
+  const trimmedNote = note?.trim();
+  const ask =
+    DISTILL_PROMPT +
+    buildTranscript(turns) +
+    (trimmedNote ? resolverNoteBlock(trimmedNote) : "");
   try {
     return parseArtifactDraft(await askHolmes(agent, model, ask));
   } catch {

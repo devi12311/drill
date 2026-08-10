@@ -3,8 +3,10 @@ import type { NextRequest } from "next/server";
 import { verifySession, verifyImpersonation } from "@/lib/auth/jwt";
 import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 import { IMPERSONATION_COOKIE } from "@/lib/auth/impersonation-cookie";
+import { isAdminPath } from "@/lib/routes";
 
 const PUBLIC_PATHS = ["/login", "/register"];
+const ADMIN_API_PREFIX = "/api/admin/";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -27,14 +29,12 @@ export async function proxy(request: NextRequest) {
   }
 
   const isApi = pathname.startsWith("/api/");
-  const isAdminPath =
-    pathname === "/admin" ||
-    pathname.startsWith("/admin/") ||
-    pathname.startsWith("/api/admin/");
+  const isAdminSurface =
+    isAdminPath(pathname) || pathname.startsWith(ADMIN_API_PREFIX);
 
   // Admin guard (edge check off the JWT role claim; handlers re-check via
   // requireAdmin/getAdminActor for defense in depth).
-  if (isAdminPath && session.role !== "admin") {
+  if (isAdminSurface && session.role !== "admin") {
     if (isApi) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     return NextResponse.redirect(new URL("/", request.url));
   }
@@ -49,7 +49,7 @@ export async function proxy(request: NextRequest) {
       const decoded = await verifyImpersonation(impToken);
       const impersonating = decoded != null && decoded.actor === session.sub;
       const allowed =
-        pathname.startsWith("/api/admin/") ||
+        pathname.startsWith(ADMIN_API_PREFIX) ||
         pathname.startsWith("/api/auth/logout");
       if (impersonating && !allowed) {
         return NextResponse.json(

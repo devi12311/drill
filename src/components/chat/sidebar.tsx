@@ -1,15 +1,7 @@
 "use client";
 
-import Link from "next/link";
-import {
-  BookMarked,
-  ChevronDown,
-  LogOut,
-  Plus,
-  Settings2,
-  ShieldCheck,
-  Trash2,
-} from "lucide-react";
+import { usePathname } from "next/navigation";
+import { BookMarked, ChevronDown, Plus, Settings2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -18,6 +10,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { BrandMark } from "@/components/shell/brand-mark";
+import { SideNavLink } from "@/components/shell/side-nav-link";
+import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
 import { cn } from "@/lib/utils";
 import type { AgentSummary } from "@/components/agents/agents-dialog";
 
@@ -40,8 +35,6 @@ function shortDate(iso: string) {
 }
 
 export function Sidebar({
-  username,
-  isAdmin = false,
   agents,
   activeAgentId,
   onSelectAgent,
@@ -51,11 +44,8 @@ export function Sidebar({
   onNewChat,
   onSelect,
   onDelete,
-  onLogout,
   listError,
 }: {
-  username: string | null;
-  isAdmin?: boolean;
   agents: AgentSummary[];
   activeAgentId: string | null;
   onSelectAgent: (id: string) => void;
@@ -65,21 +55,14 @@ export function Sidebar({
   onNewChat: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onLogout: () => void;
   listError: string | null;
 }) {
+  const pathname = usePathname();
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
-      <div className="px-5 pb-4 pt-5">
-        <div className="font-mono text-body font-medium tracking-[0.2em] text-warm-off-white">
-          DRILL
-        </div>
-        <div className="text-caption-tracked mt-1 uppercase text-bone-gray">
-          Root cause, on demand
-        </div>
-      </div>
+      <BrandMark className="px-5 pb-4 pt-5" />
 
       <div className="space-y-2 px-3">
         <DropdownMenu>
@@ -128,23 +111,13 @@ export function Sidebar({
           New investigation
         </Button>
 
-        <Link
+        {/* Admin lives behind the mode island (bottom-right), not here. */}
+        <SideNavLink
           href="/resolutions"
-          className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-body-sm text-pale-stone hover:bg-smoke-charcoal hover:text-warm-off-white"
-        >
-          <BookMarked className="size-4 text-bone-gray" />
-          Resolutions
-        </Link>
-
-        {isAdmin && (
-          <Link
-            href="/admin"
-            className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-body-sm text-pale-stone hover:bg-smoke-charcoal hover:text-warm-off-white"
-          >
-            <ShieldCheck className="size-4 text-bone-gray" />
-            Admin
-          </Link>
-        )}
+          label="Resolutions"
+          icon={BookMarked}
+          active={pathname.startsWith("/resolutions")}
+        />
       </div>
 
       <div className="mt-6 min-h-0 flex-1 overflow-y-auto px-3 pb-4">
@@ -203,24 +176,7 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="flex items-center justify-between border-t border-sidebar-border px-5 py-3">
-        <div className="min-w-0">
-          <div className="truncate font-mono text-[12px] text-pale-stone">
-            {username ?? "…"}
-          </div>
-          <div className="text-caption-tracked uppercase text-bone-gray">
-            Signed in
-          </div>
-        </div>
-        <button
-          type="button"
-          aria-label="Log out"
-          onClick={onLogout}
-          className="rounded-sm p-1.5 text-bone-gray hover:bg-smoke-charcoal hover:text-warm-off-white"
-        >
-          <LogOut className="size-4" />
-        </button>
-      </div>
+      <SidebarUserFooter />
     </aside>
   );
 }

@@ -18,6 +18,8 @@ import {
 } from "./messages";
 import { LiveTimeline, type LiveToolCall } from "./tool-timeline";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
+import { useSession } from "@/components/session/session-provider";
+import { cn } from "@/lib/utils";
 import type { FollowUpAction, ToolCall } from "@/lib/holmes/types";
 import { DEFAULT_MODEL } from "@/lib/holmes/types";
 
@@ -78,6 +80,7 @@ export function Chat({
   onActivity: () => void;
 }) {
   const router = useRouter();
+  const { user } = useSession();
   const [entries, setEntries] = useState<ChatEntry[]>(initialEntries);
   const [live, setLive] = useState<LiveState | null>(null);
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -343,7 +346,18 @@ export function Chat({
           )}
         </div>
       </div>
-      <div className="mx-auto w-full max-w-[820px] px-6 pb-6 pt-2">
+      {/*
+        The mode island is fixed in the bottom-right, where it would sit on the
+        composer's send button on narrow viewports. Reserve room for it — but
+        only for the admins who actually see it, and only below xl, where the
+        centred column no longer leaves that margin on its own.
+      */}
+      <div
+        className={cn(
+          "mx-auto w-full max-w-[820px] px-6 pb-6 pt-2",
+          user.actorIsAdmin && "pr-20 xl:pr-6",
+        )}
+      >
         <Composer
           agentId={agentId}
           onSend={send}
