@@ -1,16 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 /**
  * Client fetch for admin endpoints, re-run whenever `deps` change (typically
  * the selected time range). Mirrors the app's existing client-fetch pattern
  * (/resolutions) with AbortController cancellation.
+ *
+ * `refetch()` re-runs the same request — pages that mutate (create/delete a
+ * cluster, mute a concern) call it instead of reloading the whole document.
  */
 export function useAdminData<T>(url: string, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const refetch = useCallback(() => setReloadKey((n) => n + 1), []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -32,7 +38,7 @@ export function useAdminData<T>(url: string, deps: unknown[] = []) {
     })();
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [...deps, reloadKey]);
 
-  return { data, loading, error };
+  return { data, loading, error, refetch };
 }

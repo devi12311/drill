@@ -1,0 +1,91 @@
+import {
+  SEVERITIES,
+  WORKLOAD_KINDS,
+  type AssessmentTarget,
+  type Severity,
+  type WorkloadKind,
+} from "./types";
+import type { JobCheckOverride } from "@/lib/db/monitoring-queries";
+
+/**
+ * Request-body parsing shared by the job create and update routes, so the two
+ * cannot drift on what a valid target selection is. Throws with a user-facing
+ * message (the repo validates by hand — there is no zod).
+ */
+
+/**
+ * One Holmes call covers the whole selection, so a very large job spreads the
+ * model's attention thin and coverage gets unreliable. The form warns above
+ * this; the hard cap below is what protects the prompt.
+ */
+export const TARGET_SOFT_LIMIT = 15;
+export const TARGET_HARD_LIMIT = 40;
+
+export function parseTargetList(raw: unknown): AssessmentTarget[] {
+  if (!Array.isArray(raw) || raw.length === 0)
+    throw new Error("Select at least one Deployment or StatefulSet");
+  if (raw.length > TARGET_HARD_LIMIT)
+    throw new Error(
+      `A job can target at most ${TARGET_HARD_LIMIT} workloads — one assessment covers them all, and beyond that the results stop being trustworthy. Split it into several jobs.`,
+    );
+
+  const seen = new Set<string>();
+  const targets: AssessmentTarget[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object")
+      throw new Error("Each target must be an object");
+    const t = item as Record<string, unknown>;
+    const kind = typeof t.kind === "string" ? t.kind.toLowerCase() : "";
+    const namespace = typeof t.namespace === "string" ? t.namespace.trim() : "";
+    const name = typeof t.name === "string" ? t.name.trim() : "";
+    if (!(WORKLOAD_KINDS as readonly string[]).includes(kind))
+      throw new Error(`Target kind must be one of: ${WORKLOAD_KINDS.join(", ")}`);
+    if (!namespace || !name)
+      throw new Error("Each target needs a namespace and a name");
+    const key = `${kind}/${namespace}/${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push({ kind: kind as WorkloadKind, namespace, name });
+  }
+  return targets;
+}
+
+/**
+ * Per-job deviations from the catalogue. Only meaningful rows are kept — a check
+ * left enabled with no severity override simply inherits, and storing that would
+ * mean a job silently pinning today's catalogue instead of following it.
+ */
+export function parseOverrides(raw: unknown): JobCheckOverride[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new Error("overrides must be an array");
+  const seen = new Set<string>();
+  const parsed: JobCheckOverride[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object")
+      throw new Error("Each override must be an object");
+    const o = item as Record<string, unknown>;
+    const checkId = typeof o.checkId === "string" ? o.checkId.trim().toUpperCase() : "";
+    if (!checkId) throw new Error("Each override needs a checkId");
+    if (seen.has(checkId)) continue;
+    seen.add(checkId);
+    const severity = o.severityOverride;
+    if (
+      severity !== undefined &&
+      severity !== null &&
+      severity !== "" &&
+      !(SEVERITIES as readonly string[]).includes(String(severity))
+    )
+      throw new Error(
+        `severityOverride must be null or one of: ${SEVERITIES.join(", ")}`,
+      );
+    parsed.push({
+      checkId,
+      enabled: o.enabled !== false,
+      severityOverride:
+        severity === undefined || severity === null || severity === ""
+          ? null
+          : (severity as Severity),
+    });
+  }
+  return parsed;
+}

@@ -1,0 +1,138 @@
+{
+  "_comment": "Canned assessment for HOLMES_FIXTURE=1 — lets the monitoring UI and the reconciliation logic be exercised without spending money on a real investigation. Findings carry no target: src/lib/monitoring/fixture.ts assigns the job's real workloads round-robin and then runs the result through the REAL validator, so this path tests parsing too. Edit/remove a finding to test auto-resolution and reopening.",
+  "security": {
+    "summary": "Two critical exposures dominate: a privileged container and a ServiceAccount with cluster-wide secret access. Namespace-level network isolation is absent, so a compromise of any of these workloads reaches the rest of the namespace unimpeded.",
+    "findings": [
+      {
+        "check_id": "SEC.PRIVILEGED",
+        "scope": "app",
+        "effective_severity": "critical",
+        "severity_rationale": "",
+        "title": "Container \"app\" runs privileged, granting full host access",
+        "rationale": "`securityContext.privileged: true` disables all container isolation — the process can access every device on the node, load kernel modules and escape to the host. Nothing in the workload's command suggests it needs device access.",
+        "remediation": "Remove `securityContext.privileged` from the container and add back only the specific capabilities required, e.g. `securityContext.capabilities.add: [\"NET_BIND_SERVICE\"]`.",
+        "evidence": [
+          { "label": "spec.template.spec.containers[0].securityContext.privileged", "value": "true" },
+          { "label": "capabilities.drop", "value": "(not set)" }
+        ]
+      },
+      {
+        "check_id": "SEC.RBAC_OVERPRIVILEGED",
+        "scope": "sa/default",
+        "effective_severity": "critical",
+        "severity_rationale": "",
+        "title": "ServiceAccount can list secrets cluster-wide",
+        "rationale": "A ClusterRoleBinding grants this workload's ServiceAccount a ClusterRole with `secrets: [get, list]` across all namespaces. Any RCE in this pod becomes a cluster-wide credential compromise.",
+        "remediation": "Replace the ClusterRoleBinding with a namespaced RoleBinding, and narrow the rule to the specific secret names the workload reads via `resourceNames`.",
+        "evidence": [
+          { "label": "ClusterRoleBinding", "value": "app-secret-reader → ClusterRole/secret-reader" },
+          { "label": "offending rule", "value": "apiGroups:[\"\"] resources:[\"secrets\"] verbs:[\"get\",\"list\"]" }
+        ]
+      },
+      {
+        "check_id": "SEC.NO_NETWORK_POLICY",
+        "scope": "",
+        "effective_severity": "medium",
+        "severity_rationale": "",
+        "title": "No NetworkPolicy selects this workload's pods",
+        "rationale": "The namespace contains no NetworkPolicy matching these pod labels, so both ingress and egress are unrestricted — lateral movement from any other pod in the cluster is unimpeded.",
+        "remediation": "Add a default-deny ingress NetworkPolicy for the namespace, then allow only the ports this workload actually serves.",
+        "evidence": [
+          { "label": "NetworkPolicies in namespace", "value": "none" },
+          { "label": "pod labels", "value": "app.kubernetes.io/name=app" }
+        ]
+      },
+      {
+        "check_id": "SEC.MUTABLE_IMAGE_TAG",
+        "scope": "app",
+        "effective_severity": "medium",
+        "severity_rationale": "",
+        "title": "Image uses the mutable :latest tag",
+        "rationale": "The container references `:latest`, so the running code cannot be identified from the manifest and a pod restart can silently change the deployed version.",
+        "remediation": "Pin the image to an immutable digest, e.g. `image: registry/app@sha256:…`, or at minimum a versioned tag.",
+        "evidence": [
+          { "label": "image", "value": "registry.internal/app:latest" },
+          { "label": "imagePullPolicy", "value": "Always" }
+        ]
+      }
+    ],
+    "skipped": [
+      {
+        "check_id": "SEC.SECCOMP",
+        "reason": "Pod Security Admission labels on the namespace were not readable with the current permissions, so the effective seccomp default could not be established."
+      }
+    ]
+  },
+  "performance": {
+    "summary": "One workload is restarting under memory pressure while having no memory limit set, which is also why the node is over-committed. Redundancy is the second theme: single replicas with no disruption budget mean routine node drains are full outages.",
+    "findings": [
+      {
+        "check_id": "PERF.RESTART_CHURN",
+        "scope": "app",
+        "effective_severity": "critical",
+        "severity_rationale": "",
+        "title": "Pods restarting repeatedly (14 restarts in 6h)",
+        "rationale": "The container has restarted 14 times in the last six hours, entering CrashLoopBackOff twice. Last state shows exit code 137, i.e. the kernel killed it — consistent with the missing memory limit reported separately.",
+        "remediation": "Set a memory limit based on observed working set, then re-check; if restarts persist, capture the pre-restart logs with `kubectl logs --previous`.",
+        "evidence": [
+          { "label": "restartCount", "value": "14" },
+          { "label": "lastState.terminated", "value": "exitCode 137, reason OOMKilled" },
+          { "label": "waiting reason", "value": "CrashLoopBackOff" }
+        ]
+      },
+      {
+        "check_id": "PERF.NO_RESOURCE_LIMITS",
+        "scope": "app",
+        "effective_severity": "high",
+        "severity_rationale": "",
+        "title": "Container \"app\" has no memory limit",
+        "rationale": "With no `resources.limits.memory`, the container can consume all node memory before the kubelet evicts it, taking unrelated workloads down with it. The observed OOM kills confirm this is not theoretical.",
+        "remediation": "Set `resources.limits.memory` to roughly 1.3x the observed peak working set, and match `resources.requests.memory` to the steady-state figure.",
+        "evidence": [
+          { "label": "resources.limits", "value": "{}" },
+          { "label": "resources.requests.memory", "value": "128Mi" }
+        ]
+      },
+      {
+        "check_id": "PERF.SINGLE_REPLICA",
+        "scope": "",
+        "effective_severity": "medium",
+        "severity_rationale": "",
+        "title": "Runs a single replica — any disruption is an outage",
+        "rationale": "`spec.replicas: 1` with no HorizontalPodAutoscaler, so a node drain, eviction or crash means total unavailability until the pod is rescheduled.",
+        "remediation": "Raise `spec.replicas` to at least 2 and confirm the workload tolerates concurrent instances.",
+        "evidence": [
+          { "label": "spec.replicas", "value": "1" },
+          { "label": "HPA", "value": "none" }
+        ]
+      },
+      {
+        "check_id": "PERF.NO_PDB",
+        "scope": "",
+        "effective_severity": "medium",
+        "severity_rationale": "",
+        "title": "No PodDisruptionBudget protects this workload",
+        "rationale": "No PDB selects these pods, so a voluntary disruption (node drain, cluster upgrade) can remove every replica at once instead of respecting a minimum availability.",
+        "remediation": "Add a PodDisruptionBudget with `minAvailable: 1` selecting this workload's labels.",
+        "evidence": [
+          { "label": "PDBs matching labels", "value": "none" },
+          { "label": "namespace PDBs", "value": "0" }
+        ]
+      }
+    ],
+    "skipped": [
+      {
+        "check_id": "PERF.CPU_THROTTLING",
+        "reason": "No Prometheus datasource is reachable in fixture mode, so CFS throttling ratios could not be measured."
+      },
+      {
+        "check_id": "PERF.RIGHT_SIZING",
+        "reason": "No Prometheus datasource is reachable in fixture mode, so historical CPU/memory usage could not be compared with requests."
+      },
+      {
+        "check_id": "PERF.PVC_PRESSURE",
+        "reason": "No Prometheus datasource is reachable in fixture mode, so volume utilisation could not be measured."
+      }
+    ]
+  }
+}

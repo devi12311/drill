@@ -4,11 +4,16 @@ import { AdminSidebar } from "@/components/admin/admin-sidebar";
 import { AdminTopBar } from "@/components/admin/admin-topbar";
 
 /**
- * Admin shell: persistent sidebar + breadcrumb bar + scrolling content column.
+ * Admin SHELL: persistent sidebar + breadcrumb bar + the region pages fill.
  *
  * The `getAdminActor()` gate is belt to the proxy's edge guard and the
  * per-route `requireAdmin` checks (braces) — and it reads the *real* session,
  * so an admin impersonating a user keeps access to the panel.
+ *
+ * Page chrome (the centred reading column) is deliberately NOT here: it lives in
+ * `(panel)/layout.tsx`, which every ordinary admin page sits under. Sections
+ * that need a different frame — `monitoring/`, with its own navigation column —
+ * are siblings of that group and bring their own.
  */
 export default async function AdminLayout({
   children,
@@ -22,12 +27,7 @@ export default async function AdminLayout({
       <AdminSidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <AdminTopBar />
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          {/* pb-20 keeps the last row clear of the mode island. */}
-          <div className="mx-auto w-full max-w-[1100px] px-8 pb-20 pt-8">
-            {children}
-          </div>
-        </main>
+        {children}
       </div>
     </div>
   );

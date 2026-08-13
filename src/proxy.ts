@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { verifySession, verifyImpersonation } from "@/lib/auth/jwt";
 import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 import { IMPERSONATION_COOKIE } from "@/lib/auth/impersonation-cookie";
-import { isAdminPath } from "@/lib/routes";
+import { isAdminPath, isInternalApiPath } from "@/lib/routes";
 
 const PUBLIC_PATHS = ["/login", "/register"];
 const ADMIN_API_PREFIX = "/api/admin/";
@@ -18,6 +18,11 @@ export async function proxy(request: NextRequest) {
   ) {
     return NextResponse.next();
   }
+
+  // Machine-to-machine endpoints have no session cookie to check — the handler
+  // authenticates the shared scheduler secret itself, and 404s when no secret
+  // is configured so the surface does not exist by default.
+  if (isInternalApiPath(pathname)) return NextResponse.next();
 
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifySession(token) : null;

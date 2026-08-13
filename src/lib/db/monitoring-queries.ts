@@ -1,0 +1,1172 @@
+import "server-only";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  lt,
+  lte,
+  sql,
+} from "drizzle-orm";
+import { db } from "./index";
+import {
+  monitoringChecks,
+  monitoringClusters,
+  monitoringConcerns,
+  monitoringJobCheckOverrides,
+  monitoringJobTargets,
+  monitoringJobs,
+  monitoringRunFindings,
+  monitoringRuns,
+  monitoringWorkloads,
+} from "./schema";
+import { DISMISSED_STATUSES } from "@/lib/monitoring/types";
+import type {
+  AssessmentTarget,
+  ConcernStatus,
+  MonitorCategory,
+  RunCoverage,
+  RunTrigger,
+  Severity,
+  WorkloadKind,
+} from "@/lib/monitoring/types";
+
+/**
+ * All monitoring-module data access. Separate from the user-scoped
+ * `queries.ts` (which stays pristine) and from `admin-queries.ts` (analytics),
+ * following the precedent in docs/DECISIONS.md.
+ *
+ * Monitoring rows are GLOBAL admin infrastructure — nothing here is scoped by
+ * user, and every caller is behind `requireAdmin()`.
+ */
+
+// ---- Check catalogue (the live rubric) ----
+
+export interface CheckRow {
+  id: string;
+  category: MonitorCategory;
+  title: string;
+  question: string;
+  evidence: string;
+  reference: string;
+  baseSeverity: Severity;
+  appliesTo: string[];
+  requires: string | null;
+  resolveAfterAbsentRuns: number;
+  builtin: boolean;
+  enabled: boolean;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export async function listAllChecks(): Promise<CheckRow[]> {
+  return db
+    .select()
+    .from(monitoringChecks)
+    .orderBy(asc(monitoringChecks.category), asc(monitoringChecks.id));
+}
+
+export async function getCheckRow(id: string): Promise<CheckRow | null> {
+  const [row] = await db
+    .select()
+    .from(monitoringChecks)
+    .where(eq(monitoringChecks.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Seed the built-in rubric. `onConflictDoNothing` is the whole point: an admin
+ * who retunes or disables a built-in must never have that edit reverted by the
+ * next process start.
+ */
+export async function seedBuiltinChecks(
+  rows: Omit<CheckRow, "createdAt" | "updatedAt" | "version" | "enabled">[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const inserted = await db
+    .insert(monitoringChecks)
+    .values(rows.map((r) => ({ ...r, builtin: true })))
+    .onConflictDoNothing()
+    .returning({ id: monitoringChecks.id });
+  return inserted.length;
+}
+
+export async function createCheck(
+  input: Omit<CheckRow, "createdAt" | "updatedAt" | "version" | "builtin">,
+  createdBy: string,
+): Promise<CheckRow> {
+  const [row] = await db
+    .insert(monitoringChecks)
+    .values({ ...input, builtin: false, createdBy })
+    .returning();
+  return row;
+}
+
+export async function updateCheck(
+  id: string,
+  fields: Partial<Omit<CheckRow, "id" | "builtin" | "createdAt" | "updatedAt">>,
+): Promise<CheckRow | null> {
+  const [row] = await db
+    .update(monitoringChecks)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(eq(monitoringChecks.id, id))
+    .returning();
+  return row ?? null;
+}
+
+export async function deleteCheck(id: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringChecks)
+    .where(eq(monitoringChecks.id, id))
+    .returning({ id: monitoringChecks.id });
+  return rows.length > 0;
+}
+
+/** Concern history referencing a check — what makes deletion unsafe. */
+export async function countConcernsForCheck(checkId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(monitoringConcerns)
+    .where(eq(monitoringConcerns.checkId, checkId));
+  return row?.n ?? 0;
+}
+
+/**
+ * Close concerns for a check that has just stopped being evaluated. Without
+ * this they would sit open forever: reconciliation deliberately never touches a
+ * concern whose check did not run, so nothing else can ever close them.
+ * Scoped to one job when the check was disabled per-job rather than globally.
+ */
+export async function autoResolveConcernsForDisabledCheck(
+  checkId: string,
+  jobId?: string,
+): Promise<number> {
+  const rows = await db
+    .update(monitoringConcerns)
+    .set({
+      status: "auto_resolved",
+      lastResolvedAt: new Date(),
+      dismissalReason: "check_disabled",
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(monitoringConcerns.checkId, checkId),
+        eq(monitoringConcerns.status, "open"),
+        ...(jobId ? [eq(monitoringConcerns.jobId, jobId)] : []),
+      ),
+    )
+    .returning({ id: monitoringConcerns.id });
+  return rows.length;
+}
+
+// ---- Per-job catalogue overrides ----
+
+export interface JobCheckOverride {
+  checkId: string;
+  enabled: boolean;
+  severityOverride: Severity | null;
+}
+
+export async function listJobOverrides(
+  jobId: string,
+): Promise<JobCheckOverride[]> {
+  return db
+    .select({
+      checkId: monitoringJobCheckOverrides.checkId,
+      enabled: monitoringJobCheckOverrides.enabled,
+      severityOverride: monitoringJobCheckOverrides.severityOverride,
+    })
+    .from(monitoringJobCheckOverrides)
+    .where(eq(monitoringJobCheckOverrides.jobId, jobId));
+}
+
+/** Replace a job's overrides wholesale; rows equal to "inherit" are omitted. */
+export async function replaceJobOverrides(
+  jobId: string,
+  overrides: JobCheckOverride[],
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(monitoringJobCheckOverrides)
+      .where(eq(monitoringJobCheckOverrides.jobId, jobId));
+    const meaningful = overrides.filter(
+      (o) => !o.enabled || o.severityOverride !== null,
+    );
+    if (meaningful.length > 0) {
+      await tx
+        .insert(monitoringJobCheckOverrides)
+        .values(meaningful.map((o) => ({ jobId, ...o })));
+    }
+  });
+}
+
+// ---- Clusters ----
+
+/** Cluster row without secrets — the only shape that may reach the client. */
+export interface ClusterSummary {
+  id: string;
+  name: string;
+  holmesUrl: string;
+  lastValidatedAt: Date | null;
+  lastDiscoveredAt: Date | null;
+  discoveryError: string | null;
+  createdAt: Date;
+}
+
+const CLUSTER_SAFE_COLUMNS = {
+  id: monitoringClusters.id,
+  name: monitoringClusters.name,
+  holmesUrl: monitoringClusters.holmesUrl,
+  lastValidatedAt: monitoringClusters.lastValidatedAt,
+  lastDiscoveredAt: monitoringClusters.lastDiscoveredAt,
+  discoveryError: monitoringClusters.discoveryError,
+  createdAt: monitoringClusters.createdAt,
+};
+
+export interface ClusterListRow extends ClusterSummary {
+  workloadCount: number;
+  jobCount: number;
+  openConcerns: number;
+}
+
+/**
+ * Correlated counts are written as plain, fully-qualified SQL on purpose.
+ * Interpolating drizzle column objects into a raw `sql` template emits
+ * UNQUALIFIED identifiers (`"id"`), which inside a subquery bind to the inner
+ * table — silently comparing the wrong columns, or failing as ambiguous.
+ */
+export async function listClusters(): Promise<ClusterListRow[]> {
+  const rows = await db
+    .select({
+      ...CLUSTER_SAFE_COLUMNS,
+      workloadCount: sql<number>`(select count(*)::int from monitoring_workloads w
+        where w.cluster_id = monitoring_clusters.id)`,
+      jobCount: sql<number>`(select count(*)::int from monitoring_jobs j
+        where j.cluster_id = monitoring_clusters.id)`,
+      openConcerns: sql<number>`(select count(*)::int from monitoring_concerns c
+        join monitoring_jobs j on j.id = c.job_id
+        where j.cluster_id = monitoring_clusters.id and c.status = 'open')`,
+    })
+    .from(monitoringClusters)
+    .orderBy(asc(monitoringClusters.name));
+  return rows;
+}
+
+export async function getClusterSummary(
+  id: string,
+): Promise<ClusterSummary | null> {
+  const [row] = await db
+    .select(CLUSTER_SAFE_COLUMNS)
+    .from(monitoringClusters)
+    .where(eq(monitoringClusters.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Full row INCLUDING kubeconfig + Holmes key — server-side use only. */
+export async function getClusterSecrets(id: string) {
+  const [row] = await db
+    .select()
+    .from(monitoringClusters)
+    .where(eq(monitoringClusters.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function createCluster(input: {
+  name: string;
+  kubeconfig: string;
+  holmesUrl: string;
+  holmesApiKey: string;
+  createdBy: string;
+}): Promise<ClusterSummary> {
+  const [row] = await db
+    .insert(monitoringClusters)
+    .values({ ...input, lastValidatedAt: new Date() })
+    .returning(CLUSTER_SAFE_COLUMNS);
+  return row;
+}
+
+export async function updateCluster(
+  id: string,
+  fields: Partial<{
+    name: string;
+    kubeconfig: string;
+    holmesUrl: string;
+    holmesApiKey: string;
+    lastValidatedAt: Date;
+  }>,
+): Promise<ClusterSummary | null> {
+  const [row] = await db
+    .update(monitoringClusters)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(eq(monitoringClusters.id, id))
+    .returning(CLUSTER_SAFE_COLUMNS);
+  return row ?? null;
+}
+
+export async function deleteCluster(id: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringClusters)
+    .where(eq(monitoringClusters.id, id))
+    .returning({ id: monitoringClusters.id });
+  return rows.length > 0;
+}
+
+// ---- Workload inventory ----
+
+export interface WorkloadRow {
+  kind: WorkloadKind;
+  namespace: string;
+  name: string;
+  replicas: number | null;
+  images: string[];
+  lastSeenAt: Date;
+}
+
+export async function listWorkloads(clusterId: string): Promise<WorkloadRow[]> {
+  return db
+    .select({
+      kind: monitoringWorkloads.kind,
+      namespace: monitoringWorkloads.namespace,
+      name: monitoringWorkloads.name,
+      replicas: monitoringWorkloads.replicas,
+      images: monitoringWorkloads.images,
+      lastSeenAt: monitoringWorkloads.lastSeenAt,
+    })
+    .from(monitoringWorkloads)
+    .where(eq(monitoringWorkloads.clusterId, clusterId))
+    .orderBy(
+      asc(monitoringWorkloads.namespace),
+      asc(monitoringWorkloads.kind),
+      asc(monitoringWorkloads.name),
+    );
+}
+
+/**
+ * Replace a cluster's inventory with what discovery just saw: upsert every
+ * workload (re-stamping `lastSeenAt`) and delete the rows it did not see, in
+ * one transaction so the picker never observes a half-empty cluster.
+ */
+export async function replaceWorkloads(
+  clusterId: string,
+  workloads: {
+    kind: WorkloadKind;
+    namespace: string;
+    name: string;
+    replicas: number | null;
+    images: string[];
+  }[],
+): Promise<{ total: number; removed: number }> {
+  return db.transaction(async (tx) => {
+    const seenAt = new Date();
+    if (workloads.length > 0) {
+      // Chunked: a cluster with thousands of workloads would otherwise blow
+      // past Postgres's bind-parameter limit in a single INSERT.
+      const CHUNK = 500;
+      for (let i = 0; i < workloads.length; i += CHUNK) {
+        await tx
+          .insert(monitoringWorkloads)
+          .values(
+            workloads.slice(i, i + CHUNK).map((w) => ({
+              clusterId,
+              ...w,
+              lastSeenAt: seenAt,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [
+              monitoringWorkloads.clusterId,
+              monitoringWorkloads.kind,
+              monitoringWorkloads.namespace,
+              monitoringWorkloads.name,
+            ],
+            set: {
+              replicas: sql`excluded.replicas`,
+              images: sql`excluded.images`,
+              lastSeenAt: sql`excluded.last_seen_at`,
+            },
+          });
+      }
+    }
+    const removed = await tx
+      .delete(monitoringWorkloads)
+      .where(
+        and(
+          eq(monitoringWorkloads.clusterId, clusterId),
+          // `lt()`, not a raw sql template: the template does not apply the
+          // column's type mapper, so a JS Date reaches Postgres as
+          // "Mon Aug 10 2026 …" and the query fails.
+          lt(monitoringWorkloads.lastSeenAt, seenAt),
+        ),
+      )
+      .returning({ id: monitoringWorkloads.id });
+    await tx
+      .update(monitoringClusters)
+      .set({ lastDiscoveredAt: seenAt, discoveryError: null })
+      .where(eq(monitoringClusters.id, clusterId));
+    return { total: workloads.length, removed: removed.length };
+  });
+}
+
+export async function recordDiscoveryError(clusterId: string, error: string) {
+  await db
+    .update(monitoringClusters)
+    .set({ discoveryError: error.slice(0, 2000) })
+    .where(eq(monitoringClusters.id, clusterId));
+}
+
+// ---- Jobs ----
+
+export interface JobRow {
+  id: string;
+  clusterId: string;
+  name: string;
+  type: MonitorCategory;
+  model: string;
+  schedule: string | null;
+  enabled: boolean;
+  nextRunAt: Date | null;
+  createdAt: Date;
+}
+
+export interface JobListRow extends JobRow {
+  targetCount: number;
+  openConcerns: number;
+  criticalConcerns: number;
+  lastRunAt: Date | null;
+}
+
+/** Plain qualified SQL, for the reason documented on `listClusters` above. */
+const JOB_LIST_EXTRAS = {
+  targetCount: sql<number>`(select count(*)::int from monitoring_job_targets t
+    where t.job_id = monitoring_jobs.id)`,
+  openConcerns: sql<number>`(select count(*)::int from monitoring_concerns c
+    where c.job_id = monitoring_jobs.id and c.status = 'open')`,
+  criticalConcerns: sql<number>`(select count(*)::int from monitoring_concerns c
+    where c.job_id = monitoring_jobs.id and c.status = 'open'
+      and c.effective_severity = 'critical')`,
+  lastRunAt: sql<Date | null>`(select max(r.finished_at) from monitoring_runs r
+    where r.job_id = monitoring_jobs.id)`,
+};
+
+/** Every job, grouped by cluster — feeds the module's tree sidebar. */
+export async function listJobs(clusterId?: string): Promise<JobListRow[]> {
+  return db
+    .select({
+      id: monitoringJobs.id,
+      clusterId: monitoringJobs.clusterId,
+      name: monitoringJobs.name,
+      type: monitoringJobs.type,
+      model: monitoringJobs.model,
+      schedule: monitoringJobs.schedule,
+      enabled: monitoringJobs.enabled,
+      nextRunAt: monitoringJobs.nextRunAt,
+      createdAt: monitoringJobs.createdAt,
+      ...JOB_LIST_EXTRAS,
+    })
+    .from(monitoringJobs)
+    .where(clusterId ? eq(monitoringJobs.clusterId, clusterId) : undefined)
+    .orderBy(asc(monitoringJobs.name));
+}
+
+export interface JobDetail extends JobRow {
+  targets: AssessmentTarget[];
+}
+
+export async function getJob(id: string): Promise<JobDetail | null> {
+  const [job] = await db
+    .select()
+    .from(monitoringJobs)
+    .where(eq(monitoringJobs.id, id))
+    .limit(1);
+  if (!job) return null;
+  return { ...job, targets: await getJobTargets(id) };
+}
+
+export async function getJobTargets(
+  jobId: string,
+): Promise<AssessmentTarget[]> {
+  return db
+    .select({
+      kind: monitoringJobTargets.kind,
+      namespace: monitoringJobTargets.namespace,
+      name: monitoringJobTargets.name,
+    })
+    .from(monitoringJobTargets)
+    .where(eq(monitoringJobTargets.jobId, jobId))
+    .orderBy(asc(monitoringJobTargets.namespace), asc(monitoringJobTargets.name));
+}
+
+export async function createJob(
+  input: {
+    clusterId: string;
+    name: string;
+    type: MonitorCategory;
+    model: string;
+    schedule: string | null;
+    enabled: boolean;
+    nextRunAt: Date | null;
+    createdBy: string;
+  },
+  targets: AssessmentTarget[],
+): Promise<JobDetail> {
+  return db.transaction(async (tx) => {
+    const [job] = await tx.insert(monitoringJobs).values(input).returning();
+    if (targets.length > 0) {
+      await tx
+        .insert(monitoringJobTargets)
+        .values(targets.map((t) => ({ jobId: job.id, ...t })));
+    }
+    return { ...job, targets };
+  });
+}
+
+export async function updateJob(
+  id: string,
+  fields: Partial<{
+    name: string;
+    model: string;
+    schedule: string | null;
+    enabled: boolean;
+    nextRunAt: Date | null;
+  }>,
+  targets?: AssessmentTarget[],
+): Promise<JobDetail | null> {
+  return db.transaction(async (tx) => {
+    const [job] = await tx
+      .update(monitoringJobs)
+      .set({ ...fields, updatedAt: new Date() })
+      .where(eq(monitoringJobs.id, id))
+      .returning();
+    if (!job) return null;
+    if (targets) {
+      await tx
+        .delete(monitoringJobTargets)
+        .where(eq(monitoringJobTargets.jobId, id));
+      if (targets.length > 0) {
+        await tx
+          .insert(monitoringJobTargets)
+          .values(targets.map((t) => ({ jobId: id, ...t })));
+      }
+    }
+    return {
+      ...job,
+      targets:
+        targets ??
+        (await tx
+          .select({
+            kind: monitoringJobTargets.kind,
+            namespace: monitoringJobTargets.namespace,
+            name: monitoringJobTargets.name,
+          })
+          .from(monitoringJobTargets)
+          .where(eq(monitoringJobTargets.jobId, id))),
+    };
+  });
+}
+
+export async function deleteJob(id: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringJobs)
+    .where(eq(monitoringJobs.id, id))
+    .returning({ id: monitoringJobs.id });
+  return rows.length > 0;
+}
+
+/** Everything the runner needs for one job, in one round trip. */
+export async function getJobExecutionContext(jobId: string) {
+  const [row] = await db
+    .select({ job: monitoringJobs, cluster: monitoringClusters })
+    .from(monitoringJobs)
+    .innerJoin(
+      monitoringClusters,
+      eq(monitoringClusters.id, monitoringJobs.clusterId),
+    )
+    .where(eq(monitoringJobs.id, jobId))
+    .limit(1);
+  if (!row) return null;
+  return { ...row, targets: await getJobTargets(jobId) };
+}
+
+// ---- Runs / queue ----
+
+export interface RunRow {
+  id: string;
+  jobId: string;
+  status: string;
+  trigger: RunTrigger;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  durationMs: number | null;
+  costUsd: number | null;
+  totalTokens: number | null;
+  model: string | null;
+  toolCallsTotal: number | null;
+  toolCallsFailed: number | null;
+  findingsNew: number | null;
+  findingsResolved: number | null;
+  findingsOpen: number | null;
+  error: string | null;
+  createdAt: Date;
+}
+
+const RUN_LIST_COLUMNS = {
+  id: monitoringRuns.id,
+  jobId: monitoringRuns.jobId,
+  status: monitoringRuns.status,
+  trigger: monitoringRuns.trigger,
+  startedAt: monitoringRuns.startedAt,
+  finishedAt: monitoringRuns.finishedAt,
+  durationMs: monitoringRuns.durationMs,
+  costUsd: monitoringRuns.costUsd,
+  totalTokens: monitoringRuns.totalTokens,
+  model: monitoringRuns.model,
+  toolCallsTotal: monitoringRuns.toolCallsTotal,
+  toolCallsFailed: monitoringRuns.toolCallsFailed,
+  findingsNew: monitoringRuns.findingsNew,
+  findingsResolved: monitoringRuns.findingsResolved,
+  findingsOpen: monitoringRuns.findingsOpen,
+  error: monitoringRuns.error,
+  createdAt: monitoringRuns.createdAt,
+};
+
+export async function enqueueRun(input: {
+  jobId: string;
+  trigger: RunTrigger;
+  triggeredBy: string | null;
+}): Promise<RunRow> {
+  const [row] = await db
+    .insert(monitoringRuns)
+    .values(input)
+    .returning(RUN_LIST_COLUMNS);
+  return row;
+}
+
+/**
+ * Atomically claim up to `limit` queued runs. `FOR UPDATE SKIP LOCKED` is what
+ * makes overlapping scheduler ticks (and, later, multiple worker replicas)
+ * safe: a row can only be claimed once.
+ */
+export async function claimQueuedRuns(
+  limit: number,
+): Promise<{ id: string; jobId: string }[]> {
+  const rows = await db.execute(sql`
+    update ${monitoringRuns} set
+      status = 'running',
+      claimed_at = now(),
+      started_at = now(),
+      attempt = ${monitoringRuns.attempt} + 1
+    where id in (
+      select id from ${monitoringRuns}
+      where status = 'queued'
+      order by created_at
+      limit ${limit}
+      for update skip locked
+    )
+    returning id, job_id
+  `);
+  return (rows as unknown as { id: string; job_id: string }[]).map((r) => ({
+    id: r.id,
+    jobId: r.job_id,
+  }));
+}
+
+/**
+ * Claim ONE specific run — what the "Run now" button needs, since the generic
+ * queue drain would happily pick up somebody else's older queued run instead.
+ * Returns null when the run is already claimed or no longer queued.
+ */
+export async function claimRun(
+  runId: string,
+): Promise<{ id: string; jobId: string } | null> {
+  const rows = await db.execute(sql`
+    update ${monitoringRuns} set
+      status = 'running',
+      claimed_at = now(),
+      started_at = now(),
+      attempt = ${monitoringRuns.attempt} + 1
+    where id = ${runId} and status = 'queued'
+    returning id, job_id
+  `);
+  const claimed = (rows as unknown as { id: string; job_id: string }[])[0];
+  return claimed ? { id: claimed.id, jobId: claimed.job_id } : null;
+}
+
+export async function failRun(
+  id: string,
+  error: string,
+  extra: Partial<{
+    costUsd: number;
+    totalTokens: number;
+    durationMs: number;
+    model: string;
+    rawResponse: unknown;
+    toolCallsTotal: number;
+    toolCallsFailed: number;
+  }> = {},
+) {
+  await db
+    .update(monitoringRuns)
+    .set({
+      status: "failed",
+      error: error.slice(0, 4000),
+      finishedAt: new Date(),
+      ...extra,
+    })
+    .where(eq(monitoringRuns.id, id));
+}
+
+/**
+ * Crash recovery: a pod that dies mid-run leaves the row `running` forever.
+ * Called at the top of every scheduler tick.
+ */
+export async function reapStaleRuns(olderThanMs: number): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const rows = await db
+    .update(monitoringRuns)
+    .set({
+      status: "failed",
+      error: "Run abandoned — the executing process disappeared",
+      finishedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(monitoringRuns.status, "running"),
+        lt(monitoringRuns.startedAt, cutoff),
+      ),
+    )
+    .returning({ id: monitoringRuns.id });
+  return rows.length;
+}
+
+export async function listRuns(jobId: string, limit = 50): Promise<RunRow[]> {
+  return db
+    .select(RUN_LIST_COLUMNS)
+    .from(monitoringRuns)
+    .where(eq(monitoringRuns.jobId, jobId))
+    .orderBy(desc(monitoringRuns.createdAt))
+    .limit(limit);
+}
+
+export async function getRun(id: string) {
+  const [row] = await db
+    .select({
+      ...RUN_LIST_COLUMNS,
+      coverage: monitoringRuns.coverage,
+      rejected: monitoringRuns.rejected,
+      attempt: monitoringRuns.attempt,
+    })
+    .from(monitoringRuns)
+    .where(eq(monitoringRuns.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+/** The concerns this run reported, with the severity as observed then. */
+export async function getRunFindings(runId: string) {
+  return db
+    .select({
+      concernId: monitoringConcerns.id,
+      checkId: monitoringConcerns.checkId,
+      severity: monitoringRunFindings.severity,
+      isNew: monitoringRunFindings.isNew,
+      title: monitoringConcerns.title,
+      rationale: monitoringConcerns.rationale,
+      remediation: monitoringConcerns.remediation,
+      evidence: monitoringConcerns.evidence,
+      scope: monitoringConcerns.scope,
+      status: monitoringConcerns.status,
+      targetKind: monitoringConcerns.targetKind,
+      targetNamespace: monitoringConcerns.targetNamespace,
+      targetName: monitoringConcerns.targetName,
+      baseSeverity: monitoringConcerns.baseSeverity,
+      severityRationale: monitoringConcerns.severityRationale,
+      firstSeenAt: monitoringConcerns.firstSeenAt,
+      occurrenceCount: monitoringConcerns.occurrenceCount,
+    })
+    .from(monitoringRunFindings)
+    .innerJoin(
+      monitoringConcerns,
+      eq(monitoringConcerns.id, monitoringRunFindings.concernId),
+    )
+    .where(eq(monitoringRunFindings.runId, runId));
+}
+
+// ---- Scheduling ----
+
+/** Enabled jobs with a cron schedule whose next run is due. */
+export async function dueJobs(now: Date) {
+  return db
+    .select({
+      id: monitoringJobs.id,
+      schedule: monitoringJobs.schedule,
+      nextRunAt: monitoringJobs.nextRunAt,
+    })
+    .from(monitoringJobs)
+    .where(
+      and(
+        eq(monitoringJobs.enabled, true),
+        isNotNull(monitoringJobs.schedule),
+        isNotNull(monitoringJobs.nextRunAt),
+        lte(monitoringJobs.nextRunAt, now),
+      ),
+    );
+}
+
+export async function setNextRunAt(jobId: string, nextRunAt: Date | null) {
+  await db
+    .update(monitoringJobs)
+    .set({ nextRunAt })
+    .where(eq(monitoringJobs.id, jobId));
+}
+
+/**
+ * Skip a job whose previous run is still queued or running — a slow
+ * investigation must never stack up behind itself.
+ */
+export async function hasActiveRun(jobId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(monitoringRuns)
+    .where(
+      and(
+        eq(monitoringRuns.jobId, jobId),
+        inArray(monitoringRuns.status, ["queued", "running"]),
+      ),
+    );
+  return (row?.n ?? 0) > 0;
+}
+
+// ---- Concerns ----
+
+export interface ConcernRow {
+  id: string;
+  jobId: string;
+  fingerprint: string;
+  checkId: string;
+  checkVersion: number;
+  category: MonitorCategory;
+  targetKind: WorkloadKind;
+  targetNamespace: string;
+  targetName: string;
+  scope: string;
+  baseSeverity: Severity;
+  effectiveSeverity: Severity;
+  severityRationale: string | null;
+  status: ConcernStatus;
+  title: string;
+  rationale: string;
+  remediation: string;
+  evidence: { label: string; value: string }[];
+  contentHash: string;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  lastResolvedAt: Date | null;
+  severityChangedAt: Date | null;
+  occurrenceCount: number;
+  consecutiveRunsAbsent: number;
+  mutedUntil: Date | null;
+  dismissalReason: string | null;
+  dismissalComment: string | null;
+}
+
+export async function listConcerns(
+  jobId: string,
+  filters: { statuses?: ConcernStatus[]; severities?: Severity[] } = {},
+): Promise<ConcernRow[]> {
+  const conditions = [eq(monitoringConcerns.jobId, jobId)];
+  if (filters.statuses?.length)
+    conditions.push(inArray(monitoringConcerns.status, filters.statuses));
+  if (filters.severities?.length)
+    conditions.push(
+      inArray(monitoringConcerns.effectiveSeverity, filters.severities),
+    );
+  return db
+    .select()
+    .from(monitoringConcerns)
+    .where(and(...conditions))
+    .orderBy(
+      // Severity is text, so order it explicitly rather than alphabetically.
+      sql`case ${monitoringConcerns.effectiveSeverity}
+            when 'critical' then 0 when 'high' then 1 when 'medium' then 2
+            when 'low' then 3 else 4 end`,
+      desc(monitoringConcerns.lastSeenAt),
+    );
+}
+
+export async function getConcern(id: string): Promise<ConcernRow | null> {
+  const [row] = await db
+    .select()
+    .from(monitoringConcerns)
+    .where(eq(monitoringConcerns.id, id))
+    .limit(1);
+  return row ?? null;
+}
+
+/** Per-run severity history for one concern — the flap/drift timeline. */
+export async function getConcernHistory(concernId: string) {
+  return db
+    .select({
+      runId: monitoringRuns.id,
+      severity: monitoringRunFindings.severity,
+      isNew: monitoringRunFindings.isNew,
+      at: monitoringRuns.finishedAt,
+      trigger: monitoringRuns.trigger,
+    })
+    .from(monitoringRunFindings)
+    .innerJoin(
+      monitoringRuns,
+      eq(monitoringRuns.id, monitoringRunFindings.runId),
+    )
+    .where(eq(monitoringRunFindings.concernId, concernId))
+    .orderBy(desc(monitoringRuns.createdAt))
+    .limit(50);
+}
+
+export async function setConcernLifecycle(
+  id: string,
+  fields: {
+    status: ConcernStatus;
+    dismissalReason?: string | null;
+    dismissalComment?: string | null;
+    dismissedBy?: string | null;
+    mutedUntil?: Date | null;
+    lastResolvedAt?: Date | null;
+    consecutiveRunsAbsent?: number;
+  },
+): Promise<ConcernRow | null> {
+  const [row] = await db
+    .update(monitoringConcerns)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(eq(monitoringConcerns.id, id))
+    .returning();
+  return row ?? null;
+}
+
+/**
+ * Concerns that a reconciliation pass needs to consider: every non-dismissed
+ * row for this job whose check the run evaluated, plus dismissed rows (so
+ * `lastSeenAt` still advances) — the caller decides what to do with each.
+ */
+export async function concernsForJob(jobId: string): Promise<ConcernRow[]> {
+  return db
+    .select()
+    .from(monitoringConcerns)
+    .where(eq(monitoringConcerns.jobId, jobId));
+}
+
+/** Expire mute windows that have elapsed, so the concern is visible again. */
+export async function unmuteExpired(): Promise<number> {
+  const rows = await db
+    .update(monitoringConcerns)
+    .set({ status: "open", mutedUntil: null, updatedAt: new Date() })
+    .where(
+      and(
+        eq(monitoringConcerns.status, "muted"),
+        sql`${monitoringConcerns.mutedUntil} is not null`,
+        sql`${monitoringConcerns.mutedUntil} <= now()`,
+      ),
+    )
+    .returning({ id: monitoringConcerns.id });
+  return rows.length;
+}
+
+// ---- Reconciliation (executes a plan built by lib/monitoring/reconcile.ts) ----
+
+export interface ConcernUpsert {
+  fingerprint: string;
+  checkId: string;
+  checkVersion: number;
+  category: MonitorCategory;
+  targetKind: WorkloadKind;
+  targetNamespace: string;
+  targetName: string;
+  scope: string;
+  baseSeverity: Severity;
+  effectiveSeverity: Severity;
+  severityRationale: string;
+  title: string;
+  rationale: string;
+  remediation: string;
+  evidence: { label: string; value: string }[];
+  contentHash: string;
+}
+
+export interface ReconcilePlan {
+  /** Concerns seen failing in this run — insert or refresh. */
+  present: ConcernUpsert[];
+  /** Concern ids whose check was evaluated and did NOT fail. */
+  absentIds: string[];
+  /** Concern ids that crossed their absent-run threshold. */
+  autoResolveIds: string[];
+  /** Fingerprints whose severity moved, for `severityChangedAt`. */
+  severityChanged: Set<string>;
+}
+
+export interface ReconcileResult {
+  newCount: number;
+  resolvedCount: number;
+  openCount: number;
+}
+
+/**
+ * Apply a reconciliation plan and finish the run, in ONE transaction — a crash
+ * mid-way leaves the run `running` for the reaper rather than a half-updated
+ * concern history.
+ */
+export async function applyReconcilePlan(
+  runId: string,
+  jobId: string,
+  plan: ReconcilePlan,
+  runFields: {
+    coverage: RunCoverage;
+    rejected: string[];
+    rawResponse: unknown;
+    model: string;
+    costUsd: number | null;
+    totalTokens: number | null;
+    durationMs: number;
+    toolCallsTotal: number;
+    toolCallsFailed: number;
+  },
+): Promise<ReconcileResult> {
+  return db.transaction(async (tx) => {
+    const now = new Date();
+    let newCount = 0;
+
+    for (const c of plan.present) {
+      const [existing] = await tx
+        .select({
+          id: monitoringConcerns.id,
+          status: monitoringConcerns.status,
+          firstSeenAt: monitoringConcerns.firstSeenAt,
+        })
+        .from(monitoringConcerns)
+        .where(
+          and(
+            eq(monitoringConcerns.jobId, jobId),
+            eq(monitoringConcerns.fingerprint, c.fingerprint),
+          ),
+        )
+        .limit(1);
+
+      const severityMoved = plan.severityChanged.has(c.fingerprint);
+
+      if (!existing) {
+        const [row] = await tx
+          .insert(monitoringConcerns)
+          .values({
+            jobId,
+            ...c,
+            status: "open",
+            firstSeenAt: now,
+            lastSeenAt: now,
+            occurrenceCount: 1,
+            firstSeenRunId: runId,
+            lastSeenRunId: runId,
+          })
+          .returning({ id: monitoringConcerns.id });
+        await tx.insert(monitoringRunFindings).values({
+          runId,
+          concernId: row.id,
+          severity: c.effectiveSeverity,
+          isNew: true,
+        });
+        newCount++;
+        continue;
+      }
+
+      // A human decision (muted / accepted_risk / false_positive) survives:
+      // the concern is still recorded as seen, but never silently reopened.
+      const humanDismissed = DISMISSED_STATUSES.includes(existing.status);
+      await tx
+        .update(monitoringConcerns)
+        .set({
+          effectiveSeverity: c.effectiveSeverity,
+          severityRationale: c.severityRationale,
+          title: c.title,
+          rationale: c.rationale,
+          remediation: c.remediation,
+          evidence: c.evidence,
+          contentHash: c.contentHash,
+          baseSeverity: c.baseSeverity,
+          checkVersion: c.checkVersion,
+          lastSeenAt: now,
+          lastSeenRunId: runId,
+          occurrenceCount: sql`${monitoringConcerns.occurrenceCount} + 1`,
+          consecutiveRunsAbsent: 0,
+          ...(severityMoved ? { severityChangedAt: now } : {}),
+          ...(humanDismissed ? {} : { status: "open" as const }),
+          updatedAt: now,
+        })
+        .where(eq(monitoringConcerns.id, existing.id));
+      await tx
+        .insert(monitoringRunFindings)
+        .values({
+          runId,
+          concernId: existing.id,
+          severity: c.effectiveSeverity,
+          isNew: false,
+        })
+        .onConflictDoNothing();
+    }
+
+    if (plan.absentIds.length > 0) {
+      await tx
+        .update(monitoringConcerns)
+        .set({
+          consecutiveRunsAbsent: sql`${monitoringConcerns.consecutiveRunsAbsent} + 1`,
+          updatedAt: now,
+        })
+        .where(inArray(monitoringConcerns.id, plan.absentIds));
+    }
+
+    if (plan.autoResolveIds.length > 0) {
+      await tx
+        .update(monitoringConcerns)
+        .set({ status: "auto_resolved", lastResolvedAt: now, updatedAt: now })
+        .where(
+          and(
+            inArray(monitoringConcerns.id, plan.autoResolveIds),
+            eq(monitoringConcerns.status, "open"),
+          ),
+        );
+    }
+
+    const [openRow] = await tx
+      .select({ n: count() })
+      .from(monitoringConcerns)
+      .where(
+        and(
+          eq(monitoringConcerns.jobId, jobId),
+          eq(monitoringConcerns.status, "open"),
+        ),
+      );
+    const openCount = openRow?.n ?? 0;
+
+    await tx
+      .update(monitoringRuns)
+      .set({
+        status: "completed",
+        finishedAt: now,
+        findingsNew: newCount,
+        findingsResolved: plan.autoResolveIds.length,
+        findingsOpen: openCount,
+        ...runFields,
+      })
+      .where(eq(monitoringRuns.id, runId));
+
+    return {
+      newCount,
+      resolvedCount: plan.autoResolveIds.length,
+      openCount,
+    };
+  });
+}

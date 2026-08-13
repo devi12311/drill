@@ -1,0 +1,1 @@
+ALTER TABLE "monitoring_concerns" ADD COLUMN "check_version" integer DEFAULT 1 NOT NULL;

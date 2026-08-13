@@ -1,0 +1,234 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useState } from "react";
+import {
+  ChevronRight,
+  Gauge,
+  ListChecks,
+  Plus,
+  Radar,
+  ShieldCheck,
+} from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { cn } from "@/lib/utils";
+
+export interface TreeJob {
+  id: string;
+  clusterId: string;
+  name: string;
+  type: "security" | "performance";
+  enabled: boolean;
+  openConcerns: number;
+  criticalConcerns: number;
+}
+
+export interface TreeCluster {
+  id: string;
+  name: string;
+  discoveryError: string | null;
+}
+
+/**
+ * The monitoring module's own navigation column: registered clusters as
+ * collapsible roots, their monitoring jobs as children. Sits between the admin
+ * sidebar and the page content and mirrors that sidebar's frame (260px, Smoked
+ * Onyx, hairline border) so the two read as one product.
+ *
+ * Rows deliberately restate `SideNavLink`'s visual language rather than reusing
+ * it: nav links are single-level anchors, while these need indentation, a
+ * disclosure control and a concern-count badge.
+ */
+export function MonitoringTree({
+  clusters,
+  jobs,
+}: {
+  clusters: TreeCluster[];
+  jobs: TreeJob[];
+}) {
+  const pathname = usePathname();
+
+  return (
+    <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+      <div className="flex items-center gap-2 px-5 pb-3 pt-5">
+        <Radar className="size-4 text-bone-gray" />
+        <span className="text-caption-tracked uppercase text-bone-gray">
+          Monitored clusters
+        </span>
+      </div>
+
+      <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+        {clusters.length === 0 ? (
+          <p className="px-3 py-2 text-body-sm text-bone-gray">
+            No clusters yet.
+          </p>
+        ) : (
+          clusters.map((cluster) => (
+            <ClusterBranch
+              key={cluster.id}
+              cluster={cluster}
+              jobs={jobs.filter((job) => job.clusterId === cluster.id)}
+              pathname={pathname}
+            />
+          ))
+        )}
+
+        <Link
+          href="/admin/monitoring"
+          className={cn(
+            "mt-2 flex w-full items-center gap-2 rounded-sm px-3 py-2 text-body-sm text-pale-stone transition-colors hover:bg-smoke-charcoal hover:text-warm-off-white",
+            pathname === "/admin/monitoring" &&
+              "bg-smoke-charcoal text-warm-off-white",
+          )}
+        >
+          <Plus className="size-4 shrink-0 text-bone-gray" />
+          <span className="truncate">Add a cluster</span>
+        </Link>
+
+        {/* The rubric is module-wide, not per cluster, so it sits outside the tree. */}
+        <Link
+          href="/admin/monitoring/checks"
+          className={cn(
+            "mt-4 flex w-full items-center gap-2 rounded-sm border-t border-sidebar-border px-3 pb-2 pt-4 text-body-sm text-pale-stone transition-colors hover:text-warm-off-white",
+            pathname === "/admin/monitoring/checks" && "text-warm-off-white",
+          )}
+        >
+          <ListChecks className="size-4 shrink-0 text-bone-gray" />
+          <span className="truncate">Check catalogue</span>
+        </Link>
+      </nav>
+    </aside>
+  );
+}
+
+function ClusterBranch({
+  cluster,
+  jobs,
+  pathname,
+}: {
+  cluster: TreeCluster;
+  jobs: TreeJob[];
+  pathname: string;
+}) {
+  const base = `/admin/monitoring/${cluster.id}`;
+  const insideCluster = pathname.startsWith(base);
+  // Open when you are inside it; still collapsible from there.
+  const [open, setOpen] = useState(insideCluster);
+  const critical = jobs.reduce((n, job) => n + job.criticalConcerns, 0);
+  const openConcerns = jobs.reduce((n, job) => n + job.openConcerns, 0);
+
+  return (
+    <Collapsible open={open || insideCluster} onOpenChange={setOpen}>
+      <div
+        className={cn(
+          "flex items-center gap-1 rounded-sm pr-2 transition-colors hover:bg-smoke-charcoal",
+          pathname === base && "bg-smoke-charcoal",
+        )}
+      >
+        <CollapsibleTrigger
+          aria-label={open ? "Collapse cluster" : "Expand cluster"}
+          className="flex size-6 shrink-0 items-center justify-center text-bone-gray hover:text-warm-off-white"
+        >
+          <ChevronRight
+            className={cn(
+              "size-3.5 transition-transform",
+              (open || insideCluster) && "rotate-90",
+            )}
+          />
+        </CollapsibleTrigger>
+        <Link
+          href={base}
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 py-2 text-body-sm",
+            pathname === base
+              ? "text-warm-off-white"
+              : "text-pale-stone hover:text-warm-off-white",
+          )}
+        >
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              cluster.discoveryError
+                ? "bg-traffic-yellow"
+                : critical > 0
+                  ? "bg-traffic-red"
+                  : openConcerns > 0
+                    ? "bg-traffic-yellow"
+                    : "bg-traffic-green",
+            )}
+            title={
+              cluster.discoveryError
+                ? "Discovery is failing"
+                : `${openConcerns} open concern(s)`
+            }
+          />
+          <span className="truncate">{cluster.name}</span>
+        </Link>
+      </div>
+
+      <CollapsibleContent className="pb-1">
+        {jobs.length === 0 ? (
+          <p className="py-1.5 pl-9 text-body-sm text-bone-gray">No jobs yet</p>
+        ) : (
+          jobs.map((job) => {
+            const href = `${base}/jobs/${job.id}`;
+            const active = pathname.startsWith(href);
+            const Icon = job.type === "security" ? ShieldCheck : Gauge;
+            return (
+              <Link
+                key={job.id}
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-sm py-1.5 pl-9 pr-2 text-body-sm transition-colors hover:bg-smoke-charcoal hover:text-warm-off-white",
+                  active
+                    ? "bg-smoke-charcoal text-warm-off-white"
+                    : "text-pale-stone",
+                )}
+              >
+                <Icon
+                  className={cn(
+                    "size-3.5 shrink-0",
+                    active ? "text-warm-off-white" : "text-bone-gray",
+                  )}
+                />
+                <span className={cn("truncate", !job.enabled && "opacity-60")}>
+                  {job.name}
+                </span>
+                {job.openConcerns > 0 && (
+                  <span
+                    className={cn(
+                      "ml-auto shrink-0 text-caption-tracked",
+                      job.criticalConcerns > 0
+                        ? "text-traffic-red"
+                        : "text-traffic-yellow",
+                    )}
+                  >
+                    {job.openConcerns}
+                  </span>
+                )}
+              </Link>
+            );
+          })
+        )}
+        <Link
+          href={`${base}/jobs/new`}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-sm py-1.5 pl-9 pr-2 text-body-sm text-bone-gray transition-colors hover:bg-smoke-charcoal hover:text-warm-off-white",
+            pathname === `${base}/jobs/new` &&
+              "bg-smoke-charcoal text-warm-off-white",
+          )}
+        >
+          <Plus className="size-3.5 shrink-0" />
+          <span className="truncate">New job</span>
+        </Link>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}

@@ -1,0 +1,75 @@
+import type { ConcernStatus, MonitorCategory, Severity } from "./types";
+
+/**
+ * Presentation vocabulary for the monitoring module — one place so a severity
+ * never renders two different colours in two different views.
+ *
+ * Colour choice follows DESIGN.md: the gold/cobalt accents are syntax-only and
+ * must stay inside code/terminal contexts, so severity uses the traffic-light
+ * palette already established for tool-call statuses in the chat timeline.
+ */
+
+export const SEVERITY_CLASS: Record<Severity, string> = {
+  critical: "text-traffic-red",
+  high: "text-traffic-red",
+  medium: "text-traffic-yellow",
+  low: "text-pale-stone",
+  info: "text-bone-gray",
+};
+
+/** Critical is filled, high outlined — same hue, different weight. */
+export const SEVERITY_FILLED: Record<Severity, boolean> = {
+  critical: true,
+  high: false,
+  medium: false,
+  low: false,
+  info: false,
+};
+
+export const SEVERITY_ORDER: Severity[] = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "info",
+];
+
+export const CONCERN_STATUS_LABEL: Record<ConcernStatus, string> = {
+  open: "Open",
+  resolved: "Fixed",
+  auto_resolved: "No longer detected",
+  muted: "Muted",
+  accepted_risk: "Accepted risk",
+  false_positive: "False positive",
+};
+
+export const CONCERN_STATUS_CLASS: Record<ConcernStatus, string> = {
+  open: "text-warm-off-white",
+  resolved: "text-traffic-green",
+  auto_resolved: "text-traffic-green",
+  muted: "text-bone-gray",
+  accepted_risk: "text-bone-gray",
+  false_positive: "text-bone-gray",
+};
+
+export const CATEGORY_LABEL: Record<MonitorCategory, string> = {
+  security: "Security posture",
+  performance: "Performance & reliability",
+};
+
+export const RUN_STATUS_CLASS: Record<string, string> = {
+  queued: "text-bone-gray",
+  running: "text-traffic-yellow",
+  completed: "text-traffic-green",
+  failed: "text-traffic-red",
+};
+
+/** Worst severity in a list, for cluster/job rollup dots. */
+export function worstSeverity(
+  severities: readonly Severity[],
+): Severity | null {
+  for (const severity of SEVERITY_ORDER) {
+    if (severities.includes(severity)) return severity;
+  }
+  return null;
+}

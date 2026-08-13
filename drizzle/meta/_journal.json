@@ -22,6 +22,27 @@
       "when": 1784725973768,
       "tag": "0002_even_imperial_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786365180372,
+      "tag": "0003_strange_mentor",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786372706724,
+      "tag": "0004_drop_catalogue_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786372722995,
+      "tag": "0005_add_check_version",
+      "breakpoints": true
     }
   ]
 }

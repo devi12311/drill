@@ -2,6 +2,7 @@ import {
   Activity,
   DollarSign,
   LayoutDashboard,
+  Radar,
   ScrollText,
   Server,
   Users,
@@ -49,7 +50,10 @@ export const ADMIN_NAV: AdminNavGroup[] = [
   },
   {
     label: "Infrastructure",
-    items: [{ href: "/admin/agents", label: "Agent health", icon: Server }],
+    items: [
+      { href: "/admin/monitoring", label: "Monitoring", icon: Radar },
+      { href: "/admin/agents", label: "Agent health", icon: Server },
+    ],
   },
 ];
 
