@@ -35,6 +35,42 @@ export type MonitorCategory = (typeof MONITOR_CATEGORIES)[number];
 export const WORKLOAD_KINDS = ["deployment", "statefulset"] as const;
 export type WorkloadKind = (typeof WORKLOAD_KINDS)[number];
 
+/**
+ * The software running INSIDE the workload, as opposed to its Kubernetes kind.
+ *
+ * This is the dimension the generic rubric lacks: "is this StatefulSet healthy?"
+ * and "is this PostgreSQL healthy?" are different questions, and only the second
+ * one is worth asking. A check may be scoped to one or more technologies, and a
+ * deep assessment loads that technology's playbook.
+ *
+ * Deliberately limited to what we can actually observe today. Kafka and ksqlDB
+ * are absent on purpose: neither has a Holmes toolset or a Prometheus exporter in
+ * this cluster, so a profile for them would produce confident nonsense. Adding
+ * one later is this list plus a playbook plus checks — nothing else.
+ */
+export const WORKLOAD_TECHNOLOGIES = [
+  "postgresql",
+  "mysql",
+  "mongodb",
+  "clickhouse",
+  "rabbitmq",
+  "nodejs",
+] as const;
+export type WorkloadTechnology = (typeof WORKLOAD_TECHNOLOGIES)[number];
+
+/**
+ * How much work one run does per workload.
+ *
+ * `posture` is the original behaviour: one batched Holmes call for every target,
+ * answering kind-generic configuration questions. Cheap enough to run often.
+ *
+ * `deep` is one investigation PER workload, with the technology's playbook in the
+ * prompt, planning left on, and measured facts demanded back. Roughly an order of
+ * magnitude more expensive, so it is meant for a weekly schedule or a button.
+ */
+export const MONITOR_DEPTHS = ["posture", "deep"] as const;
+export type MonitorDepth = (typeof MONITOR_DEPTHS)[number];
+
 export const RUN_STATUSES = [
   "queued",
   "running",
@@ -82,6 +118,8 @@ export interface CheckView {
   reference: string;
   baseSeverity: Severity;
   appliesTo: string[];
+  appliesToTechnologies: string[];
+  excludesTechnologies: string[];
   requires: string | null;
   resolveAfterAbsentRuns: number;
   builtin: boolean;
@@ -102,6 +140,20 @@ export interface AssessmentTarget {
   name: string;
 }
 
+/**
+ * A job target with the technology the inventory believes it runs — the shape the
+ * runner works in. Kept separate from {@link AssessmentTarget} on purpose: that one
+ * is the identity contract shared with Holmes and with the fingerprint, and must not
+ * grow fields the model could contradict.
+ *
+ * `technology` is null when detection recognised nothing, or when the workload has
+ * disappeared from the inventory since the job selected it. Both mean "no playbook",
+ * and both are worth saying out loud rather than papering over.
+ */
+export interface ResolvedTarget extends AssessmentTarget {
+  technology: WorkloadTechnology | null;
+}
+
 export interface AssessmentFinding {
   checkId: string;
   target: AssessmentTarget;
@@ -115,12 +167,65 @@ export interface AssessmentFinding {
   evidence: MonitorEvidence[];
 }
 
+/**
+ * Where a measured fact came from. The point of naming sources is that most of
+ * them are unreachable from a manifest read: a fact tagged `metrics` or `engine`
+ * is proof the agent actually queried Prometheus or the database, and its absence
+ * is proof it did not. See `sourcesUsed` below.
+ */
+export const OBSERVATION_SOURCES = [
+  /** The workload's own spec and status, via the kubernetes toolset. */
+  "manifest",
+  /** The node it runs on: capacity, pressure, kernel settings. */
+  "node",
+  /** PromQL against Prometheus. */
+  "metrics",
+  /** Pod logs or Loki. */
+  "logs",
+  /** The engine's own interface — SQL, management API, admin API. */
+  "engine",
+  /** Distributed traces. */
+  "traces",
+  /** The service's source code at the deployed ref. */
+  "code",
+] as const;
+export type ObservationSource = (typeof OBSERVATION_SOURCES)[number];
+
+/**
+ * One measured fact, as opposed to a verdict. Deep assessments must return these
+ * alongside their findings: a schema with fields that cannot be filled from
+ * `kubectl get -o yaml` is what actually forces a multi-source investigation,
+ * and an empty field is a visible, attributable gap rather than silence.
+ *
+ * `value` is always human-readable ("128MB", "false", "3.2"); `numeric` carries
+ * the same fact as a number when it is one, which is what makes trends a query
+ * rather than an LLM opinion.
+ */
+export interface AssessmentObservation {
+  target: AssessmentTarget;
+  /** Stable dotted key from the playbook, e.g. "wal.generation_bytes_per_day". */
+  key: string;
+  value: string;
+  numeric: number | null;
+  /** "bytes", "seconds", "%", "" — display only. */
+  unit: string;
+  source: ObservationSource;
+}
+
 export interface TargetCoverage {
   target: AssessmentTarget;
   /** Checks Holmes actually reached a verdict on — the reconciliation denominator. */
   evaluated: string[];
   /** Checks it could not judge, with the reason (missing telemetry, RBAC, …). */
   skipped: { checkId: string; reason: string }[];
+  /**
+   * Sources that produced at least one observation. DERIVED, never taken from
+   * the model: you cannot claim to have queried Prometheus without returning a
+   * metric-sourced fact. Empty on posture runs, which ask for no observations.
+   */
+  sourcesUsed: ObservationSource[];
+  /** Sources the agent tried and got nothing from, with why. Model-reported. */
+  sourcesUnavailable: { source: ObservationSource; reason: string }[];
 }
 
 export interface RunCoverage {
@@ -130,6 +235,7 @@ export interface RunCoverage {
 
 export interface Assessment {
   findings: AssessmentFinding[];
+  observations: AssessmentObservation[];
   coverage: RunCoverage;
   /** Findings dropped during validation, surfaced on the run for honesty. */
   rejected: string[];
@@ -172,6 +278,27 @@ function parseEvidence(raw: unknown): MonitorEvidence[] {
     })
     .filter((e): e is MonitorEvidence => e !== null)
     .slice(0, 12);
+}
+
+function parseSource(raw: unknown): ObservationSource | null {
+  const source = str(raw, 40).toLowerCase();
+  return (OBSERVATION_SOURCES as readonly string[]).includes(source)
+    ? (source as ObservationSource)
+    : null;
+}
+
+/**
+ * A number the model may have written as "1234", "1.2e9" or "12%". Anything that
+ * is not cleanly numeric stays null rather than being coerced — a wrong number in
+ * a trend is worse than a missing one.
+ */
+function parseNumeric(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -237,43 +364,97 @@ export function validateAssessment(
     });
   }
 
+  // A fact with no source is not a fact — it cannot be told apart from a guess,
+  // so it is dropped rather than stored as evidence of an investigation.
+  const observations: AssessmentObservation[] = [];
+  const rawObservations = Array.isArray(root.observations)
+    ? root.observations
+    : [];
+  for (const item of rawObservations) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const key = str(o.key, 120);
+    if (!key) continue;
+    const source = parseSource(o.source);
+    if (!source) {
+      rejected.push(`observation ${key}: missing or unknown source`);
+      continue;
+    }
+    const target = resolveTarget(o.target, `observation ${key}`);
+    if (!target) continue;
+    observations.push({
+      target,
+      key,
+      value: str(o.value, 2000),
+      numeric: parseNumeric(o.numeric),
+      unit: str(o.unit, 40),
+      source,
+    });
+  }
+
   const targets: TargetCoverage[] = [];
+  const byTarget = new Map<string, TargetCoverage>();
+  const coverageFor = (target: AssessmentTarget): TargetCoverage => {
+    const key = targetKey(target);
+    let entry = byTarget.get(key);
+    if (!entry) {
+      entry = {
+        target,
+        evaluated: [],
+        skipped: [],
+        sourcesUsed: [],
+        sourcesUnavailable: [],
+      };
+      byTarget.set(key, entry);
+      targets.push(entry);
+    }
+    return entry;
+  };
+
   const rawCoverage = Array.isArray(root.coverage) ? root.coverage : [];
   for (const item of rawCoverage) {
     if (!item || typeof item !== "object") continue;
     const c = item as Record<string, unknown>;
     const target = resolveTarget(c.target, "coverage");
     if (!target) continue;
-    const evaluated = (Array.isArray(c.evaluated) ? c.evaluated : [])
-      .map((id) => str(id, 60).toUpperCase())
-      .filter((id) => allowedChecks.has(id));
-    const skipped = (Array.isArray(c.skipped) ? c.skipped : [])
-      .map((raw) => {
-        if (!raw || typeof raw !== "object") return null;
-        const s = raw as Record<string, unknown>;
-        const checkId = str(s.check_id, 60).toUpperCase();
-        if (!allowedChecks.has(checkId)) return null;
-        return { checkId, reason: str(s.reason, 500) };
-      })
-      .filter((s): s is { checkId: string; reason: string } => s !== null);
-    targets.push({ target, evaluated, skipped });
+    const entry = coverageFor(target);
+    for (const id of Array.isArray(c.evaluated) ? c.evaluated : []) {
+      const checkId = str(id, 60).toUpperCase();
+      if (allowedChecks.has(checkId) && !entry.evaluated.includes(checkId))
+        entry.evaluated.push(checkId);
+    }
+    for (const raw of Array.isArray(c.skipped) ? c.skipped : []) {
+      if (!raw || typeof raw !== "object") continue;
+      const s = raw as Record<string, unknown>;
+      const checkId = str(s.check_id, 60).toUpperCase();
+      if (!allowedChecks.has(checkId)) continue;
+      entry.skipped.push({ checkId, reason: str(s.reason, 500) });
+    }
+    for (const raw of Array.isArray(c.sources_unavailable)
+      ? c.sources_unavailable
+      : []) {
+      if (!raw || typeof raw !== "object") continue;
+      const s = raw as Record<string, unknown>;
+      const source = parseSource(s.source);
+      if (!source) continue;
+      entry.sourcesUnavailable.push({ source, reason: str(s.reason, 500) });
+    }
   }
 
   // A finding on a target Holmes never reported coverage for is still real —
   // count it as evaluated so reconciliation can open the concern.
   for (const finding of findings) {
-    const entry = targets.find(
-      (t) => targetKey(t.target) === targetKey(finding.target),
-    );
-    if (!entry) {
-      targets.push({
-        target: finding.target,
-        evaluated: [finding.checkId],
-        skipped: [],
-      });
-    } else if (!entry.evaluated.includes(finding.checkId)) {
+    const entry = coverageFor(finding.target);
+    if (!entry.evaluated.includes(finding.checkId))
       entry.evaluated.push(finding.checkId);
-    }
+  }
+
+  // `sourcesUsed` is derived, never asserted: a source counts as reached only
+  // because a fact came back from it.
+  for (const observation of observations) {
+    const entry = coverageFor(observation.target);
+    if (!entry.sourcesUsed.includes(observation.source))
+      entry.sourcesUsed.push(observation.source);
   }
 
   if (targets.length === 0 && findings.length === 0)
@@ -281,6 +462,7 @@ export function validateAssessment(
 
   return {
     findings,
+    observations,
     coverage: { targets, summary: str(root.summary, 4000) },
     rejected,
   };

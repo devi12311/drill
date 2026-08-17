@@ -4,13 +4,22 @@ import { useMemo, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import type { AssessmentTarget, WorkloadKind } from "@/lib/monitoring/types";
+import { TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
+import type {
+  AssessmentTarget,
+  WorkloadKind,
+  WorkloadTechnology,
+} from "@/lib/monitoring/types";
 
 export interface PickableWorkload {
   kind: WorkloadKind;
   namespace: string;
   name: string;
   replicas: number | null;
+  /** What discovery detected, or the admin's override where one is set. */
+  technology: WorkloadTechnology | null;
+  /** Whether a deep assessment has a playbook for that technology. */
+  profiled: boolean;
 }
 
 export function targetKey(target: {
@@ -137,6 +146,21 @@ export function WorkloadPicker({
                         {workload.kind === "statefulset" ? "sts" : "deploy"}
                       </span>
                       <span className="truncate">{workload.name}</span>
+                      {workload.technology && (
+                        // Dimmed when no playbook exists yet: the technology is
+                        // known but a deep run would still only ask the generic
+                        // questions, and pretending otherwise would mislead.
+                        <span
+                          className={cn(
+                            "shrink-0 rounded-sm border px-1.5 text-caption-tracked",
+                            workload.profiled
+                              ? "border-border text-pale-stone"
+                              : "border-border/60 text-bone-gray",
+                          )}
+                        >
+                          {TECHNOLOGY_LABEL[workload.technology]}
+                        </span>
+                      )}
                       {workload.replicas !== null && (
                         <span className="ml-auto shrink-0 text-caption-tracked text-bone-gray">
                           {workload.replicas} replica

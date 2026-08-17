@@ -1,4 +1,10 @@
-import type { MonitorCategory, Severity, WorkloadKind } from "./types";
+import { PROFILE_CHECKS } from "./profiles";
+import type {
+  MonitorCategory,
+  Severity,
+  WorkloadKind,
+  WorkloadTechnology,
+} from "./types";
 
 /**
  * THE BUILT-IN RUBRIC — the reviewed, cited seed for the live catalogue.
@@ -23,12 +29,43 @@ import type { MonitorCategory, Severity, WorkloadKind } from "./types";
  * IDs are permanent. Renaming one orphans every concern that references it.
  */
 
-/** Extra data a check needs, which the cluster may not have. */
-export type CheckRequirement = "prometheus" | "metrics-server";
+/**
+ * Extra data a check needs, which the cluster may not have.
+ *
+ * This list is load-bearing rather than decorative: a check that cannot name its
+ * dependency cannot legitimately be *skipped*, and a skipped check is the only
+ * thing standing between "we could not look" and a silent pass. Engine-level
+ * checks need engine-level dependencies, so the two original Kubernetes-shaped
+ * values are not enough on their own.
+ */
+export type CheckRequirement =
+  | "prometheus"
+  | "metrics-server"
+  | "engine-sql"
+  | "pg-stat-statements"
+  | "performance-schema"
+  | "queue-api"
+  | "logs"
+  | "traces"
+  | "node"
+  | "code";
 
 export const REQUIREMENT_LABEL: Record<CheckRequirement, string> = {
   prometheus: "Prometheus metrics",
   "metrics-server": "metrics-server (kubectl top)",
+  // Named for the common case; it means the engine's own query interface, which for
+  // MongoDB is the database command surface rather than SQL. Kept as-is rather than
+  // renamed because ~20 seeded checks reference the value and the label carries the
+  // meaning perfectly well.
+  "engine-sql":
+    "a read-only query connection to the engine itself (SQL, or its equivalent on a non-relational engine)",
+  "pg-stat-statements": "the pg_stat_statements extension, loaded and enabled",
+  "performance-schema": "MySQL performance_schema, enabled",
+  "queue-api": "the broker's management API",
+  logs: "pod logs or Loki",
+  traces: "distributed traces",
+  node: "read access to the node the workload runs on",
+  code: "read access to the service's source repository",
 };
 
 export interface MonitorCheck {
@@ -46,6 +83,24 @@ export interface MonitorCheck {
   reference: string;
   /** Omitted = applies to both Deployments and StatefulSets. */
   appliesTo?: WorkloadKind[];
+  /**
+   * Omitted = technology-agnostic, i.e. a posture check that reads the Kubernetes
+   * spec and applies to anything. Present = only ever asked about a workload
+   * running one of these, which is what keeps a Postgres question away from a
+   * RabbitMQ pod and lets a rubric hold hundreds of checks without any single
+   * assessment drowning in them.
+   */
+  appliesToTechnologies?: WorkloadTechnology[];
+  /**
+   * Technologies this check must NOT be asked about, even though it otherwise
+   * would be. Two distinct uses, both real:
+   *
+   * - the generic form is a false positive there (one replica is the normal shape
+   *   of a primary database, not a availability defect);
+   * - a profile asks the same question better, and without this both fire and the
+   *   same problem opens two concerns.
+   */
+  excludesTechnologies?: WorkloadTechnology[];
   /** Telemetry the check depends on; absent ⇒ Holmes must skip, not pass. */
   requires?: CheckRequirement;
   /**
@@ -214,6 +269,9 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
     evidence:
       "Pod name, container, termination reason/exit code, when it happened, and the memory limit.",
     reference: "kube-state-metrics last_terminated_reason · KRR memory strategy",
+    // NODE.OOM_RESTARTS asks this with the heap-ceiling context that makes it
+    // actionable; both firing would open two concerns for one kill.
+    excludesTechnologies: ["nodejs"],
     resolveAfterAbsentRuns: 2,
   },
   {
@@ -293,6 +351,9 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
     evidence: "The throttled ratio, the CPU limit, and observed CPU usage.",
     reference: "kube-prometheus cAdvisor CFS metrics",
     requires: "prometheus",
+    // Superseded by NODE.CPU_THROTTLED, which explains why throttling is worse on
+    // a single-threaded runtime than the generic ratio suggests.
+    excludesTechnologies: ["nodejs"],
     resolveAfterAbsentRuns: 2,
   },
   {
@@ -318,6 +379,9 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
     reference: "kube-prometheus KubePersistentVolumeFillingUp · k8sgpt pvcAnalyzer",
     appliesTo: ["statefulset"],
     requires: "prometheus",
+    // PG.DISK_RUNWAY asks the same thing plus the growth rate, which is what turns
+    // "80% full" into "nine days left".
+    excludesTechnologies: ["postgresql"],
     resolveAfterAbsentRuns: 2,
   },
   {
@@ -330,6 +394,10 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
     evidence: "Requested vs recommended CPU and memory, with the observed figures.",
     reference: "Robusta KRR · Fairwinds Goldilocks",
     requires: "prometheus",
+    // A database is deliberately given more memory than it "uses", because the
+    // surplus is its page cache. The KRR heuristic reads that as waste; the engine
+    // profile judges it properly against shared_buffers.
+    excludesTechnologies: ["postgresql"],
     resolveAfterAbsentRuns: 2,
   },
   {
@@ -361,6 +429,9 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
       "Does the workload run one replica, so any node drain, eviction or crash is a full outage?",
     evidence: "spec.replicas, and whether an HPA raises the floor.",
     reference: "Polaris deploymentMissingReplicas",
+    // One replica is the normal shape of a primary database, not a redundancy
+    // defect. PG.NO_STANDBY asks the question that actually applies there.
+    excludesTechnologies: ["postgresql"],
   },
   {
     id: "PERF.NO_PDB",
@@ -384,25 +455,49 @@ const PERFORMANCE_CHECKS: MonitorCheck[] = [
   },
 ];
 
-/** The seed set. The live rubric is the DB — see lib/monitoring/checks.ts. */
+/**
+ * The seed set. The live rubric is the DB — see lib/monitoring/checks.ts.
+ *
+ * Two layers, and the distinction matters: the SEC/PERF checks above are
+ * technology-agnostic posture questions answerable from the Kubernetes spec, cheap
+ * enough to run often. The profile checks are engine-specific and only ever reach a
+ * workload detected as that technology, so the catalogue can grow to hundreds of
+ * questions without any single assessment being asked more than a few dozen.
+ */
 export const BUILTIN_CHECKS: readonly MonitorCheck[] = Object.freeze([
   ...SECURITY_CHECKS,
   ...PERFORMANCE_CHECKS,
+  ...PROFILE_CHECKS,
 ]);
 
 /**
  * Narrow a resolved catalogue to what applies here. Pure, so it works on
  * checks from the database as well as on the built-in seed.
+ *
+ * `technologies` is what the targets were detected as. An empty list means nothing
+ * was recognised, and technology-scoped checks are then correctly excluded rather
+ * than asked speculatively — asking Postgres questions about an unidentified
+ * workload is how you get invented answers.
  */
 export function applicableChecks<T extends MonitorCheck>(
   checks: readonly T[],
   category: MonitorCategory,
   kinds: readonly WorkloadKind[] = ["deployment", "statefulset"],
+  technologies: readonly WorkloadTechnology[] = [],
 ): T[] {
   return checks.filter(
     (c) =>
       c.category === category &&
-      (!c.appliesTo?.length || c.appliesTo.some((k) => kinds.includes(k))),
+      (!c.appliesTo?.length || c.appliesTo.some((k) => kinds.includes(k))) &&
+      (!c.appliesToTechnologies?.length ||
+        c.appliesToTechnologies.some((t) => technologies.includes(t))) &&
+      // Excluded only when EVERY target is an excluded technology: a mixed
+      // selection still needs the generic check for the workloads it does fit.
+      !(
+        c.excludesTechnologies?.length &&
+        technologies.length > 0 &&
+        technologies.every((t) => c.excludesTechnologies!.includes(t))
+      ),
   );
 }
 

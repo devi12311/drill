@@ -16,6 +16,7 @@ import type {
   CheckView,
   MonitorCategory,
   WorkloadKind,
+  WorkloadTechnology,
 } from "./types";
 
 /**
@@ -44,6 +45,12 @@ function toMonitorCheck(row: CheckRow): MonitorCheck & { version: number } {
     appliesTo: row.appliesTo.length
       ? (row.appliesTo as WorkloadKind[])
       : undefined,
+    appliesToTechnologies: row.appliesToTechnologies.length
+      ? (row.appliesToTechnologies as WorkloadTechnology[])
+      : undefined,
+    excludesTechnologies: row.excludesTechnologies.length
+      ? (row.excludesTechnologies as WorkloadTechnology[])
+      : undefined,
     requires: (row.requires as CheckRequirement | null) ?? undefined,
     resolveAfterAbsentRuns: row.resolveAfterAbsentRuns,
     version: row.version,
@@ -70,6 +77,8 @@ export function ensureBuiltinChecks(): Promise<void> {
       reference: c.reference,
       baseSeverity: c.baseSeverity,
       appliesTo: c.appliesTo ?? [],
+      appliesToTechnologies: c.appliesToTechnologies ?? [],
+      excludesTechnologies: c.excludesTechnologies ?? [],
       requires: c.requires ?? null,
       resolveAfterAbsentRuns: c.resolveAfterAbsentRuns ?? 1,
       builtin: true,
@@ -112,20 +121,33 @@ function applyOverrides(
  * per-job severity override already applied — so the prompt anchors Holmes on
  * the severity this job actually cares about.
  */
-export async function effectiveChecksForJob(input: {
-  jobId: string;
-  category: MonitorCategory;
-  kinds: readonly WorkloadKind[];
-}): Promise<EffectiveCheck[]> {
+/**
+ * Resolve the job's rubric, then narrow it per workload as often as needed.
+ *
+ * Fetched once and reusable because a deep run resolves the rubric PER workload —
+ * different kind, different technology, therefore different questions — and doing
+ * that with a round trip each would query the catalogue N times to get N filtered
+ * views of identical data.
+ */
+export type JobRubric = (
+  kinds: readonly WorkloadKind[],
+  technologies: readonly WorkloadTechnology[],
+) => EffectiveCheck[];
+
+export async function jobRubricResolver(
+  jobId: string,
+  category: MonitorCategory,
+): Promise<JobRubric> {
   const [rows, overrides] = await Promise.all([
     liveChecks(),
-    listJobOverrides(input.jobId),
+    listJobOverrides(jobId),
   ]);
   const enabled = rows.filter((r) => r.enabled).map(toMonitorCheck);
-  return applyOverrides(
-    applicableChecks(enabled, input.category, input.kinds),
-    overrides,
-  );
+  return (kinds, technologies) =>
+    applyOverrides(
+      applicableChecks(enabled, category, kinds, technologies),
+      overrides,
+    );
 }
 
 /** Lookup keyed by ID, for reconciliation. */
@@ -146,6 +168,8 @@ export async function checkSummaries(): Promise<CheckView[]> {
     reference: c.reference,
     baseSeverity: c.baseSeverity,
     appliesTo: c.appliesTo,
+    appliesToTechnologies: c.appliesToTechnologies,
+    excludesTechnologies: c.excludesTechnologies,
     requires: c.requires,
     resolveAfterAbsentRuns: c.resolveAfterAbsentRuns,
     builtin: c.builtin,

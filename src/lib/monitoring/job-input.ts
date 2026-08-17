@@ -1,7 +1,9 @@
 import {
+  MONITOR_DEPTHS,
   SEVERITIES,
   WORKLOAD_KINDS,
   type AssessmentTarget,
+  type MonitorDepth,
   type Severity,
   type WorkloadKind,
 } from "./types";
@@ -14,19 +16,46 @@ import type { JobCheckOverride } from "@/lib/db/monitoring-queries";
  */
 
 /**
- * One Holmes call covers the whole selection, so a very large job spreads the
- * model's attention thin and coverage gets unreliable. The form warns above
- * this; the hard cap below is what protects the prompt.
+ * Posture: one Holmes call covers the whole selection, so a very large job spreads
+ * the model's attention thin and coverage gets unreliable. The form warns above the
+ * soft limit; the hard cap is what protects the prompt.
+ *
+ * Deep: attention is not the constraint, because each workload gets its own call.
+ * Time and money are. Every target is a full agentic investigation of several
+ * minutes and real cost, run sequentially to stay inside LLM rate limits, so the
+ * caps here are about a run that finishes at all rather than about prompt quality.
  */
-export const TARGET_SOFT_LIMIT = 15;
-export const TARGET_HARD_LIMIT = 40;
+export const TARGET_LIMITS: Record<
+  MonitorDepth,
+  { soft: number; hard: number }
+> = {
+  posture: { soft: 15, hard: 40 },
+  deep: { soft: 4, hard: 10 },
+};
 
-export function parseTargetList(raw: unknown): AssessmentTarget[] {
+export function parseDepth(raw: unknown, existing?: MonitorDepth): MonitorDepth {
+  if (raw === undefined || raw === null || raw === "")
+    return existing ?? "posture";
+  if (
+    typeof raw !== "string" ||
+    !(MONITOR_DEPTHS as readonly string[]).includes(raw)
+  )
+    throw new Error(`depth must be one of: ${MONITOR_DEPTHS.join(", ")}`);
+  return raw as MonitorDepth;
+}
+
+export function parseTargetList(
+  raw: unknown,
+  depth: MonitorDepth = "posture",
+): AssessmentTarget[] {
   if (!Array.isArray(raw) || raw.length === 0)
     throw new Error("Select at least one Deployment or StatefulSet");
-  if (raw.length > TARGET_HARD_LIMIT)
+  const { hard } = TARGET_LIMITS[depth];
+  if (raw.length > hard)
     throw new Error(
-      `A job can target at most ${TARGET_HARD_LIMIT} workloads — one assessment covers them all, and beyond that the results stop being trustworthy. Split it into several jobs.`,
+      depth === "deep"
+        ? `A deep job can target at most ${hard} workloads — each one is a separate full investigation, taking minutes and costing real money, and they run one after another. Split it into several jobs or use a posture job for breadth.`
+        : `A job can target at most ${hard} workloads — one assessment covers them all, and beyond that the results stop being trustworthy. Split it into several jobs.`,
     );
 
   const seen = new Set<string>();

@@ -7,6 +7,7 @@ import {
   eq,
   inArray,
   isNotNull,
+  isNull,
   lt,
   lte,
   sql,
@@ -19,19 +20,30 @@ import {
   monitoringJobCheckOverrides,
   monitoringJobTargets,
   monitoringJobs,
+  monitoringObservations,
+  monitoringPlaybooks,
   monitoringRunFindings,
   monitoringRuns,
   monitoringWorkloads,
 } from "./schema";
+import { PROFILED_TECHNOLOGIES } from "@/lib/monitoring/profiles";
 import { DISMISSED_STATUSES } from "@/lib/monitoring/types";
 import type {
+  ExpectedObservations,
+  ObservationSpec,
+} from "@/lib/monitoring/playbook";
+import type {
+  AssessmentObservation,
   AssessmentTarget,
   ConcernStatus,
   MonitorCategory,
+  MonitorDepth,
+  ResolvedTarget,
   RunCoverage,
   RunTrigger,
   Severity,
   WorkloadKind,
+  WorkloadTechnology,
 } from "@/lib/monitoring/types";
 
 /**
@@ -54,6 +66,8 @@ export interface CheckRow {
   reference: string;
   baseSeverity: Severity;
   appliesTo: string[];
+  appliesToTechnologies: string[];
+  excludesTechnologies: string[];
   requires: string | null;
   resolveAfterAbsentRuns: number;
   builtin: boolean;
@@ -166,6 +180,104 @@ export async function autoResolveConcernsForDisabledCheck(
 }
 
 // ---- Per-job catalogue overrides ----
+
+// ---- Playbooks (the live methods) ----
+
+export interface PlaybookRow {
+  technology: WorkloadTechnology;
+  framing: string;
+  dataSources: string[];
+  method: string[];
+  observations: ObservationSpec[];
+  editedBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export async function listPlaybookRows(): Promise<PlaybookRow[]> {
+  return db
+    .select()
+    .from(monitoringPlaybooks)
+    .orderBy(asc(monitoringPlaybooks.technology));
+}
+
+export async function getPlaybookRow(
+  technology: WorkloadTechnology,
+): Promise<PlaybookRow | null> {
+  const [row] = await db
+    .select()
+    .from(monitoringPlaybooks)
+    .where(eq(monitoringPlaybooks.technology, technology))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * Seed the shipped methods: insert what is missing, and refresh what nobody has
+ * edited.
+ *
+ * Deliberately unlike `seedBuiltinChecks`, which is insert-only. A check has an
+ * identity a run's history hangs off, so overwriting one silently rewrites what a
+ * past finding meant; a playbook is only instructions for the next run, and the
+ * editor offers no "adopt the shipped text" button, so insert-only would strand
+ * every installed database on the text it first saw. `edited_by IS NULL` is the
+ * whole rule: an operator's edit always wins, a pristine row always tracks git.
+ */
+export async function seedPlaybooks(
+  rows: Omit<PlaybookRow, "editedBy" | "createdAt" | "updatedAt">[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+  const written = await db
+    .insert(monitoringPlaybooks)
+    .values(rows)
+    .onConflictDoUpdate({
+      target: monitoringPlaybooks.technology,
+      set: {
+        framing: sql`excluded.framing`,
+        dataSources: sql`excluded.data_sources`,
+        method: sql`excluded.method`,
+        observations: sql`excluded.observations`,
+        updatedAt: new Date(),
+      },
+      setWhere: isNull(monitoringPlaybooks.editedBy),
+    })
+    .returning({ technology: monitoringPlaybooks.technology });
+  return written.length;
+}
+
+/** Write an edited method. */
+export async function updatePlaybook(
+  technology: WorkloadTechnology,
+  fields: Pick<
+    PlaybookRow,
+    "framing" | "dataSources" | "method" | "observations"
+  > & { editedBy: string | null },
+): Promise<PlaybookRow | null> {
+  const [row] = await db
+    .update(monitoringPlaybooks)
+    .set({ ...fields, updatedAt: new Date() })
+    .where(eq(monitoringPlaybooks.technology, technology))
+    .returning();
+  return row ?? null;
+}
+
+/**
+ * How many readings each of these observation keys already has — what makes a key
+ * un-renameable. Counted per KEY rather than per playbook on purpose: two engines
+ * that measure the same thing deliberately share a key (17 do), so the series
+ * belongs to the key, not to the method that happens to be asking.
+ */
+export async function observedKeyCounts(
+  keys: readonly string[],
+): Promise<Record<string, number>> {
+  if (keys.length === 0) return {};
+  const rows = await db
+    .select({ key: monitoringObservations.key, n: count() })
+    .from(monitoringObservations)
+    .where(inArray(monitoringObservations.key, [...keys]))
+    .groupBy(monitoringObservations.key);
+  return Object.fromEntries(rows.map((r) => [r.key, r.n]));
+}
 
 export interface JobCheckOverride {
   checkId: string;
@@ -327,17 +439,36 @@ export interface WorkloadRow {
   name: string;
   replicas: number | null;
   images: string[];
+  /** EFFECTIVE technology: the admin's override where set, else the detected one. */
+  technology: WorkloadTechnology | null;
+  /** What detection inferred, kept so the UI can show a guess being corrected. */
+  technologyDetected: WorkloadTechnology | null;
+  technologyReason: string | null;
+  technologyOverride: WorkloadTechnology | null;
+  /** True when a deep assessment has a playbook for `technology`. */
+  profiled: boolean;
   lastSeenAt: Date;
 }
 
+/** The technology that actually applies: a human's answer beats a guess. */
+function effectiveTechnology(row: {
+  technology: WorkloadTechnology | null;
+  technologyOverride: WorkloadTechnology | null;
+}): WorkloadTechnology | null {
+  return row.technologyOverride ?? row.technology;
+}
+
 export async function listWorkloads(clusterId: string): Promise<WorkloadRow[]> {
-  return db
+  const rows = await db
     .select({
       kind: monitoringWorkloads.kind,
       namespace: monitoringWorkloads.namespace,
       name: monitoringWorkloads.name,
       replicas: monitoringWorkloads.replicas,
       images: monitoringWorkloads.images,
+      technology: monitoringWorkloads.technology,
+      technologyReason: monitoringWorkloads.technologyReason,
+      technologyOverride: monitoringWorkloads.technologyOverride,
       lastSeenAt: monitoringWorkloads.lastSeenAt,
     })
     .from(monitoringWorkloads)
@@ -347,6 +478,42 @@ export async function listWorkloads(clusterId: string): Promise<WorkloadRow[]> {
       asc(monitoringWorkloads.kind),
       asc(monitoringWorkloads.name),
     );
+  // Resolved here rather than in the routes, so every consumer of the inventory
+  // agrees on what a workload IS and on whether a deep run has a method for it.
+  return rows.map((row) => {
+    const technology = effectiveTechnology(row);
+    return {
+      ...row,
+      technology,
+      technologyDetected: row.technology,
+      profiled: technology !== null && PROFILED_TECHNOLOGIES.includes(technology),
+    };
+  });
+}
+
+/**
+ * Correct a workload's detected technology by hand. Stored separately from the
+ * detected value so re-discovery cannot revert it — detection cannot see inside a
+ * privately-built image, so the human answer has to be the durable one.
+ */
+export async function setWorkloadTechnology(
+  clusterId: string,
+  target: AssessmentTarget,
+  technology: WorkloadTechnology | null,
+): Promise<boolean> {
+  const rows = await db
+    .update(monitoringWorkloads)
+    .set({ technologyOverride: technology })
+    .where(
+      and(
+        eq(monitoringWorkloads.clusterId, clusterId),
+        eq(monitoringWorkloads.kind, target.kind),
+        eq(monitoringWorkloads.namespace, target.namespace),
+        eq(monitoringWorkloads.name, target.name),
+      ),
+    )
+    .returning({ id: monitoringWorkloads.id });
+  return rows.length > 0;
 }
 
 /**
@@ -362,6 +529,8 @@ export async function replaceWorkloads(
     name: string;
     replicas: number | null;
     images: string[];
+    technology: WorkloadTechnology | null;
+    technologyReason: string | null;
   }[],
 ): Promise<{ total: number; removed: number }> {
   return db.transaction(async (tx) => {
@@ -390,6 +559,11 @@ export async function replaceWorkloads(
             set: {
               replicas: sql`excluded.replicas`,
               images: sql`excluded.images`,
+              // Re-derived every discovery, like the rest of this cache. Note
+              // `technology_override` is deliberately absent: an admin's
+              // correction must survive a re-scan that would guess wrong again.
+              technology: sql`excluded.technology`,
+              technologyReason: sql`excluded.technology_reason`,
               lastSeenAt: sql`excluded.last_seen_at`,
             },
           });
@@ -429,6 +603,7 @@ export interface JobRow {
   clusterId: string;
   name: string;
   type: MonitorCategory;
+  depth: MonitorDepth;
   model: string;
   schedule: string | null;
   enabled: boolean;
@@ -464,6 +639,7 @@ export async function listJobs(clusterId?: string): Promise<JobListRow[]> {
       clusterId: monitoringJobs.clusterId,
       name: monitoringJobs.name,
       type: monitoringJobs.type,
+      depth: monitoringJobs.depth,
       model: monitoringJobs.model,
       schedule: monitoringJobs.schedule,
       enabled: monitoringJobs.enabled,
@@ -509,6 +685,7 @@ export async function createJob(
     clusterId: string;
     name: string;
     type: MonitorCategory;
+    depth: MonitorDepth;
     model: string;
     schedule: string | null;
     enabled: boolean;
@@ -533,6 +710,7 @@ export async function updateJob(
   fields: Partial<{
     name: string;
     model: string;
+    depth: MonitorDepth;
     schedule: string | null;
     enabled: boolean;
     nextRunAt: Date | null;
@@ -580,6 +758,48 @@ export async function deleteJob(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+/**
+ * A job's targets with the technology the inventory believes each one runs.
+ *
+ * A LEFT JOIN, because targets are denormalised on purpose (decision 43): the job's
+ * intent is "the StatefulSet named X in namespace Y", which must survive discovery
+ * deleting and recreating inventory rows. A target with no matching row has simply
+ * vanished from the cluster, and comes back with a null technology — which the
+ * runner reports rather than hides.
+ */
+export async function getResolvedJobTargets(
+  jobId: string,
+): Promise<ResolvedTarget[]> {
+  const rows = await db
+    .select({
+      kind: monitoringJobTargets.kind,
+      namespace: monitoringJobTargets.namespace,
+      name: monitoringJobTargets.name,
+      technology: monitoringWorkloads.technology,
+      technologyOverride: monitoringWorkloads.technologyOverride,
+    })
+    .from(monitoringJobTargets)
+    .innerJoin(
+      monitoringJobs,
+      eq(monitoringJobs.id, monitoringJobTargets.jobId),
+    )
+    .leftJoin(
+      monitoringWorkloads,
+      and(
+        eq(monitoringWorkloads.clusterId, monitoringJobs.clusterId),
+        eq(monitoringWorkloads.kind, monitoringJobTargets.kind),
+        eq(monitoringWorkloads.namespace, monitoringJobTargets.namespace),
+        eq(monitoringWorkloads.name, monitoringJobTargets.name),
+      ),
+    )
+    .where(eq(monitoringJobTargets.jobId, jobId))
+    .orderBy(asc(monitoringJobTargets.namespace), asc(monitoringJobTargets.name));
+  return rows.map(({ technology, technologyOverride, ...target }) => ({
+    ...target,
+    technology: effectiveTechnology({ technology, technologyOverride }),
+  }));
+}
+
 /** Everything the runner needs for one job, in one round trip. */
 export async function getJobExecutionContext(jobId: string) {
   const [row] = await db
@@ -592,7 +812,7 @@ export async function getJobExecutionContext(jobId: string) {
     .where(eq(monitoringJobs.id, jobId))
     .limit(1);
   if (!row) return null;
-  return { ...row, targets: await getJobTargets(jobId) };
+  return { ...row, targets: await getResolvedJobTargets(jobId) };
 }
 
 // ---- Runs / queue ----
@@ -726,9 +946,40 @@ export async function failRun(
 /**
  * Crash recovery: a pod that dies mid-run leaves the row `running` forever.
  * Called at the top of every scheduler tick.
+ *
+ * The threshold is per depth, because the two depths have honestly different
+ * plausible durations: a posture run is one Holmes call, while a deep run is one
+ * call per workload and legitimately takes far longer. Using the posture threshold
+ * for both would reap healthy deep runs mid-flight and then re-enqueue them, which
+ * is a way to spend money on assessments that are thrown away.
  */
-export async function reapStaleRuns(olderThanMs: number): Promise<number> {
-  const cutoff = new Date(Date.now() - olderThanMs);
+export async function reapStaleRuns(thresholds: {
+  postureMs: number;
+  deepMs: number;
+}): Promise<number> {
+  const now = Date.now();
+  const counts = await Promise.all(
+    (
+      [
+        ["posture", thresholds.postureMs],
+        ["deep", thresholds.deepMs],
+      ] as const
+    ).map(([depth, ms]) => reapRunsForDepth(depth, new Date(now - ms))),
+  );
+  return counts.reduce((total, n) => total + n, 0);
+}
+
+/**
+ * Deliberately two statements with `lt()` and a subquery rather than one with a
+ * raw `case` expression: a JS `Date` interpolated into a raw `sql` template does
+ * NOT get the column's type mapper applied and reaches Postgres as
+ * "Mon Aug 10 2026 …" (docs/DECISIONS.md 53 — this exact bug broke the original
+ * reaper).
+ */
+async function reapRunsForDepth(
+  depth: MonitorDepth,
+  cutoff: Date,
+): Promise<number> {
   const rows = await db
     .update(monitoringRuns)
     .set({
@@ -740,6 +991,13 @@ export async function reapStaleRuns(olderThanMs: number): Promise<number> {
       and(
         eq(monitoringRuns.status, "running"),
         lt(monitoringRuns.startedAt, cutoff),
+        inArray(
+          monitoringRuns.jobId,
+          db
+            .select({ id: monitoringJobs.id })
+            .from(monitoringJobs)
+            .where(eq(monitoringJobs.depth, depth)),
+        ),
       ),
     )
     .returning({ id: monitoringRuns.id });
@@ -761,12 +1019,35 @@ export async function getRun(id: string) {
       ...RUN_LIST_COLUMNS,
       coverage: monitoringRuns.coverage,
       rejected: monitoringRuns.rejected,
+      expectedObservations: monitoringRuns.expectedObservations,
+      prompts: monitoringRuns.prompts,
       attempt: monitoringRuns.attempt,
     })
     .from(monitoringRuns)
     .where(eq(monitoringRuns.id, id))
     .limit(1);
   return row ?? null;
+}
+
+/** A run's measured facts, ordered so one workload's readings stay together. */
+export async function getRunObservations(runId: string) {
+  return db
+    .select({
+      targetKind: monitoringObservations.targetKind,
+      targetNamespace: monitoringObservations.targetNamespace,
+      targetName: monitoringObservations.targetName,
+      key: monitoringObservations.key,
+      value: monitoringObservations.value,
+      numeric: monitoringObservations.numeric,
+      unit: monitoringObservations.unit,
+      source: monitoringObservations.source,
+    })
+    .from(monitoringObservations)
+    .where(eq(monitoringObservations.runId, runId))
+    .orderBy(
+      asc(monitoringObservations.targetName),
+      asc(monitoringObservations.key),
+    );
 }
 
 /** The concerns this run reported, with the severity as observed then. */
@@ -1027,8 +1308,13 @@ export async function applyReconcilePlan(
   plan: ReconcilePlan,
   runFields: {
     coverage: RunCoverage;
+    /** Measured facts; stored in their own table, not on the run row. */
+    observations: readonly AssessmentObservation[];
     rejected: string[];
     rawResponse: unknown;
+    /** What the run was told to measure — snapshotted, see the column's comment. */
+    expectedObservations: ExpectedObservations[] | null;
+    prompts: { target: string; prompt: string }[];
     model: string;
     costUsd: number | null;
     totalTokens: number | null;
@@ -1037,6 +1323,7 @@ export async function applyReconcilePlan(
     toolCallsFailed: number;
   },
 ): Promise<ReconcileResult> {
+  const { observations, ...runColumns } = runFields;
   return db.transaction(async (tx) => {
     const now = new Date();
     let newCount = 0;
@@ -1151,6 +1438,34 @@ export async function applyReconcilePlan(
       );
     const openCount = openRow?.n ?? 0;
 
+    if (observations.length > 0) {
+      // Chunked for the same reason as workload discovery: a deep run over many
+      // workloads produces enough rows to pass Postgres's bind-parameter limit.
+      // `onConflictDoNothing` on (run, target, key) drops a key the model restated
+      // rather than failing the whole transaction over it.
+      const CHUNK = 500;
+      for (let i = 0; i < observations.length; i += CHUNK) {
+        await tx
+          .insert(monitoringObservations)
+          .values(
+            observations.slice(i, i + CHUNK).map((o) => ({
+              runId,
+              jobId,
+              targetKind: o.target.kind,
+              targetNamespace: o.target.namespace,
+              targetName: o.target.name,
+              key: o.key,
+              value: o.value,
+              numeric: o.numeric,
+              unit: o.unit,
+              source: o.source,
+              createdAt: now,
+            })),
+          )
+          .onConflictDoNothing();
+      }
+    }
+
     await tx
       .update(monitoringRuns)
       .set({
@@ -1159,7 +1474,7 @@ export async function applyReconcilePlan(
         findingsNew: newCount,
         findingsResolved: plan.autoResolveIds.length,
         findingsOpen: openCount,
-        ...runFields,
+        ...runColumns,
       })
       .where(eq(monitoringRuns.id, runId));
 

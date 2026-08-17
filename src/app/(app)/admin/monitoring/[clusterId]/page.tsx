@@ -11,8 +11,14 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { formatNumber, formatRelative } from "@/lib/admin/format";
 import { useAdminData } from "@/lib/admin/use-admin-data";
-import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
-import type { MonitorCategory, WorkloadKind } from "@/lib/monitoring/types";
+import type { PickableWorkload } from "@/components/monitoring/workload-picker";
+import { CATEGORY_LABEL, TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
+import { WORKLOAD_TECHNOLOGIES } from "@/lib/monitoring/types";
+import type {
+  MonitorCategory,
+  WorkloadKind,
+  WorkloadTechnology,
+} from "@/lib/monitoring/types";
 
 interface ClusterDetail {
   cluster: {
@@ -23,13 +29,12 @@ interface ClusterDetail {
     lastValidatedAt: string | null;
     discoveryError: string | null;
   };
-  workloads: {
-    kind: WorkloadKind;
-    namespace: string;
-    name: string;
-    replicas: number | null;
+  workloads: (PickableWorkload & {
     images: string[];
-  }[];
+    technologyDetected: WorkloadTechnology | null;
+    technologyReason: string | null;
+    technologyOverride: WorkloadTechnology | null;
+  })[];
   jobs: {
     id: string;
     name: string;
@@ -76,6 +81,41 @@ export default function ClusterPage({
     }
   }
 
+  /**
+   * Overrule detection for one workload. Optimistically refetched rather than
+   * locally patched: the effective technology is derived server-side from the
+   * override plus the detected value, and duplicating that rule in the client is
+   * how the two drift apart.
+   */
+  async function setTechnology(
+    workload: { kind: WorkloadKind; namespace: string; name: string },
+    technology: string,
+  ) {
+    setActionError(null);
+    try {
+      const res = await fetch(
+        `/api/admin/monitoring/clusters/${clusterId}/workloads`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: workload.kind,
+            namespace: workload.namespace,
+            name: workload.name,
+            technology: technology || null,
+          }),
+        },
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      refetch();
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Could not set the technology",
+      );
+    }
+  }
+
   async function remove() {
     if (
       !confirm(
@@ -112,6 +152,35 @@ export default function ClusterPage({
       key: "name",
       header: "Name",
       render: (w) => <span className="text-warm-off-white">{w.name}</span>,
+    },
+    {
+      key: "technology",
+      header: "Technology",
+      render: (w) => (
+        <div className="space-y-0.5">
+          <select
+            value={w.technology ?? ""}
+            onChange={(e) => setTechnology(w, e.target.value)}
+            className="h-7 rounded-md border border-input bg-transparent px-1.5 text-body-sm text-warm-off-white outline-none focus-visible:border-ring"
+          >
+            <option value="" className="bg-popover">
+              — none —
+            </option>
+            {WORKLOAD_TECHNOLOGIES.map((option) => (
+              <option key={option} value={option} className="bg-popover">
+                {TECHNOLOGY_LABEL[option]}
+              </option>
+            ))}
+          </select>
+          {/* Why we think so, or that a human said so — a guess you cannot
+              interrogate is a guess you cannot correct with confidence. */}
+          <p className="text-caption-tracked text-bone-gray">
+            {w.technologyOverride
+              ? "set by hand"
+              : (w.technologyReason ?? "not recognised")}
+          </p>
+        </div>
+      ),
     },
     {
       key: "replicas",

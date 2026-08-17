@@ -73,8 +73,14 @@ async function* fixtureStream(): AsyncGenerator<DrillEvent> {
   };
 }
 
-/** Minimal SSE parser: yields {event, data} per frame. */
-async function* parseSse(
+/**
+ * Minimal SSE parser: yields {event, data} per frame.
+ *
+ * Exported because the monitoring assessment path needs it too: a non-streaming POST
+ * leaves the socket silent for the whole investigation, and Node's HTTP client gives
+ * up on a silent connection after 5 minutes.
+ */
+export async function* parseSse(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<{ event: string; data: string }> {
   const reader = body.getReader();

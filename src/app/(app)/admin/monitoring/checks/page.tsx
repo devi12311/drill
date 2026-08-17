@@ -9,9 +9,9 @@ import { Card } from "@/components/ui/card";
 import { CheckForm } from "@/components/monitoring/check-form";
 import { SeverityBadge } from "@/components/monitoring/severity-badge";
 import { useAdminData } from "@/lib/admin/use-admin-data";
-import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
+import { CATEGORY_LABEL, TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
 import { MONITOR_CATEGORIES } from "@/lib/monitoring/types";
-import type { CheckView } from "@/lib/monitoring/types";
+import type { CheckView, WorkloadTechnology } from "@/lib/monitoring/types";
 
 /**
  * The live rubric. Built-in checks are seeded from the code definitions on first
@@ -187,11 +187,27 @@ export default function ChecksPage() {
                         {check.reference && <p>Cites: {check.reference}</p>}
                         {(check.requires ||
                           check.appliesTo.length > 0 ||
+                          check.appliesToTechnologies.length > 0 ||
+                          check.excludesTechnologies.length > 0 ||
                           check.resolveAfterAbsentRuns > 1) && (
                           <p>
                             {check.requires && `Needs ${check.requires}. `}
                             {check.appliesTo.length > 0 &&
                               `Only ${check.appliesTo.join(", ")}. `}
+                            {check.appliesToTechnologies.length > 0 &&
+                              `Only ${check.appliesToTechnologies
+                                .map(
+                                  (t) =>
+                                    TECHNOLOGY_LABEL[t as WorkloadTechnology] ?? t,
+                                )
+                                .join(", ")}. `}
+                            {check.excludesTechnologies.length > 0 &&
+                              `Never ${check.excludesTechnologies
+                                .map(
+                                  (t) =>
+                                    TECHNOLOGY_LABEL[t as WorkloadTechnology] ?? t,
+                                )
+                                .join(", ")}. `}
                             {check.resolveAfterAbsentRuns > 1 &&
                               `Auto-resolves after ${check.resolveAfterAbsentRuns} clean runs.`}
                           </p>

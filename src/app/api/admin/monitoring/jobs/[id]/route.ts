@@ -10,7 +10,11 @@ import {
   updateJob,
   type JobCheckOverride,
 } from "@/lib/db/monitoring-queries";
-import { parseOverrides, parseTargetList } from "@/lib/monitoring/job-input";
+import {
+  parseDepth,
+  parseOverrides,
+  parseTargetList,
+} from "@/lib/monitoring/job-input";
 import { nextRunAfter, normaliseSchedule } from "@/lib/monitoring/schedule";
 
 // Next 16: route params are async.
@@ -43,10 +47,16 @@ export async function PATCH(request: Request, context: Context) {
   }
 
   let targets;
+  let depth = existing.depth;
   let schedule = existing.schedule;
   let overrides: JobCheckOverride[] | undefined;
   try {
-    if (body.targets !== undefined) targets = parseTargetList(body.targets);
+    depth = parseDepth(body.depth, existing.depth);
+    // Validated against the NEW depth, and against the existing selection when
+    // the request only changes depth: switching a 30-target job to deep has to be
+    // refused rather than silently accepted and then never finishing.
+    if (body.targets !== undefined || depth !== existing.depth)
+      targets = parseTargetList(body.targets ?? existing.targets, depth);
     if (body.schedule !== undefined) schedule = normaliseSchedule(body.schedule);
     if (body.overrides !== undefined) overrides = parseOverrides(body.overrides);
   } catch (err) {
@@ -68,6 +78,7 @@ export async function PATCH(request: Request, context: Context) {
         typeof body.model === "string" && body.model.trim()
           ? body.model.trim()
           : existing.model,
+      depth,
       schedule,
       enabled,
       // Recompute from now whenever the schedule or the enabled flag moves, so

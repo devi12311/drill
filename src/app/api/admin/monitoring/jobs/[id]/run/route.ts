@@ -3,26 +3,33 @@ import { writeAudit } from "@/lib/db/admin-queries";
 import {
   enqueueRun,
   getJob,
-  getRun,
   hasActiveRun,
   reapStaleRuns,
 } from "@/lib/db/monitoring-queries";
 import { STALE_RUN_MS, executeRunNow } from "@/lib/monitoring/runner";
 
-// An assessment is a full agentic investigation: tens of seconds to minutes.
-// Same treatment as /api/chat, which runs at 900.
+// Kept for the enqueue path itself, which is fast. The investigation deliberately
+// does NOT run inside this request any more — see the handler.
 export const maxDuration = 900;
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
 
 /**
- * Run a job now. Enqueues a run then drains it in the same request, so the
- * button gets a finished run back — the repo's existing pattern for long Holmes
- * calls (see /api/chat and conversations/[id]/resolve).
+ * Run a job now: enqueue, start executing, and return IMMEDIATELY with the queued
+ * run. The client polls the job's run list for the result.
  *
- * If the browser walks away mid-flight the row stays `running` and the
- * scheduler tick's reaper fails it, rather than leaking a stuck run.
+ * This replaces awaiting the investigation inside the request (the original
+ * behaviour, and the pattern /api/chat still uses). A deep run is one full
+ * investigation per workload with a 20-minute allowance each, so it routinely
+ * outlives any HTTP request budget — awaiting it meant the browser saw a network
+ * error while the run was still healthy and, worse, invited a client-side retry
+ * against work that was already being paid for.
+ *
+ * The floating promise is deliberate and is not a new failure mode: `executeRunNow`
+ * already guards every throw into `failRun`, and a process that dies mid-run leaves
+ * the row `running` for the reaper — exactly what happened before when the browser
+ * walked away.
  */
 export async function POST(_request: Request, context: Context) {
   const actor = await getAdminActor();
@@ -58,7 +65,10 @@ export async function POST(_request: Request, context: Context) {
     metadata: { jobId: id, runId: queued.id, name: job.name },
   });
 
-  await executeRunNow(queued.id);
-  const run = await getRun(queued.id);
-  return Response.json({ run: run ?? queued });
+  // Not awaited: see the note above. `.catch` only guards against an unforeseen
+  // throw escaping the runner's own guard — it must never reject unhandled here,
+  // because there is no request left to attribute the error to.
+  void executeRunNow(queued.id).catch(() => null);
+
+  return Response.json({ run: queued }, { status: 202 });
 }

@@ -1,6 +1,7 @@
 import "server-only";
 import { AppsV1Api, KubeConfig } from "@kubernetes/client-node";
-import type { WorkloadKind } from "./types";
+import { detectTechnology } from "./technology";
+import type { WorkloadKind, WorkloadTechnology } from "./types";
 
 /**
  * Workload discovery — the ONLY thing Drill uses a cluster's kubeconfig for.
@@ -19,6 +20,10 @@ export interface DiscoveredWorkload {
   name: string;
   replicas: number | null;
   images: string[];
+  /** Best guess at the software inside, or null when nothing is recognised. */
+  technology: WorkloadTechnology | null;
+  /** How the guess was reached, so the picker can justify it. */
+  technologyReason: string | null;
 }
 
 export interface DiscoveryResult {
@@ -100,10 +105,13 @@ function withTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
 }
 
 interface WorkloadListItem {
-  metadata?: { name?: string; namespace?: string };
+  metadata?: { name?: string; namespace?: string; labels?: Record<string, string> };
   spec?: {
     replicas?: number;
-    template?: { spec?: { containers?: { image?: string }[] } };
+    template?: {
+      metadata?: { labels?: Record<string, string> };
+      spec?: { containers?: { image?: string; name?: string }[] };
+    };
   };
 }
 
@@ -113,15 +121,31 @@ function mapItems(
 ): DiscoveredWorkload[] {
   return (items ?? [])
     .filter((item) => item.metadata?.name && item.metadata?.namespace)
-    .map((item) => ({
-      kind,
-      namespace: item.metadata!.namespace!,
-      name: item.metadata!.name!,
-      replicas: item.spec?.replicas ?? null,
-      images: (item.spec?.template?.spec?.containers ?? [])
+    .map((item) => {
+      const containers = item.spec?.template?.spec?.containers ?? [];
+      const images = containers
         .map((c) => c.image)
-        .filter((image): image is string => Boolean(image)),
-    }));
+        .filter((image): image is string => Boolean(image));
+      // Pod-template labels win: they are the selector labels, so they describe
+      // what actually runs, while the workload's own labels are often just
+      // packaging metadata from whatever installed it.
+      const guess = detectTechnology({
+        images,
+        labels: { ...item.metadata?.labels, ...item.spec?.template?.metadata?.labels },
+        containerNames: containers
+          .map((c) => c.name)
+          .filter((name): name is string => Boolean(name)),
+      });
+      return {
+        kind,
+        namespace: item.metadata!.namespace!,
+        name: item.metadata!.name!,
+        replicas: item.spec?.replicas ?? null,
+        images,
+        technology: guess?.technology ?? null,
+        technologyReason: guess?.reason ?? null,
+      };
+    });
 }
 
 /**

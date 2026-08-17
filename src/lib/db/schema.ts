@@ -1,5 +1,6 @@
 import {
   boolean,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -14,14 +15,21 @@ import {
 } from "drizzle-orm/pg-core";
 import type { ArtifactGraph } from "@/lib/artifacts/types";
 import type {
+  ExpectedObservations,
+  ObservationSpec,
+} from "@/lib/monitoring/playbook";
+import type {
   ConcernStatus,
   MonitorCategory,
+  MonitorDepth,
   MonitorEvidence,
+  ObservationSource,
   RunCoverage,
   RunStatus,
   RunTrigger,
   Severity,
   WorkloadKind,
+  WorkloadTechnology,
 } from "@/lib/monitoring/types";
 
 export const users = pgTable("users", {
@@ -211,6 +219,24 @@ export const monitoringChecks = pgTable(
       .notNull(),
     /** Empty array = applies to every workload kind. */
     appliesTo: text("applies_to").array().notNull().default([]),
+    /**
+     * Empty array = technology-agnostic (the posture checks). Otherwise the check
+     * only ever reaches a workload running one of these, so `PG.WAL_BLOATING`
+     * never gets asked about a RabbitMQ pod.
+     */
+    appliesToTechnologies: text("applies_to_technologies")
+      .array()
+      .notNull()
+      .default([]),
+    /**
+     * Technologies this check is suppressed for — either because the generic form
+     * is a false positive there, or because a profile check asks it better and both
+     * firing would open two concerns for one problem.
+     */
+    excludesTechnologies: text("excludes_technologies")
+      .array()
+      .notNull()
+      .default([]),
     /** Telemetry the check depends on; absent ⇒ Holmes must skip, not pass. */
     requires: text("requires"),
     /** Consecutive evaluated-but-absent runs before the concern auto-resolves. */
@@ -254,6 +280,54 @@ export const monitoringJobCheckOverrides = pgTable(
 );
 
 /**
+ * THE METHODS, as live data — the playbook half of a technology profile, in the
+ * same relationship to `lib/monitoring/profiles/*.ts` that `monitoring_checks`
+ * has to `catalogue.ts`: the code definition is the reviewed seed, this table is
+ * what a deep run actually reads and what the admin screen edits.
+ *
+ * The primary key is the technology, and there is exactly one row per profiled
+ * technology. Playbooks are editable but never creatable or deletable here: a
+ * technology that has no playbook also has no vocabulary entry
+ * (`WORKLOAD_TECHNOLOGIES`) and no detection rules, so "add a playbook" is a code
+ * change by definition and a half-created row would only misreport coverage.
+ *
+ * There is deliberately no version column: a method is edited and saved, and the
+ * text a run was actually given is recorded on the run itself
+ * (`monitoring_runs.prompts`, `expected_observations`) rather than reconstructed
+ * from a number.
+ */
+export const monitoringPlaybooks = pgTable("monitoring_playbooks", {
+  /** One of WORKLOAD_TECHNOLOGIES. Immutable — it is the join to everything. */
+  technology: text("technology")
+    .$type<WorkloadTechnology>()
+    .primaryKey(),
+  /** One paragraph: what this technology dies of, in priority order. */
+  framing: text("framing").notNull(),
+  /** Where this instance's data lives; `{{namespace}}`/`{{name}}` substituted per target. */
+  dataSources: text("data_sources").array().notNull().default([]),
+  /** The ordered procedure, most-fatal-first. */
+  method: text("method").array().notNull().default([]),
+  /** Required measurements. The keys are a permanent trend axis — see monitoring_observations. */
+  observations: jsonb("observations")
+    .$type<ObservationSpec[]>()
+    .notNull()
+    .default([]),
+  /**
+   * Who last edited it; null while the row is still the shipped text.
+   *
+   * Also the seed guard: a release that rewrites a shipped method refreshes every
+   * row that nobody has touched, and leaves an edited one alone. Without it the
+   * seed is insert-if-missing forever and new shipped text never reaches an
+   * installed database.
+   */
+  editedBy: uuid("edited_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/**
  * Discovered workload inventory — a CACHE that makes the picker instant and
  * lets the UI flag a selected workload that has since disappeared. Never a
  * source of truth: every discovery run re-stamps `lastSeenAt`.
@@ -272,6 +346,20 @@ export const monitoringWorkloads = pgTable(
     name: text("name").notNull(),
     replicas: integer("replicas"),
     images: text("images").array().notNull().default([]),
+    /**
+     * What discovery inferred is running inside, from images, labels and container
+     * names (src/lib/monitoring/technology.ts). Re-derived on every discovery, so
+     * it is as disposable as the rest of this cache.
+     */
+    technology: text("technology").$type<WorkloadTechnology>(),
+    /** How that guess was reached, shown in the picker to justify it. */
+    technologyReason: text("technology_reason"),
+    /**
+     * An admin's correction, which always wins. Survives re-discovery precisely
+     * because detection cannot see inside a privately-built image, and a wrong
+     * guess would otherwise be re-applied every time.
+     */
+    technologyOverride: text("technology_override").$type<WorkloadTechnology>(),
     lastSeenAt: timestamp("last_seen_at").notNull().defaultNow(),
   },
   (t) => [
@@ -291,6 +379,15 @@ export const monitoringJobs = pgTable(
     type: text("type", { enum: ["security", "performance"] })
       .$type<MonitorCategory>()
       .notNull(),
+    /**
+     * `posture` batches every target into one call (the original behaviour);
+     * `deep` runs one investigation per workload against its technology playbook.
+     * Existing jobs default to posture, so nothing gets silently more expensive.
+     */
+    depth: text("depth", { enum: ["posture", "deep"] })
+      .$type<MonitorDepth>()
+      .notNull()
+      .default("posture"),
     model: text("model").notNull(),
     /** 5-field cron expression, UTC. Null = manual runs only. */
     schedule: text("schedule"),
@@ -368,8 +465,33 @@ export const monitoringRuns = pgTable(
      */
     toolCallsTotal: integer("tool_calls_total"),
     toolCallsFailed: integer("tool_calls_failed"),
-    /** Per-target evaluated/skipped checks — the reconciliation denominator. */
+    /**
+     * Per-target evaluated/skipped checks — the reconciliation denominator — plus
+     * which data sources answered and which were silent.
+     */
     coverage: jsonb("coverage").$type<RunCoverage>(),
+    /**
+     * What this run was SUPPOSED to measure, per target — snapshotted here rather
+     * than re-derived from the current playbook when the run page asks.
+     *
+     * Re-deriving was defensible while a method could only change through a deploy;
+     * it is wrong now that an admin can edit one between two runs, because the
+     * "missing measurements" panel would grade an old run against a method it was
+     * never given. Null on posture runs, which ask for no measurements, and on runs
+     * recorded before this column existed.
+     */
+    expectedObservations: jsonb("expected_observations").$type<
+      ExpectedObservations[]
+    >(),
+    /**
+     * The exact prompt sent, per workload — what the agent was ACTUALLY told.
+     *
+     * Stored rather than re-rendered on demand, because a playbook edit or a check
+     * edit makes the original unreconstructable, and "which method produced
+     * this answer" is the first question anyone asks of a surprising run. It is also
+     * the only way an operator can review the method without reading TypeScript.
+     */
+    prompts: jsonb("prompts").$type<{ target: string; prompt: string }[]>(),
     /** Findings dropped in validation (unknown check id, foreign target). */
     rejected: jsonb("rejected").$type<string[]>(),
     rawResponse: jsonb("raw_response"),
@@ -482,6 +604,58 @@ export const monitoringConcerns = pgTable(
     unique().on(t.jobId, t.fingerprint),
     // The concerns list for a job, filtered by lifecycle status.
     index("monitoring_concerns_job_status_idx").on(t.jobId, t.status),
+  ],
+);
+
+/**
+ * MEASURED FACTS, as opposed to verdicts — the trend substrate.
+ *
+ * Two jobs, neither of which the concern history can do. First, honesty: every row
+ * names the source it came from, so "the agent only read the manifest" becomes a
+ * query instead of an invisible quality problem. Second, trends: `numeric` makes
+ * "WAL grew 4x this week" and "consumer lag is climbing" ordinary SQL rather than
+ * a question we have to ask an LLM again.
+ *
+ * Deliberately NOT deduplicated across runs like concerns are. A concern is one
+ * long-lived problem; an observation is a reading at a point in time, and the
+ * whole value is in keeping every reading.
+ */
+export const monitoringObservations = pgTable(
+  "monitoring_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => monitoringRuns.id, { onDelete: "cascade" }),
+    /** Denormalised, like job targets: a trend is per job, and this keeps it single-table. */
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => monitoringJobs.id, { onDelete: "cascade" }),
+    targetKind: text("target_kind", { enum: ["deployment", "statefulset"] })
+      .$type<WorkloadKind>()
+      .notNull(),
+    targetNamespace: text("target_namespace").notNull(),
+    targetName: text("target_name").notNull(),
+    /** Stable dotted key from the playbook, e.g. "wal.generation_bytes_per_day". */
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    /** The same fact as a number when it is one — null when it genuinely is not. */
+    numeric: doublePrecision("numeric"),
+    unit: text("unit").notNull().default(""),
+    source: text("source").$type<ObservationSource>().notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // One reading per key per workload per run; a repeated key is the model
+    // restating itself, not a second measurement.
+    unique().on(t.runId, t.targetKind, t.targetNamespace, t.targetName, t.key),
+    // The trend query: one workload's series for one key, oldest first.
+    index("monitoring_observations_trend_idx").on(
+      t.jobId,
+      t.targetName,
+      t.key,
+      t.createdAt,
+    ),
   ],
 );
 

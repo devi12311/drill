@@ -7,20 +7,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { REQUIREMENT_LABEL } from "@/lib/monitoring/catalogue";
-import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
+import {
+  CATEGORY_LABEL,
+  SELECT_CLASS,
+  TECHNOLOGY_LABEL,
+} from "@/lib/monitoring/ui";
 import {
   MONITOR_CATEGORIES,
   SEVERITIES,
   WORKLOAD_KINDS,
+  WORKLOAD_TECHNOLOGIES,
   type MonitorCategory,
   type Severity,
   type WorkloadKind,
+  type WorkloadTechnology,
   type CheckView,
 } from "@/lib/monitoring/types";
-
-
-const SELECT_CLASS =
-  "h-9 w-full rounded-md border border-input bg-transparent px-2.5 text-body-sm text-warm-off-white outline-none focus-visible:border-ring";
 
 /**
  * Author or retune a check. Editing an existing one cannot change its ID —
@@ -49,6 +51,12 @@ export function CheckForm({
   const [appliesTo, setAppliesTo] = useState<WorkloadKind[]>(
     (check?.appliesTo as WorkloadKind[]) ?? [],
   );
+  const [appliesToTechnologies, setAppliesToTechnologies] = useState<
+    WorkloadTechnology[]
+  >((check?.appliesToTechnologies as WorkloadTechnology[]) ?? []);
+  const [excludesTechnologies, setExcludesTechnologies] = useState<
+    WorkloadTechnology[]
+  >((check?.excludesTechnologies as WorkloadTechnology[]) ?? []);
   const [requires, setRequires] = useState(check?.requires ?? "");
   const [absentRuns, setAbsentRuns] = useState(
     String(check?.resolveAfterAbsentRuns ?? 1),
@@ -59,6 +67,17 @@ export function CheckForm({
   function toggleKind(kind: WorkloadKind) {
     setAppliesTo((prev) =>
       prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind],
+    );
+  }
+
+  function toggleTechnology(
+    technology: WorkloadTechnology,
+    setter: typeof setAppliesToTechnologies,
+  ) {
+    setter((prev) =>
+      prev.includes(technology)
+        ? prev.filter((t) => t !== technology)
+        : [...prev, technology],
     );
   }
 
@@ -74,6 +93,8 @@ export function CheckForm({
       reference,
       baseSeverity,
       appliesTo,
+      appliesToTechnologies,
+      excludesTechnologies,
       requires: requires || null,
       resolveAfterAbsentRuns: Number(absentRuns),
     };
@@ -273,6 +294,61 @@ export function CheckForm({
         </div>
         <p className="text-body-sm text-bone-gray">
           Both (or neither) means every workload kind.
+        </p>
+      </fieldset>
+
+      <fieldset className="space-y-1.5">
+        <legend className="text-body-sm font-medium text-warm-off-white">
+          Only for these technologies
+        </legend>
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+          {WORKLOAD_TECHNOLOGIES.map((technology) => (
+            <label
+              key={technology}
+              className="flex cursor-pointer items-center gap-2 text-body-sm text-pale-stone"
+            >
+              <Checkbox
+                checked={appliesToTechnologies.includes(technology)}
+                onCheckedChange={() =>
+                  toggleTechnology(technology, setAppliesToTechnologies)
+                }
+              />
+              {TECHNOLOGY_LABEL[technology]}
+            </label>
+          ))}
+        </div>
+        <p className="text-body-sm text-bone-gray">
+          Leave all unchecked for a technology-agnostic check. Note that ticking
+          every box is <em>not</em> the same as leaving them empty: empty also
+          reaches workloads whose technology was never identified, which a check
+          written for a specific engine should not do.
+        </p>
+      </fieldset>
+
+      <fieldset className="space-y-1.5">
+        <legend className="text-body-sm font-medium text-warm-off-white">
+          Never for these technologies
+        </legend>
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+          {WORKLOAD_TECHNOLOGIES.map((technology) => (
+            <label
+              key={technology}
+              className="flex cursor-pointer items-center gap-2 text-body-sm text-pale-stone"
+            >
+              <Checkbox
+                checked={excludesTechnologies.includes(technology)}
+                onCheckedChange={() =>
+                  toggleTechnology(technology, setExcludesTechnologies)
+                }
+              />
+              {TECHNOLOGY_LABEL[technology]}
+            </label>
+          ))}
+        </div>
+        <p className="text-body-sm text-bone-gray">
+          Suppress this check where its generic form is a false positive, or where
+          a technology-specific check already asks it better — otherwise both fire
+          and one problem opens two concerns.
         </p>
       </fieldset>
 

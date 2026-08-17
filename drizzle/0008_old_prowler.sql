@@ -1,0 +1,1 @@
+ALTER TABLE "monitoring_runs" ADD COLUMN "prompts" jsonb;

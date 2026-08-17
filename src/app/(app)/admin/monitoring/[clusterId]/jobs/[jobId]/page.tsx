@@ -15,8 +15,8 @@ import {
 } from "@/components/monitoring/concern-card";
 import { formatDuration, formatRelative, formatUsd } from "@/lib/admin/format";
 import { useAdminData } from "@/lib/admin/use-admin-data";
-import { CATEGORY_LABEL, RUN_STATUS_CLASS } from "@/lib/monitoring/ui";
-import type { MonitorCategory } from "@/lib/monitoring/types";
+import { CATEGORY_LABEL, DEPTH_LABEL, RUN_STATUS_CLASS } from "@/lib/monitoring/ui";
+import type { MonitorCategory, MonitorDepth } from "@/lib/monitoring/types";
 
 interface RunRow {
   id: string;
@@ -40,6 +40,7 @@ interface JobPayload {
     id: string;
     name: string;
     type: MonitorCategory;
+    depth: MonitorDepth;
     model: string;
     schedule: string | null;
     enabled: boolean;
@@ -71,6 +72,15 @@ export default function JobPage({
     [jobId],
   );
 
+  /**
+   * Start a run and poll until it lands.
+   *
+   * The server no longer finishes the investigation inside the request — a deep run
+   * is minutes per workload and outlives any request budget — so the button starts
+   * the work and then watches the run list. Polling rather than an effect keeps the
+   * "busy" state tied to the action that caused it, which is what makes leaving the
+   * page harmless: the run continues server-side either way.
+   */
   async function runNow() {
     setBusy("run");
     setActionError(null);
@@ -80,7 +90,22 @@ export default function JobPage({
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      if (body.run?.error) setActionError(body.run.error);
+
+      const startedId: string | undefined = body.run?.id;
+      // Bounded so a lost run can never pin the button forever; the deep call
+      // allowance is 20 min per workload, and the reaper is the real backstop.
+      const deadline = Date.now() + 2 * 60 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        const poll = await fetch(`/api/admin/monitoring/jobs/${jobId}`);
+        if (!poll.ok) break;
+        const { runs: latest } = (await poll.json()) as { runs: RunRow[] };
+        const mine = latest.find((r) => r.id === startedId) ?? latest[0];
+        if (!mine || mine.status === "queued" || mine.status === "running")
+          continue;
+        if (mine.error) setActionError(mine.error);
+        break;
+      }
       concerns.refetch();
       runs.refetch();
       router.refresh();
@@ -185,7 +210,7 @@ export default function JobPage({
     <div className="space-y-8">
       <AdminPageHeader
         title={job.name}
-        description={`${CATEGORY_LABEL[job.type]} · ${job.targets.length} workload${job.targets.length === 1 ? "" : "s"} · ${job.schedule ? `schedule ${job.schedule} UTC` : "manual runs only"} · ${job.model}`}
+        description={`${CATEGORY_LABEL[job.type]} · ${DEPTH_LABEL[job.depth]} · ${job.targets.length} workload${job.targets.length === 1 ? "" : "s"} · ${job.schedule ? `schedule ${job.schedule} UTC` : "manual runs only"} · ${job.model}`}
       >
         <Button onClick={runNow} disabled={busy !== null}>
           <Play className="size-3.5" />
@@ -206,8 +231,12 @@ export default function JobPage({
         <Card className="p-4">
           <p className="text-body-sm text-pale-stone">
             Holmes is investigating {job.targets.length} workload
-            {job.targets.length === 1 ? "" : "s"}. This takes tens of seconds to
-            a few minutes — leaving the page does not cancel the run.
+            {job.targets.length === 1 ? "" : "s"}.{" "}
+            {job.depth === "deep"
+              ? "A deep run investigates each workload separately, one after another — expect several minutes each, and up to 20 per workload before it is given up on."
+              : "This takes tens of seconds to a few minutes."}{" "}
+            The work runs on the server, so leaving the page does not cancel it —
+            come back and the run will be in the list below.
           </p>
         </Card>
       )}

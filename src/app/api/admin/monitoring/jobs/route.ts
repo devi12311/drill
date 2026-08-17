@@ -8,7 +8,11 @@ import {
 } from "@/lib/db/monitoring-queries";
 import { DEFAULT_MODEL } from "@/lib/holmes/types";
 import { nextRunAfter, normaliseSchedule } from "@/lib/monitoring/schedule";
-import { parseOverrides, parseTargetList } from "@/lib/monitoring/job-input";
+import {
+  parseDepth,
+  parseOverrides,
+  parseTargetList,
+} from "@/lib/monitoring/job-input";
 import { MONITOR_CATEGORIES, type MonitorCategory } from "@/lib/monitoring/types";
 
 export async function GET(request: Request) {
@@ -52,10 +56,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Cluster not found" }, { status: 404 });
 
   let targets;
+  let depth;
   let schedule: string | null;
   let overrides;
   try {
-    targets = parseTargetList(body.targets);
+    // Depth first: it decides how many targets the job is allowed to have.
+    depth = parseDepth(body.depth);
+    targets = parseTargetList(body.targets, depth);
     schedule = normaliseSchedule(body.schedule);
     overrides = parseOverrides(body.overrides);
   } catch (err) {
@@ -70,6 +77,7 @@ export async function POST(request: Request) {
       clusterId,
       name,
       type: type as MonitorCategory,
+      depth,
       model,
       schedule,
       enabled,
@@ -87,6 +95,7 @@ export async function POST(request: Request) {
       clusterId,
       name,
       type,
+      depth,
       targets: targets.length,
       schedule,
       overrides: overrides.length || undefined,

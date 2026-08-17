@@ -1,14 +1,14 @@
 import "server-only";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { applicableChecks, type MonitorCheck } from "./catalogue";
+import type { MonitorCheck } from "./catalogue";
+import type { Playbook } from "./playbook";
 import {
   parseAssessment,
   type AssessmentTarget,
   type MonitorCategory,
-  type WorkloadKind,
 } from "./types";
-import type { AssessmentOutcome } from "./assess";
+import { buildAssessmentPrompt, type AssessmentOutcome } from "./assess";
 
 /**
  * Fixture-mode assessment: HOLMES_FIXTURE=1 short-circuits the runner here so
@@ -40,21 +40,65 @@ interface FixtureCategory {
   skipped: { check_id: string; reason: string }[];
 }
 
-/** Stable check-ID → target index, so fixture edits do not shuffle concerns. */
-function stableIndex(checkId: string, length: number): number {
+/** Stable string hash, so fixture edits do not shuffle concerns or values. */
+function stableHash(text: string): number {
   let hash = 0;
-  for (const char of checkId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return hash % length;
+  for (const char of text) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash;
+}
+
+function stableIndex(checkId: string, length: number): number {
+  return stableHash(checkId) % length;
+}
+
+/**
+ * Synthetic measurements for a deep fixture run, one per playbook key.
+ *
+ * Two behaviours here are deliberately imperfect. Roughly one key in five is
+ * omitted, and one source is reported unavailable — because the run page's job is
+ * to show which measurements are MISSING and which sources were silent, and a
+ * fixture that always returns a complete set would never exercise either surface.
+ */
+function fixtureObservations(
+  playbook: Playbook,
+  targets: readonly AssessmentTarget[],
+) {
+  const silentSource = playbook.observations.some((o) => o.source === "traces")
+    ? "traces"
+    : "node";
+  const observations = targets.flatMap((target) =>
+    playbook.observations
+      .filter((spec) => stableHash(spec.key) % 5 !== 0)
+      .filter((spec) => spec.source !== silentSource)
+      .map((spec) => {
+        const n = stableHash(`${target.name}/${spec.key}`) % 1000;
+        return {
+          target,
+          key: spec.key,
+          value: spec.unit ? String(n) : `fixture-${n}`,
+          numeric: spec.unit ? n : null,
+          unit: spec.unit,
+          source: spec.source,
+        };
+      }),
+  );
+  return { observations, silentSource };
 }
 
 export async function fixtureAssessment(input: {
   category: MonitorCategory;
   model: string;
   targets: readonly AssessmentTarget[];
-  /** The job's effective catalogue, so fixture runs respect disabled checks. */
+  /**
+   * The job's effective catalogue — already narrowed to this job's kinds and
+   * technologies by the caller, so it is used as given. Re-filtering it here would
+   * silently drop the technology-scoped checks a deep run exists to ask.
+   */
   checks: readonly MonitorCheck[];
+  /** Present on a deep run: makes the fixture return measurements too. */
+  playbook?: Playbook;
 }): Promise<AssessmentOutcome> {
-  const { category, model, targets, checks } = input;
+  const { category, model, targets, checks, playbook } = input;
   if (targets.length === 0) throw new Error("The job has no target workloads");
 
   const file = path.join(
@@ -70,10 +114,7 @@ export async function fixtureAssessment(input: {
   if (!canned)
     throw new Error(`Fixture has no "${category}" section — see ${file}`);
 
-  const kinds = [...new Set(targets.map((t) => t.kind))] as WorkloadKind[];
-  const applicable = new Set(
-    applicableChecks(checks, category, kinds).map((c) => c.id),
-  );
+  const applicable = new Set(checks.map((c) => c.id));
   const skipped = canned.skipped.filter((s) => applicable.has(s.check_id));
   const skippedIds = new Set(skipped.map((s) => s.check_id));
 
@@ -98,14 +139,31 @@ export async function fixtureAssessment(input: {
       target: f.target ?? targets[stableIndex(f.check_id, targets.length)],
     }));
 
+  const deep = playbook
+    ? fixtureObservations(playbook, targets)
+    : { observations: [], silentSource: null };
+
   const coverage = targets.map((target) => ({
     target,
     evaluated: [...applicable].filter((id) => !skippedIds.has(id)),
     skipped,
+    sources_unavailable: deep.silentSource
+      ? [
+          {
+            source: deep.silentSource,
+            reason: "fixture: this source is deliberately reported as silent",
+          },
+        ]
+      : [],
   }));
 
   const assessment = parseAssessment(
-    JSON.stringify({ findings, coverage, summary: canned.summary }),
+    JSON.stringify({
+      findings,
+      observations: deep.observations,
+      coverage,
+      summary: canned.summary,
+    }),
     applicable,
     targets,
   );
@@ -119,6 +177,20 @@ export async function fixtureAssessment(input: {
       durationMs: 1200,
       toolCallsTotal: 0,
       toolCallsFailed: 0,
+      // Rendered even in fixture mode, so the run page's "what the agent was told"
+      // panel is exercised without spending an investigation on it.
+      prompts: [
+        {
+          target: targets.map((t) => t.name).join(", "),
+          prompt: buildAssessmentPrompt({
+            category,
+            clusterName: "(fixture)",
+            targets,
+            checks,
+            playbook,
+          }),
+        },
+      ],
       raw: {
         analysis: "(fixture assessment)",
         tool_calls: [],

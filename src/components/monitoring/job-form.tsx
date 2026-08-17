@@ -2,23 +2,31 @@
 
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
-import { Gauge, ShieldCheck } from "lucide-react";
+import { Gauge, Microscope, Scan, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { SECURITY_SCOPE_CAVEAT } from "@/lib/monitoring/catalogue";
-import { TARGET_SOFT_LIMIT } from "@/lib/monitoring/job-input";
+import { TARGET_LIMITS } from "@/lib/monitoring/job-input";
 import { SCHEDULE_PRESETS } from "@/lib/monitoring/schedule";
-import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
+import {
+  CATEGORY_LABEL,
+  DEPTH_BLURB,
+  DEPTH_LABEL,
+  TECHNOLOGY_LABEL,
+} from "@/lib/monitoring/ui";
+import { MONITOR_DEPTHS } from "@/lib/monitoring/types";
 import type {
   AssessmentTarget,
   CheckView,
   MonitorCategory,
+  MonitorDepth,
 } from "@/lib/monitoring/types";
 import {
   WorkloadPicker,
+  targetKey,
   type PickableWorkload,
 } from "./workload-picker";
 import { RubricEditor, type CheckOverride } from "./rubric-editor";
@@ -51,6 +59,7 @@ export function JobForm({
   const router = useRouter();
   const [name, setName] = useState("");
   const [type, setType] = useState<MonitorCategory>("security");
+  const [depth, setDepth] = useState<MonitorDepth>("posture");
   const [model, setModel] = useState(models[0] ?? "gpt-5-mini");
   const [schedule, setSchedule] = useState("");
   const [targets, setTargets] = useState<AssessmentTarget[]>([]);
@@ -58,22 +67,56 @@ export function JobForm({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const limits = TARGET_LIMITS[depth];
+  const byKey = useMemo(
+    () => new Map(workloads.map((w) => [targetKey(w), w])),
+    [workloads],
+  );
+  const picked = useMemo(
+    () => targets.map((t) => byKey.get(targetKey(t))).filter((w) => w !== undefined),
+    [targets, byKey],
+  );
   const kinds = useMemo(
     () => [...new Set(targets.map((t) => t.kind))],
     [targets],
   );
-  // Only enabled catalogue checks in this category, narrowed to the kinds the
-  // job actually targets — the same filtering the server applies at run time.
+  const technologies = useMemo(
+    () => [...new Set(picked.map((w) => w.technology).filter((t) => t !== null))],
+    [picked],
+  );
+  /**
+   * Mirrors `applicableChecks` on the server, so the operator sees the same rubric
+   * the run will use — including the technology dimension, which is why selecting a
+   * Postgres workload makes the PG questions appear.
+   */
   const applicable = useMemo(() => {
-    const wanted = kinds.length > 0 ? kinds : ["deployment", "statefulset"];
+    const wantedKinds =
+      kinds.length > 0 ? kinds : (["deployment", "statefulset"] as const);
     return checks.filter(
       (c) =>
         c.enabled &&
         c.category === type &&
         (c.appliesTo.length === 0 ||
-          c.appliesTo.some((k) => wanted.includes(k as typeof wanted[number]))),
+          c.appliesTo.some((k) =>
+            (wantedKinds as readonly string[]).includes(k),
+          )) &&
+        (c.appliesToTechnologies.length === 0 ||
+          c.appliesToTechnologies.some((t) =>
+            (technologies as readonly string[]).includes(t),
+          )) &&
+        !(
+          c.excludesTechnologies.length > 0 &&
+          technologies.length > 0 &&
+          technologies.every((t) => c.excludesTechnologies.includes(t))
+        ),
     );
-  }, [checks, type, kinds]);
+  }, [checks, type, kinds, technologies]);
+
+  /** Deep runs on unprofiled workloads still only ask the generic questions. */
+  const unprofiled = useMemo(
+    () => picked.filter((w) => !w.profiled),
+    [picked],
+  );
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -87,6 +130,7 @@ export function JobForm({
           clusterId,
           name,
           type,
+          depth,
           model,
           schedule: schedule || null,
           targets,
@@ -151,6 +195,40 @@ export function JobForm({
         </div>
       </fieldset>
 
+      <fieldset className="space-y-2">
+        <legend className="text-body-sm font-medium text-warm-off-white">
+          How deeply?
+        </legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {MONITOR_DEPTHS.map((option) => {
+            const Icon = option === "posture" ? Scan : Microscope;
+            const active = depth === option;
+            return (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setDepth(option)}
+                aria-pressed={active}
+                className={cn(
+                  "rounded-lg border p-4 text-left transition-colors",
+                  active
+                    ? "border-warm-off-white/40 bg-smoke-charcoal"
+                    : "border-border hover:bg-smoke-charcoal",
+                )}
+              >
+                <span className="flex items-center gap-2 text-body-sm text-warm-off-white">
+                  <Icon className="size-4 text-bone-gray" />
+                  {DEPTH_LABEL[option]}
+                </span>
+                <span className="mt-1 block text-body-sm text-bone-gray">
+                  {DEPTH_BLURB[option]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </fieldset>
+
       <Card className="space-y-3 p-4">
         <div className="space-y-1">
           <p className="text-caption-tracked uppercase text-bone-gray">
@@ -180,7 +258,7 @@ export function JobForm({
           <span
             className={cn(
               "text-body-sm",
-              targets.length > TARGET_SOFT_LIMIT
+              targets.length > limits.soft
                 ? "text-traffic-yellow"
                 : "text-bone-gray",
             )}
@@ -193,12 +271,25 @@ export function JobForm({
           selected={targets}
           onChange={setTargets}
         />
-        {targets.length > TARGET_SOFT_LIMIT && (
+        {targets.length > limits.soft && (
           <p className="text-body-sm text-traffic-yellow">
-            One run covers every selected workload in a single investigation.
-            Past about {TARGET_SOFT_LIMIT} the agent&apos;s attention is spread
-            thin and coverage gets less reliable — consider splitting this into
-            several jobs.
+            {depth === "deep"
+              ? `Each workload is a separate full investigation, run one after another — ${targets.length} of them will take a long time and cost accordingly. The hard limit is ${limits.hard}.`
+              : `One run covers every selected workload in a single investigation. Past about ${limits.soft} the agent's attention is spread thin and coverage gets less reliable — consider splitting this into several jobs.`}
+          </p>
+        )}
+        {depth === "deep" && unprofiled.length > 0 && (
+          <p className="text-body-sm text-bone-gray">
+            No playbook exists yet for{" "}
+            {unprofiled
+              .map(
+                (w) =>
+                  `${w.name}${w.technology ? ` (${TECHNOLOGY_LABEL[w.technology]})` : ""}`,
+              )
+              .join(", ")}
+            . {unprofiled.length === 1 ? "It" : "They"} will still be assessed,
+            but only against the technology-agnostic checks — a deep run cannot
+            invent a method it was not given.
           </p>
         )}
       </div>

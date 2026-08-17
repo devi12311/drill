@@ -7,9 +7,11 @@ import {
   MONITOR_CATEGORIES,
   SEVERITIES,
   WORKLOAD_KINDS,
+  WORKLOAD_TECHNOLOGIES,
   type MonitorCategory,
   type Severity,
   type WorkloadKind,
+  type WorkloadTechnology,
 } from "./types";
 
 /**
@@ -26,6 +28,8 @@ export interface CheckInput {
   reference: string;
   baseSeverity: Severity;
   appliesTo: WorkloadKind[];
+  appliesToTechnologies: WorkloadTechnology[];
+  excludesTechnologies: WorkloadTechnology[];
   requires: CheckRequirement | null;
   resolveAfterAbsentRuns: number;
   enabled: boolean;
@@ -39,6 +43,22 @@ function text(raw: unknown, field: string, max: number, required = true) {
   if (value.length > max)
     throw new Error(`${field} must be at most ${max} characters`);
   return value;
+}
+
+/** Shared by the two technology lists, which parse identically. */
+function technologyList(
+  raw: unknown,
+  fallback: WorkloadTechnology[] | undefined,
+  field: string,
+): WorkloadTechnology[] {
+  if (raw === undefined) return fallback ?? [];
+  if (!Array.isArray(raw))
+    throw new Error(`${field} must be an array of technologies`);
+  return raw
+    .map((t) => (typeof t === "string" ? t.toLowerCase() : ""))
+    .filter((t): t is WorkloadTechnology =>
+      (WORKLOAD_TECHNOLOGIES as readonly string[]).includes(t),
+    );
 }
 
 /** Field-by-field, falling back to `existing` so PATCH can be partial. */
@@ -84,6 +104,21 @@ export function parseCheckInput(
   // catalogue has one representation of "applies to everything".
   if (appliesTo.length === WORKLOAD_KINDS.length) appliesTo = [];
 
+  // Note both lists are stored verbatim. "Every technology selected" is NOT the
+  // same as "no restriction": the empty list also reaches workloads whose
+  // technology was never identified, which a check written for a specific engine
+  // must not do.
+  const appliesToTechnologies = technologyList(
+    body.appliesToTechnologies,
+    existing?.appliesToTechnologies,
+    "appliesToTechnologies",
+  );
+  const excludesTechnologies = technologyList(
+    body.excludesTechnologies,
+    existing?.excludesTechnologies,
+    "excludesTechnologies",
+  );
+
   let requires: CheckRequirement | null;
   if (body.requires === undefined) {
     requires = existing?.requires ?? null;
@@ -118,6 +153,8 @@ export function parseCheckInput(
     ),
     baseSeverity: severityRaw as Severity,
     appliesTo,
+    appliesToTechnologies,
+    excludesTechnologies,
     requires,
     resolveAfterAbsentRuns: absentRaw,
     enabled:
@@ -138,6 +175,8 @@ const SEMANTIC_FIELDS: (keyof CheckInput)[] = [
   "baseSeverity",
   "category",
   "appliesTo",
+  "appliesToTechnologies",
+  "excludesTechnologies",
   "requires",
   "resolveAfterAbsentRuns",
 ];

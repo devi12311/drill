@@ -3,19 +3,16 @@
 import { use } from "react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { JobForm } from "@/components/monitoring/job-form";
+import type { PickableWorkload } from "@/components/monitoring/workload-picker";
 import { useAdminData } from "@/lib/admin/use-admin-data";
 import { KNOWN_MODELS } from "@/lib/holmes/types";
 
-import type { CheckView, WorkloadKind } from "@/lib/monitoring/types";
+import type { CheckView } from "@/lib/monitoring/types";
 
 interface ClusterDetail {
   cluster: { id: string; name: string };
-  workloads: {
-    kind: WorkloadKind;
-    namespace: string;
-    name: string;
-    replicas: number | null;
-  }[];
+  /** The picker's own contract, so the two cannot drift on what a workload carries. */
+  workloads: PickableWorkload[];
 }
 
 export default function NewJobPage({

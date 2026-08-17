@@ -12,8 +12,14 @@
         "rationale": "`securityContext.privileged: true` disables all container isolation — the process can access every device on the node, load kernel modules and escape to the host. Nothing in the workload's command suggests it needs device access.",
         "remediation": "Remove `securityContext.privileged` from the container and add back only the specific capabilities required, e.g. `securityContext.capabilities.add: [\"NET_BIND_SERVICE\"]`.",
         "evidence": [
-          { "label": "spec.template.spec.containers[0].securityContext.privileged", "value": "true" },
-          { "label": "capabilities.drop", "value": "(not set)" }
+          {
+            "label": "spec.template.spec.containers[0].securityContext.privileged",
+            "value": "true"
+          },
+          {
+            "label": "capabilities.drop",
+            "value": "(not set)"
+          }
         ]
       },
       {
@@ -25,8 +31,14 @@
         "rationale": "A ClusterRoleBinding grants this workload's ServiceAccount a ClusterRole with `secrets: [get, list]` across all namespaces. Any RCE in this pod becomes a cluster-wide credential compromise.",
         "remediation": "Replace the ClusterRoleBinding with a namespaced RoleBinding, and narrow the rule to the specific secret names the workload reads via `resourceNames`.",
         "evidence": [
-          { "label": "ClusterRoleBinding", "value": "app-secret-reader → ClusterRole/secret-reader" },
-          { "label": "offending rule", "value": "apiGroups:[\"\"] resources:[\"secrets\"] verbs:[\"get\",\"list\"]" }
+          {
+            "label": "ClusterRoleBinding",
+            "value": "app-secret-reader → ClusterRole/secret-reader"
+          },
+          {
+            "label": "offending rule",
+            "value": "apiGroups:[\"\"] resources:[\"secrets\"] verbs:[\"get\",\"list\"]"
+          }
         ]
       },
       {
@@ -38,8 +50,14 @@
         "rationale": "The namespace contains no NetworkPolicy matching these pod labels, so both ingress and egress are unrestricted — lateral movement from any other pod in the cluster is unimpeded.",
         "remediation": "Add a default-deny ingress NetworkPolicy for the namespace, then allow only the ports this workload actually serves.",
         "evidence": [
-          { "label": "NetworkPolicies in namespace", "value": "none" },
-          { "label": "pod labels", "value": "app.kubernetes.io/name=app" }
+          {
+            "label": "NetworkPolicies in namespace",
+            "value": "none"
+          },
+          {
+            "label": "pod labels",
+            "value": "app.kubernetes.io/name=app"
+          }
         ]
       },
       {
@@ -51,8 +69,14 @@
         "rationale": "The container references `:latest`, so the running code cannot be identified from the manifest and a pod restart can silently change the deployed version.",
         "remediation": "Pin the image to an immutable digest, e.g. `image: registry/app@sha256:…`, or at minimum a versioned tag.",
         "evidence": [
-          { "label": "image", "value": "registry.internal/app:latest" },
-          { "label": "imagePullPolicy", "value": "Always" }
+          {
+            "label": "image",
+            "value": "registry.internal/app:latest"
+          },
+          {
+            "label": "imagePullPolicy",
+            "value": "Always"
+          }
         ]
       }
     ],
@@ -75,9 +99,18 @@
         "rationale": "The container has restarted 14 times in the last six hours, entering CrashLoopBackOff twice. Last state shows exit code 137, i.e. the kernel killed it — consistent with the missing memory limit reported separately.",
         "remediation": "Set a memory limit based on observed working set, then re-check; if restarts persist, capture the pre-restart logs with `kubectl logs --previous`.",
         "evidence": [
-          { "label": "restartCount", "value": "14" },
-          { "label": "lastState.terminated", "value": "exitCode 137, reason OOMKilled" },
-          { "label": "waiting reason", "value": "CrashLoopBackOff" }
+          {
+            "label": "restartCount",
+            "value": "14"
+          },
+          {
+            "label": "lastState.terminated",
+            "value": "exitCode 137, reason OOMKilled"
+          },
+          {
+            "label": "waiting reason",
+            "value": "CrashLoopBackOff"
+          }
         ]
       },
       {
@@ -89,8 +122,14 @@
         "rationale": "With no `resources.limits.memory`, the container can consume all node memory before the kubelet evicts it, taking unrelated workloads down with it. The observed OOM kills confirm this is not theoretical.",
         "remediation": "Set `resources.limits.memory` to roughly 1.3x the observed peak working set, and match `resources.requests.memory` to the steady-state figure.",
         "evidence": [
-          { "label": "resources.limits", "value": "{}" },
-          { "label": "resources.requests.memory", "value": "128Mi" }
+          {
+            "label": "resources.limits",
+            "value": "{}"
+          },
+          {
+            "label": "resources.requests.memory",
+            "value": "128Mi"
+          }
         ]
       },
       {
@@ -102,8 +141,14 @@
         "rationale": "`spec.replicas: 1` with no HorizontalPodAutoscaler, so a node drain, eviction or crash means total unavailability until the pod is rescheduled.",
         "remediation": "Raise `spec.replicas` to at least 2 and confirm the workload tolerates concurrent instances.",
         "evidence": [
-          { "label": "spec.replicas", "value": "1" },
-          { "label": "HPA", "value": "none" }
+          {
+            "label": "spec.replicas",
+            "value": "1"
+          },
+          {
+            "label": "HPA",
+            "value": "none"
+          }
         ]
       },
       {
@@ -115,8 +160,83 @@
         "rationale": "No PDB selects these pods, so a voluntary disruption (node drain, cluster upgrade) can remove every replica at once instead of respecting a minimum availability.",
         "remediation": "Add a PodDisruptionBudget with `minAvailable: 1` selecting this workload's labels.",
         "evidence": [
-          { "label": "PDBs matching labels", "value": "none" },
-          { "label": "namespace PDBs", "value": "0" }
+          {
+            "label": "PDBs matching labels",
+            "value": "none"
+          },
+          {
+            "label": "namespace PDBs",
+            "value": "0"
+          }
+        ]
+      },
+      {
+        "check_id": "PG.XID_WRAPAROUND_RISK",
+        "scope": "",
+        "effective_severity": "critical",
+        "severity_rationale": "Escalated from the declared severity: at the observed consumption rate this cluster stops accepting writes within days, not weeks.",
+        "title": "Transaction ID age at 61% of the wraparound limit",
+        "rationale": "The busiest database has reached an age(datfrozenxid) of 1.22 billion against the 2-billion hard limit, and autovacuum has not completed a freeze pass on its largest table. Once the limit is reached PostgreSQL refuses all writes until an offline VACUUM completes.",
+        "remediation": "Run VACUUM (FREEZE, VERBOSE) on the largest tables now, then lower autovacuum_freeze_max_age to 200000000 and raise autovacuum_vacuum_cost_limit so the freeze pass can keep up with the write rate.",
+        "evidence": [
+          {
+            "label": "max(age(datfrozenxid))",
+            "value": "1220441883"
+          },
+          {
+            "label": "autovacuum_freeze_max_age",
+            "value": "200000000"
+          },
+          {
+            "label": "headroom",
+            "value": "779558117 transactions"
+          }
+        ]
+      },
+      {
+        "check_id": "PG.WAL_PINNED_BY_SLOT",
+        "scope": "",
+        "effective_severity": "critical",
+        "severity_rationale": "",
+        "title": "Inactive replication slot retaining 41 GB of WAL",
+        "rationale": "The slot is inactive, so nothing is consuming the WAL it holds, and pg_wal has grown to 41 GB on a volume with 18% free. WAL retained by a slot is never recycled, so the volume fills until the slot is dropped.",
+        "remediation": "Confirm the standby that owned this slot is gone, then drop it: SELECT pg_drop_replication_slot('standby_2'). Set max_slot_wal_keep_size to bound the damage from any future abandoned slot.",
+        "evidence": [
+          {
+            "label": "slot_name",
+            "value": "standby_2"
+          },
+          {
+            "label": "active",
+            "value": "false"
+          },
+          {
+            "label": "retained WAL",
+            "value": "41 GB"
+          }
+        ]
+      },
+      {
+        "check_id": "NODE.HEAP_ABOVE_LIMIT",
+        "scope": "app",
+        "effective_severity": "high",
+        "severity_rationale": "",
+        "title": "V8 heap ceiling set above the container memory limit",
+        "rationale": "--max-old-space-size is 2048 MB while the container limit is 1536 Mi. V8 will happily grow past what the cgroup allows, so the kernel kills the process before the garbage collector is ever forced to reclaim.",
+        "remediation": "Set --max-old-space-size to about 75% of the limit (1150) or raise the container memory limit above the heap ceiling; the two numbers must not contradict each other.",
+        "evidence": [
+          {
+            "label": "--max-old-space-size",
+            "value": "2048 (MB)"
+          },
+          {
+            "label": "resources.limits.memory",
+            "value": "1536Mi"
+          },
+          {
+            "label": "lastState.terminated",
+            "value": "exitCode 137, reason OOMKilled"
+          }
         ]
       }
     ],
@@ -132,6 +252,14 @@
       {
         "check_id": "PERF.PVC_PRESSURE",
         "reason": "No Prometheus datasource is reachable in fixture mode, so volume utilisation could not be measured."
+      },
+      {
+        "check_id": "PG.SLOW_QUERIES",
+        "reason": "pg_stat_statements is not loaded in shared_preload_libraries, so per-statement timings are unavailable."
+      },
+      {
+        "check_id": "PG.THP_ENABLED",
+        "reason": "Node-level kernel settings could not be read in fixture mode."
       }
     ]
   }
