@@ -5,7 +5,10 @@ import {
   setWorkloadTechnology,
 } from "@/lib/db/monitoring-queries";
 import { asTechnology } from "@/lib/monitoring/technology";
-import { WORKLOAD_KINDS, WORKLOAD_TECHNOLOGIES } from "@/lib/monitoring/types";
+import {
+  WORKLOAD_KINDS,
+  WORKLOAD_TECHNOLOGY_OPTIONS,
+} from "@/lib/monitoring/types";
 import type { WorkloadKind } from "@/lib/monitoring/types";
 
 // Next 16: route params are async.
@@ -51,13 +54,18 @@ export async function PATCH(request: Request, context: Context) {
       { status: 400 },
     );
 
-  // Explicit null clears the override; anything else must be in the vocabulary.
+  // Explicit null clears the override; anything else must be in the vocabulary —
+  // and specifically in the WORKLOAD half of it. `kubernetes` names the cluster
+  // itself, so marking a Deployment as that would hand it the cluster method and
+  // file its findings under cluster checks.
   const clearing = body.technology === null || body.technology === "";
-  const technology = clearing ? null : asTechnology(body.technology);
+  const parsed = clearing ? null : asTechnology(body.technology);
+  const technology =
+    parsed && WORKLOAD_TECHNOLOGY_OPTIONS.includes(parsed) ? parsed : null;
   if (!clearing && !technology)
     return Response.json(
       {
-        error: `technology must be null or one of: ${WORKLOAD_TECHNOLOGIES.join(", ")}`,
+        error: `technology must be null or one of: ${WORKLOAD_TECHNOLOGY_OPTIONS.join(", ")}`,
       },
       { status: 400 },
     );

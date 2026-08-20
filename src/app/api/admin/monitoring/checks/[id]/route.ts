@@ -14,7 +14,7 @@ import {
   type CheckInput,
 } from "@/lib/monitoring/check-input";
 import type { CheckRequirement } from "@/lib/monitoring/catalogue";
-import type { WorkloadKind, WorkloadTechnology } from "@/lib/monitoring/types";
+import type { TargetKind, WorkloadTechnology } from "@/lib/monitoring/types";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
@@ -27,7 +27,7 @@ function toInput(row: CheckRow): CheckInput {
     evidence: row.evidence,
     reference: row.reference,
     baseSeverity: row.baseSeverity,
-    appliesTo: row.appliesTo as WorkloadKind[],
+    appliesTo: row.appliesTo as TargetKind[],
     appliesToTechnologies: row.appliesToTechnologies as WorkloadTechnology[],
     excludesTechnologies: row.excludesTechnologies as WorkloadTechnology[],
     requires: (row.requires as CheckRequirement | null) ?? null,

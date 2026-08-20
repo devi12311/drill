@@ -1,8 +1,9 @@
 import { PROFILE_CHECKS } from "./profiles";
+import { WORKLOAD_KINDS } from "./types";
 import type {
   MonitorCategory,
   Severity,
-  WorkloadKind,
+  TargetKind,
   WorkloadTechnology,
 } from "./types";
 
@@ -40,6 +41,7 @@ import type {
  */
 export type CheckRequirement =
   | "prometheus"
+  | "control-plane-metrics"
   | "metrics-server"
   | "engine-sql"
   | "pg-stat-statements"
@@ -52,6 +54,13 @@ export type CheckRequirement =
 
 export const REQUIREMENT_LABEL: Record<CheckRequirement, string> = {
   prometheus: "Prometheus metrics",
+  // Separate from `prometheus` because it fails separately and often: the
+  // kube-prometheus-stack ServiceMonitors for etcd, the scheduler and the
+  // controller-manager need certificates and non-loopback bind addresses, and on
+  // a managed control plane they cannot work at all. Without this requirement
+  // "etcd fsync is fine" and "we never scraped etcd" are the same answer.
+  "control-plane-metrics":
+    "scrapeable control-plane components (etcd, kube-scheduler, kube-controller-manager)",
   "metrics-server": "metrics-server (kubectl top)",
   // Named for the common case; it means the engine's own query interface, which for
   // MongoDB is the database command surface rather than SQL. Kept as-is rather than
@@ -81,8 +90,12 @@ export interface MonitorCheck {
   evidence: string;
   /** The standard or tool that codifies this check. */
   reference: string;
-  /** Omitted = applies to both Deployments and StatefulSets. */
-  appliesTo?: WorkloadKind[];
+  /**
+   * Omitted = applies to every WORKLOAD kind, i.e. both Deployments and
+   * StatefulSets — and NOT to the cluster. A cluster-scoped check must say
+   * `appliesTo: ["cluster"]` explicitly; see {@link applicableChecks}.
+   */
+  appliesTo?: TargetKind[];
   /**
    * Omitted = technology-agnostic, i.e. a posture check that reads the Kubernetes
    * spec and applies to anything. Present = only ever asked about a workload
@@ -471,6 +484,27 @@ export const BUILTIN_CHECKS: readonly MonitorCheck[] = Object.freeze([
 ]);
 
 /**
+ * Does a check apply to any of the kinds being assessed?
+ *
+ * The subtlety is what an OMITTED `appliesTo` means. It used to mean "every
+ * kind", which was the same thing as "every workload kind" while Deployment and
+ * StatefulSet were the only kinds there were. Now that the cluster itself is a
+ * target, "every kind" would silently ask every generic workload question —
+ * privileged containers, missing probes, image tags — *about the cluster*, which
+ * is nonsense the model would dutifully answer. So an omitted `appliesTo` means
+ * every workload kind, and the cluster must always be opted into by name.
+ */
+function appliesToKinds(
+  check: MonitorCheck,
+  kinds: readonly TargetKind[],
+): boolean {
+  const scope = check.appliesTo?.length
+    ? check.appliesTo
+    : (WORKLOAD_KINDS as readonly TargetKind[]);
+  return scope.some((k) => kinds.includes(k));
+}
+
+/**
  * Narrow a resolved catalogue to what applies here. Pure, so it works on
  * checks from the database as well as on the built-in seed.
  *
@@ -482,13 +516,13 @@ export const BUILTIN_CHECKS: readonly MonitorCheck[] = Object.freeze([
 export function applicableChecks<T extends MonitorCheck>(
   checks: readonly T[],
   category: MonitorCategory,
-  kinds: readonly WorkloadKind[] = ["deployment", "statefulset"],
+  kinds: readonly TargetKind[] = WORKLOAD_KINDS,
   technologies: readonly WorkloadTechnology[] = [],
 ): T[] {
   return checks.filter(
     (c) =>
       c.category === category &&
-      (!c.appliesTo?.length || c.appliesTo.some((k) => kinds.includes(k))) &&
+      appliesToKinds(c, kinds) &&
       (!c.appliesToTechnologies?.length ||
         c.appliesToTechnologies.some((t) => technologies.includes(t))) &&
       // Excluded only when EVERY target is an excluded technology: a mixed

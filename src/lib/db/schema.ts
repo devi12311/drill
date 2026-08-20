@@ -18,6 +18,7 @@ import type {
   ExpectedObservations,
   ObservationSpec,
 } from "@/lib/monitoring/playbook";
+import { TARGET_KINDS } from "@/lib/monitoring/types";
 import type {
   ConcernStatus,
   MonitorCategory,
@@ -28,6 +29,7 @@ import type {
   RunStatus,
   RunTrigger,
   Severity,
+  TargetKind,
   WorkloadKind,
   WorkloadTechnology,
 } from "@/lib/monitoring/types";
@@ -417,9 +419,7 @@ export const monitoringJobTargets = pgTable(
     jobId: uuid("job_id")
       .notNull()
       .references(() => monitoringJobs.id, { onDelete: "cascade" }),
-    kind: text("kind", { enum: ["deployment", "statefulset"] })
-      .$type<WorkloadKind>()
-      .notNull(),
+    kind: text("kind", { enum: TARGET_KINDS }).$type<TargetKind>().notNull(),
     namespace: text("namespace").notNull(),
     name: text("name").notNull(),
   },
@@ -537,8 +537,8 @@ export const monitoringConcerns = pgTable(
     category: text("category", { enum: ["security", "performance"] })
       .$type<MonitorCategory>()
       .notNull(),
-    targetKind: text("target_kind", { enum: ["deployment", "statefulset"] })
-      .$type<WorkloadKind>()
+    targetKind: text("target_kind", { enum: TARGET_KINDS })
+      .$type<TargetKind>()
       .notNull(),
     targetNamespace: text("target_namespace").notNull(),
     targetName: text("target_name").notNull(),
@@ -631,8 +631,8 @@ export const monitoringObservations = pgTable(
     jobId: uuid("job_id")
       .notNull()
       .references(() => monitoringJobs.id, { onDelete: "cascade" }),
-    targetKind: text("target_kind", { enum: ["deployment", "statefulset"] })
-      .$type<WorkloadKind>()
+    targetKind: text("target_kind", { enum: TARGET_KINDS })
+      .$type<TargetKind>()
       .notNull(),
     targetNamespace: text("target_namespace").notNull(),
     targetName: text("target_name").notNull(),

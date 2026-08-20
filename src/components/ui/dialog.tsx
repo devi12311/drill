@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { cva, type VariantProps } from "class-variance-authority"
 import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
@@ -47,23 +48,47 @@ function DialogOverlay({
   )
 }
 
+/**
+ * Panel width, and with it the panel's shape.
+ *
+ * `sm` is a simple stack that grows to its content. `md` and `lg` are framed
+ * panels — capped at the viewport and laid out as a column — because anything
+ * that wide is a header + scrolling body + footer, which is what `DialogBody`
+ * is for. `lg` is sized for content the page column cannot hold: a full
+ * investigation playbook is wider than the 900px admin column, and the modal is
+ * the only place it gets that width without changing the frame the rest of the
+ * monitoring module shares.
+ */
+const dialogContentVariants = cva(
+  "fixed top-1/2 left-1/2 z-50 w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-6 rounded-xl bg-popover p-6 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+  {
+    variants: {
+      size: {
+        sm: "grid sm:max-w-md",
+        md: "flex max-h-[85dvh] flex-col sm:max-w-[640px]",
+        lg: "flex max-h-[85dvh] flex-col sm:max-w-[min(1040px,calc(100vw-4rem))]",
+      },
+    },
+    defaultVariants: { size: "sm" },
+  }
+)
+
 function DialogContent({
   className,
   children,
+  size,
   showCloseButton = true,
   ...props
-}: React.ComponentProps<typeof DialogPrimitive.Content> & {
-  showCloseButton?: boolean
-}) {
+}: React.ComponentProps<typeof DialogPrimitive.Content> &
+  VariantProps<typeof dialogContentVariants> & {
+    showCloseButton?: boolean
+  }) {
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
-        className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-6 rounded-xl bg-popover p-6 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
-          className
-        )}
+        className={cn(dialogContentVariants({ size }), className)}
         {...props}
       >
         {children}
@@ -82,6 +107,17 @@ function DialogContent({
         )}
       </DialogPrimitive.Content>
     </DialogPortal>
+  )
+}
+
+/** The scrolling middle of a framed dialog — everything between header and footer. */
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-body"
+      className={cn("min-h-0 flex-1 overflow-y-auto pr-1", className)}
+      {...props}
+    />
   )
 }
 
@@ -153,6 +189,7 @@ function DialogDescription({
 
 export {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,

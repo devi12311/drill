@@ -5,6 +5,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
+import { CLUSTER_TARGET, isClusterTarget } from "@/lib/monitoring/types";
 import type {
   AssessmentTarget,
   WorkloadKind,
@@ -32,7 +33,14 @@ export function targetKey(target: {
 
 /**
  * Multi-select over a cluster's discovered workloads, grouped by namespace with
- * a filter — a real cluster has hundreds, so a flat checkbox list is unusable.
+ * a filter — a real cluster has hundreds, so a flat checkbox list is unusable —
+ * plus one pinned row for the cluster itself.
+ *
+ * The cluster row lives here rather than in the form because the mutual exclusion
+ * is a property of the selection, not of the page around it: a job assesses the
+ * cluster or some workloads, never both (see parseTargetList). Keeping the rule in
+ * one place means the form never has to learn a second selection model, and the
+ * server enforces the same thing for anything that bypasses the UI.
  */
 export function WorkloadPicker({
   workloads,
@@ -44,6 +52,7 @@ export function WorkloadPicker({
   onChange: (next: AssessmentTarget[]) => void;
 }) {
   const [filter, setFilter] = useState("");
+  const clusterSelected = selected.some(isClusterTarget);
   const selectedKeys = useMemo(
     () => new Set(selected.map(targetKey)),
     [selected],
@@ -74,21 +83,26 @@ export function WorkloadPicker({
       namespace: workload.namespace,
       name: workload.name,
     };
-    onChange(
-      selectedKeys.has(key)
-        ? selected.filter((t) => targetKey(t) !== key)
-        : [...selected, target],
-    );
+    if (selectedKeys.has(key)) {
+      onChange(selected.filter((t) => targetKey(t) !== key));
+      return;
+    }
+    // Picking a workload leaves cluster mode rather than producing a mixed
+    // selection the server would reject on submit.
+    onChange(clusterSelected ? [target] : [...selected, target]);
   }
 
   function toggleNamespace(items: PickableWorkload[]) {
     const keys = items.map(targetKey);
     const allSelected = keys.every((k) => selectedKeys.has(k));
+    const kept = clusterSelected
+      ? []
+      : selected.filter((t) => !keys.includes(targetKey(t)));
     onChange(
       allSelected
         ? selected.filter((t) => !keys.includes(targetKey(t)))
         : [
-            ...selected.filter((t) => !keys.includes(targetKey(t))),
+            ...kept,
             ...items.map((w) => ({
               kind: w.kind,
               namespace: w.namespace,
@@ -100,14 +114,57 @@ export function WorkloadPicker({
 
   return (
     <div className="space-y-3">
+      {/* Pinned, and deliberately outside the scroll area and the filter: it is a
+          different kind of choice, and typing a namespace must never hide it. */}
+      <label
+        className={cn(
+          "flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition-colors",
+          clusterSelected
+            ? "border-border bg-smoke-charcoal"
+            : "border-border/60 hover:bg-smoke-charcoal",
+        )}
+      >
+        <Checkbox
+          checked={clusterSelected}
+          onCheckedChange={() => onChange(clusterSelected ? [] : [CLUSTER_TARGET])}
+          className="mt-0.5"
+        />
+        <span className="space-y-0.5">
+          <span
+            className={cn(
+              "block text-body-sm",
+              clusterSelected ? "text-warm-off-white" : "text-pale-stone",
+            )}
+          >
+            The cluster itself
+          </span>
+          <span className="block text-caption-tracked text-bone-gray">
+            control plane · etcd · nodes · scheduling · DNS · storage · capacity
+          </span>
+        </span>
+      </label>
+
       <Input
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="Filter by name or namespace…"
         autoComplete="off"
+        disabled={clusterSelected}
       />
 
-      <div className="max-h-[360px] overflow-y-auto rounded-lg border border-border">
+      {clusterSelected && (
+        <p className="text-body-sm text-bone-gray">
+          A cluster assessment covers the cluster and nothing else. Pick a workload
+          below to switch back, or create a separate job for workloads.
+        </p>
+      )}
+
+      <div
+        className={cn(
+          "max-h-[360px] overflow-y-auto rounded-lg border border-border",
+          clusterSelected && "opacity-50",
+        )}
+      >
         {groups.length === 0 ? (
           <p className="px-4 py-6 text-body-sm text-bone-gray">
             No workloads match.

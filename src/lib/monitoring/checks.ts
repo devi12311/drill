@@ -15,7 +15,7 @@ import {
 import type {
   CheckView,
   MonitorCategory,
-  WorkloadKind,
+  TargetKind,
   WorkloadTechnology,
 } from "./types";
 
@@ -43,7 +43,7 @@ function toMonitorCheck(row: CheckRow): MonitorCheck & { version: number } {
     reference: row.reference,
     baseSeverity: row.baseSeverity,
     appliesTo: row.appliesTo.length
-      ? (row.appliesTo as WorkloadKind[])
+      ? (row.appliesTo as TargetKind[])
       : undefined,
     appliesToTechnologies: row.appliesToTechnologies.length
       ? (row.appliesToTechnologies as WorkloadTechnology[])
@@ -130,7 +130,7 @@ function applyOverrides(
  * views of identical data.
  */
 export type JobRubric = (
-  kinds: readonly WorkloadKind[],
+  kinds: readonly TargetKind[],
   technologies: readonly WorkloadTechnology[],
 ) => EffectiveCheck[];
 

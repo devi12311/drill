@@ -1,11 +1,13 @@
 import {
+  CLUSTER_TARGET,
   MONITOR_DEPTHS,
   SEVERITIES,
-  WORKLOAD_KINDS,
+  TARGET_KINDS,
+  isClusterTarget,
   type AssessmentTarget,
   type MonitorDepth,
   type Severity,
-  type WorkloadKind,
+  type TargetKind,
 } from "./types";
 import type { JobCheckOverride } from "@/lib/db/monitoring-queries";
 
@@ -49,7 +51,15 @@ export function parseTargetList(
   depth: MonitorDepth = "posture",
 ): AssessmentTarget[] {
   if (!Array.isArray(raw) || raw.length === 0)
-    throw new Error("Select at least one Deployment or StatefulSet");
+    throw new Error("Select the cluster itself, or at least one Deployment or StatefulSet");
+
+  // The cluster is an EXCLUSIVE target, not one more item in the list. Its rubric
+  // and its method have nothing in common with a workload's, and a mixed job would
+  // read as "assess these five things" while actually being two unrelated
+  // investigations sharing a schedule.
+  if (raw.some((item) => isClusterTarget(item as { kind: string })))
+    return parseClusterTargetList(raw);
+
   const { hard } = TARGET_LIMITS[depth];
   if (raw.length > hard)
     throw new Error(
@@ -67,16 +77,33 @@ export function parseTargetList(
     const kind = typeof t.kind === "string" ? t.kind.toLowerCase() : "";
     const namespace = typeof t.namespace === "string" ? t.namespace.trim() : "";
     const name = typeof t.name === "string" ? t.name.trim() : "";
-    if (!(WORKLOAD_KINDS as readonly string[]).includes(kind))
-      throw new Error(`Target kind must be one of: ${WORKLOAD_KINDS.join(", ")}`);
+    if (!(TARGET_KINDS as readonly string[]).includes(kind))
+      throw new Error(`Target kind must be one of: ${TARGET_KINDS.join(", ")}`);
     if (!namespace || !name)
       throw new Error("Each target needs a namespace and a name");
     const key = `${kind}/${namespace}/${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    targets.push({ kind: kind as WorkloadKind, namespace, name });
+    targets.push({ kind: kind as TargetKind, namespace, name });
   }
   return targets;
+}
+
+/**
+ * The cluster selection: exactly one target, and its identity strings are
+ * OVERWRITTEN with the canonical ones rather than validated.
+ *
+ * A concern's fingerprint is built from kind, namespace and name, so `cluster/-/
+ * cluster` and `cluster//prod-1` would be two different clusters as far as history
+ * is concerned. Accepting only one spelling is what keeps a cluster's trend from
+ * silently splitting in two when a caller sends a different one.
+ */
+function parseClusterTargetList(raw: readonly unknown[]): AssessmentTarget[] {
+  if (raw.length > 1)
+    throw new Error(
+      "A cluster assessment targets the cluster and nothing else — the control plane, nodes, scheduling, networking and clusterwide workload health are one investigation. Create a separate job for individual workloads.",
+    );
+  return [CLUSTER_TARGET];
 }
 
 /**

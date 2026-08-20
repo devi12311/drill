@@ -15,6 +15,10 @@ import {
   CONCERN_STATUS_CLASS,
   CONCERN_STATUS_LABEL,
 } from "@/lib/monitoring/ui";
+import {
+  targetLabel,
+  targetNamespaceLabel,
+} from "@/lib/monitoring/types";
 import type {
   ConcernStatus,
   MonitorEvidence,
@@ -134,10 +138,15 @@ export function ConcernCard({
             <p className="text-body-sm text-warm-off-white">{concern.title}</p>
             <p className="text-body-sm text-bone-gray">
               <span className="font-mono text-[12px]">
-                {concern.targetKind === "statefulset" ? "sts" : "deploy"}/
-                {concern.targetName}
-              </span>{" "}
-              in {concern.targetNamespace}
+                {targetLabel({
+                  kind: concern.targetKind,
+                  name: concern.targetName,
+                })}
+              </span>
+              {targetNamespaceLabel({
+                kind: concern.targetKind,
+                namespace: concern.targetNamespace,
+              }) && ` in ${concern.targetNamespace}`}
               {concern.scope && ` · ${concern.scope}`} · seen{" "}
               {concern.occurrenceCount}×, first {formatRelative(concern.firstSeenAt)}
             </p>

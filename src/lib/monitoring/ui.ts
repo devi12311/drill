@@ -4,6 +4,7 @@ import type {
   MonitorDepth,
   ObservationSource,
   Severity,
+  TargetKind,
   WorkloadTechnology,
 } from "./types";
 
@@ -79,7 +80,49 @@ export const TECHNOLOGY_LABEL: Record<WorkloadTechnology, string> = {
   clickhouse: "ClickHouse",
   rabbitmq: "RabbitMQ",
   nodejs: "Node.js",
+  kubernetes: "Kubernetes cluster",
 };
+
+export const TARGET_KIND_LABEL: Record<TargetKind, string> = {
+  deployment: "Deployments",
+  statefulset: "StatefulSets",
+  cluster: "The cluster itself",
+};
+
+/**
+ * A check's reach as one sentence — "Deployments & StatefulSets · only
+ * PostgreSQL · never ClickHouse".
+ *
+ * Shared by the catalogue's read view and the editor's collapsed Scope summary
+ * on purpose: the editor hides forty checkboxes behind this line, so the line
+ * has to say exactly what the checkboxes would, or the disclosure is a lie.
+ *
+ * The empty cases are the whole reason it exists. An empty `appliesTo` means
+ * every workload kind and pointedly not the cluster, and an empty technology
+ * list reaches workloads whose technology was never identified — neither is
+ * readable from a grid of ticked boxes.
+ */
+export function describeScope(scope: {
+  appliesTo: readonly string[];
+  appliesToTechnologies: readonly string[];
+  excludesTechnologies: readonly string[];
+}): string {
+  const technologies = (list: readonly string[]) =>
+    list.map((t) => TECHNOLOGY_LABEL[t as WorkloadTechnology] ?? t).join(", ");
+
+  const parts = [
+    scope.appliesTo.length === 0
+      ? "Every workload kind"
+      : scope.appliesTo
+          .map((k) => TARGET_KIND_LABEL[k as TargetKind] ?? k)
+          .join(" & "),
+  ];
+  if (scope.appliesToTechnologies.length > 0)
+    parts.push(`only ${technologies(scope.appliesToTechnologies)}`);
+  if (scope.excludesTechnologies.length > 0)
+    parts.push(`never ${technologies(scope.excludesTechnologies)}`);
+  return parts.join(" · ");
+}
 
 export const DEPTH_LABEL: Record<MonitorDepth, string> = {
   posture: "Posture",

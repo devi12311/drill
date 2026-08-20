@@ -1,10 +1,20 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { AdminPageHeader } from "@/components/admin/page-header";
+import { Button } from "@/components/ui/button";
+import { DialogBody } from "@/components/ui/dialog";
+import {
+  DefinitionGrid,
+  DefinitionTile,
+} from "@/components/monitoring/definition-grid";
+import {
+  DefinitionBlock,
+  DefinitionModal,
+  Disclosure,
+  ModalFooter,
+  useDefinitionParam,
+} from "@/components/monitoring/definition-modal";
 import { PlaybookForm } from "@/components/monitoring/playbook-form";
 import { formatDateTime } from "@/lib/admin/format";
 import { useAdminData } from "@/lib/admin/use-admin-data";
@@ -13,35 +23,55 @@ import {
   OBSERVATION_SOURCE_LABEL,
   TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
-import { cn } from "@/lib/utils";
 
 /**
  * Read and edit the playbooks.
  *
  * The rubric page answers "what is asked"; this answers "how it is investigated".
  * There is nothing else to answer: a method is edited and saved, so the page is a
- * reading surface with an editor behind it — no versions, no comparison against the
- * text this release ships, no update to adopt or decline.
+ * shelf with an editor behind it — no versions, no comparison against the text
+ * this release ships, no update to adopt or decline.
  *
- * The method text is collapsed by default. Six full methods stacked is not a reading
- * surface, it is a document nobody reads; the framing paragraph stays visible
- * because it is the one part that says what the method is FOR.
+ * Eight methods stacked on a page is not a reading surface, it is a document
+ * nobody reads, so the page shows eight names and the method opens in a panel
+ * wide enough to hold it — which the 900px column never was.
  */
-
 export default function ProfilesPage() {
   const { data, loading, error, refetch } = useAdminData<{
     profiles: PlaybookView[];
   }>("/api/admin/monitoring/profiles", []);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<string[]>([]);
+  const [openTechnology, setOpenTechnology] = useDefinitionParam("playbook");
+  const [editing, setEditing] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  function toggle(technology: string) {
-    setExpanded((prev) =>
-      prev.includes(technology)
-        ? prev.filter((t) => t !== technology)
-        : [...prev, technology],
-    );
+  const profiles = data?.profiles ?? [];
+  const open =
+    profiles.find((p) => p.technology === openTechnology) ?? null;
+
+  // A panel always opens in read mode — including one opened straight from a URL
+  // or re-opened by Back — so editing stays the deliberate second step. Adjusted
+  // during render rather than in an effect: the reset belongs to this render,
+  // not to a pass after it.
+  const [panelFor, setPanelFor] = useState(openTechnology);
+  if (panelFor !== openTechnology) {
+    setPanelFor(openTechnology);
+    setEditing(false);
+    setDirty(false);
+    // The note belongs to the method that produced it, not to the next one.
+    setNote(null);
+  }
+
+  /**
+   * Every way out of the panel — Escape, the overlay, the X, Cancel — comes
+   * through here. A method is two screens of prose to retype.
+   */
+  function mayDiscard() {
+    return !dirty || confirm("Discard your unsaved changes to this method?");
+  }
+
+  function close() {
+    setOpenTechnology(null);
   }
 
   if (error)
@@ -56,189 +86,162 @@ export default function ProfilesPage() {
         description="How a deep assessment investigates each technology: where that engine's data lives, the order to look in, and the measurements it must bring back. The rubric says what is asked; this says how — and a deep run carries it verbatim in the prompt."
       />
 
-      <Card className="space-y-3 p-4">
-        <span className="text-body text-warm-off-white">
-          {data.profiles.length} methods
-        </span>
+      <Disclosure
+        label="Why a method never decides what counts as a problem"
+        summary={`${profiles.length} methods`}
+      >
         <p className="max-w-[80ch] text-body-sm text-bone-gray">
-          A playbook never decides what counts as a problem — that stays in the check
-          catalogue, because an agent that authors identity destroys the history. It
-          only says where to look and how to measure. An edit takes effect on the next
-          run; every run stores the prompt it was actually given, so what produced an
-          old answer stays readable on that run.
+          That stays in the check catalogue, because an agent that authors
+          identity destroys the history. A playbook only says where to look and
+          how to measure. An edit takes effect on the next run; every run stores
+          the prompt it was actually given, so what produced an old answer stays
+          readable on that run.
         </p>
-      </Card>
+      </Disclosure>
 
-      {note && (
-        <p className="max-w-[100ch] text-body-sm text-traffic-yellow">{note}</p>
-      )}
-
-      {data.profiles.map((profile) => {
-        const isEditing = editing === profile.technology;
-        const isOpen = expanded.includes(profile.technology) || isEditing;
-
-        return (
-          <section
+      <DefinitionGrid>
+        {profiles.map((profile) => (
+          <DefinitionTile
             key={profile.technology}
-            id={`playbook-${profile.technology}`}
-            className="scroll-mt-4 space-y-3"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => toggle(profile.technology)}
-                aria-expanded={isOpen}
-                className="flex items-center gap-1.5 text-body font-medium text-warm-off-white transition-colors hover:text-pale-stone"
-              >
-                {isOpen ? (
-                  <ChevronDown className="size-3.5 text-bone-gray" />
-                ) : (
-                  <ChevronRight className="size-3.5 text-bone-gray" />
+            title={TECHNOLOGY_LABEL[profile.technology]}
+            meta={`${profile.checkIds.length} checks · ${profile.observations.length} measurements`}
+            marker={profile.editedAt ? "edited" : undefined}
+            onOpen={() => setOpenTechnology(profile.technology)}
+          />
+        ))}
+      </DefinitionGrid>
+
+      <DefinitionModal
+        open={open !== null}
+        onClose={close}
+        confirmClose={mayDiscard}
+        title={open ? TECHNOLOGY_LABEL[open.technology] : ""}
+        badges={
+          open && (
+            <span className="text-caption-tracked text-bone-gray">
+              {open.checkIds.length} checks · {open.observations.length}{" "}
+              measurements
+              {/* Worth stating, because an edited method stops tracking the text
+                  this release ships — that is what `edited_by` guards. */}
+              {open.editedAt && ` · edited ${formatDateTime(open.editedAt)}`}
+            </span>
+          )
+        }
+      >
+        {open &&
+          (editing ? (
+            <PlaybookForm
+              playbook={open}
+              onDirtyChange={setDirty}
+              onCancel={() => {
+                if (!mayDiscard()) return;
+                setDirty(false);
+                setEditing(false);
+              }}
+              onSaved={(saveNote) => {
+                setDirty(false);
+                setEditing(false);
+                setNote(saveNote);
+                refetch();
+              }}
+            />
+          ) : (
+            <>
+              <DialogBody className="space-y-4">
+                {/* Shown here rather than on the page behind: saving keeps the
+                    panel open, and an ended trend is worth reading now. */}
+                {note && (
+                  <p className="text-body-sm text-traffic-yellow">{note}</p>
                 )}
-                {TECHNOLOGY_LABEL[profile.technology]}
-              </button>
-              <span className="text-body-sm text-bone-gray">
-                {profile.checkIds.length} checks · {profile.observations.length}{" "}
-                measurements
-                {/* Worth stating, because an edited method stops tracking the text
-                    this release ships — that is what `edited_by` guards. */}
-                {profile.editedAt &&
-                  ` · edited ${formatDateTime(profile.editedAt)}`}
-              </span>
-              <Button
-                variant="outline"
-                className="ml-auto"
-                onClick={() => setEditing(isEditing ? null : profile.technology)}
-              >
-                {isEditing ? "Close" : "Edit"}
-              </Button>
-            </div>
+                <p className="max-w-[90ch] text-body-sm text-pale-stone">
+                  {open.framing}
+                </p>
 
-            <Card className="space-y-4 p-4">
-              {isEditing ? (
-                <PlaybookForm
-                  playbook={profile}
-                  onCancel={() => setEditing(null)}
-                  onSaved={(saveNote) => {
-                    setEditing(null);
-                    setNote(saveNote);
-                    refetch();
-                  }}
-                />
-              ) : (
-                <>
-                  <p
-                    className={cn(
-                      "max-w-[90ch] text-body-sm text-pale-stone",
-                      !isOpen && "line-clamp-3",
-                    )}
-                  >
-                    {profile.framing}
+                <DefinitionBlock label="Where the data is">
+                  <ul className="space-y-1.5">
+                    {open.dataSources.map((source, i) => (
+                      <li
+                        key={i}
+                        className="max-w-[90ch] text-body-sm text-bone-gray"
+                      >
+                        {source}
+                      </li>
+                    ))}
+                  </ul>
+                </DefinitionBlock>
+
+                <DefinitionBlock label="How to investigate, in order">
+                  <ol className="space-y-1.5">
+                    {open.method.map((step, i) => (
+                      <li
+                        key={i}
+                        className="max-w-[90ch] text-body-sm text-bone-gray"
+                      >
+                        <span className="mr-2 font-mono text-[12px] text-pale-stone">
+                          {i + 1}.
+                        </span>
+                        {step}
+                      </li>
+                    ))}
+                  </ol>
+                </DefinitionBlock>
+
+                {/* The one thing still folded away: these are reference data,
+                    read when you are checking a key rather than reading a method. */}
+                <details className="border-t border-border pt-3">
+                  <summary className="cursor-pointer text-caption-tracked uppercase text-bone-gray transition-colors hover:text-warm-off-white">
+                    Measurements it must return ({open.observations.length})
+                  </summary>
+                  <p className="mt-2 max-w-[80ch] text-body-sm text-bone-gray">
+                    These are the keys the run is graded on. Most cannot be filled
+                    from a Kubernetes manifest, which is what forces a real
+                    investigation — and a key that comes back missing is named on
+                    the run rather than passing quietly.
                   </p>
-
-                  {!isOpen ? (
-                    <button
-                      type="button"
-                      onClick={() => toggle(profile.technology)}
-                      className="text-body-sm text-bone-gray transition-colors hover:text-warm-off-white"
-                    >
-                      Read the method — {profile.dataSources.length} data sources,{" "}
-                      {profile.method.length} steps,{" "}
-                      {profile.observations.length} measurements
-                    </button>
-                  ) : (
-                    <>
-                      <div className="space-y-1.5 border-t border-border pt-3">
-                        <p className="text-caption-tracked uppercase text-bone-gray">
-                          Where the data is
-                        </p>
-                        <ul className="space-y-1.5">
-                          {profile.dataSources.map((source, i) => (
-                            <li
-                              key={i}
-                              className="max-w-[90ch] text-body-sm text-bone-gray"
-                            >
-                              {source}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-
-                      <div className="space-y-1.5 border-t border-border pt-3">
-                        <p className="text-caption-tracked uppercase text-bone-gray">
-                          How to investigate, in order
-                        </p>
-                        <ol className="space-y-1.5">
-                          {profile.method.map((step, i) => (
-                            <li
-                              key={i}
-                              className="max-w-[90ch] text-body-sm text-bone-gray"
-                            >
-                              <span className="mr-2 font-mono text-[12px] text-pale-stone">
-                                {i + 1}.
+                  <table className="mt-2 w-full text-body-sm">
+                    <tbody>
+                      {open.observations.map((observation) => (
+                        <tr
+                          key={observation.key}
+                          className="border-t border-border/60"
+                        >
+                          <td className="py-1 pr-3 align-top font-mono text-[12px] whitespace-nowrap text-pale-stone">
+                            {observation.key}
+                            {(open.readings[observation.key] ?? 0) > 0 && (
+                              <span className="ml-2 font-sans text-caption-tracked uppercase text-bone-gray">
+                                {open.readings[observation.key]} read
                               </span>
-                              {step}
-                            </li>
-                          ))}
-                        </ol>
-                      </div>
+                            )}
+                          </td>
+                          <td className="py-1 pr-3 align-top text-caption-tracked whitespace-nowrap uppercase text-bone-gray">
+                            {OBSERVATION_SOURCE_LABEL[observation.source] ??
+                              observation.source}
+                            {observation.unit && (
+                              <span className="normal-case">
+                                {" "}
+                                · {observation.unit}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1 align-top text-bone-gray">
+                            {observation.how}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
+              </DialogBody>
 
-                      <details className="border-t border-border pt-3">
-                        <summary className="cursor-pointer text-caption-tracked uppercase text-bone-gray transition-colors hover:text-warm-off-white">
-                          Measurements it must return (
-                          {profile.observations.length})
-                        </summary>
-                        <p className="mt-2 max-w-[80ch] text-body-sm text-bone-gray">
-                          These are the keys the run is graded on. Most cannot be
-                          filled from a Kubernetes manifest, which is what forces a
-                          real investigation — and a key that comes back missing is
-                          named on the run rather than passing quietly.
-                        </p>
-                        <div className="mt-2 overflow-x-auto">
-                          <table className="w-full text-body-sm">
-                            <tbody>
-                              {profile.observations.map((observation) => (
-                                <tr
-                                  key={observation.key}
-                                  className="border-t border-border/60"
-                                >
-                                  <td className="py-1 pr-3 align-top font-mono text-[12px] whitespace-nowrap text-pale-stone">
-                                    {observation.key}
-                                    {(profile.readings[observation.key] ?? 0) >
-                                      0 && (
-                                      <span className="ml-2 font-sans text-caption-tracked uppercase text-bone-gray">
-                                        {profile.readings[observation.key]} read
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="py-1 pr-3 align-top text-caption-tracked whitespace-nowrap uppercase text-bone-gray">
-                                    {OBSERVATION_SOURCE_LABEL[
-                                      observation.source
-                                    ] ?? observation.source}
-                                    {observation.unit && (
-                                      <span className="normal-case">
-                                        {" "}
-                                        · {observation.unit}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="py-1 align-top text-bone-gray">
-                                    {observation.how}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </details>
-                    </>
-                  )}
-                </>
-              )}
-            </Card>
-          </section>
-        );
-      })}
+              <ModalFooter>
+                <Button onClick={() => setEditing(true)}>Edit</Button>
+                <Button variant="ghost" className="ml-auto" onClick={close}>
+                  Close
+                </Button>
+              </ModalFooter>
+            </>
+          ))}
+      </DefinitionModal>
     </div>
   );
 }

@@ -2,6 +2,7 @@ import type { MonitorCheck } from "../catalogue";
 import type { Playbook } from "../playbook";
 import type { WorkloadTechnology } from "../types";
 import { CLICKHOUSE_CHECKS, CLICKHOUSE_PLAYBOOK } from "./clickhouse";
+import { KUBERNETES_CHECKS, KUBERNETES_PLAYBOOK } from "./kubernetes";
 import { MONGODB_CHECKS, MONGODB_PLAYBOOK } from "./mongodb";
 import { MYSQL_CHECKS, MYSQL_PLAYBOOK } from "./mysql";
 import { NODEJS_CHECKS, NODEJS_PLAYBOOK } from "./nodejs";
@@ -23,11 +24,18 @@ import { RABBITMQ_CHECKS, RABBITMQ_PLAYBOOK } from "./rabbitmq";
  * restores — which is why the text stays here, in git, where it can be reviewed and
  * can cite its sources.
  *
- * All six technologies in `WORKLOAD_TECHNOLOGIES` now have a profile. Kafka and
- * ksqlDB deliberately are not in that vocabulary at all: neither has a Holmes toolset
+ * Every technology in `WORKLOAD_TECHNOLOGIES` has a profile. Kafka and ksqlDB
+ * deliberately are not in that vocabulary at all: neither has a Holmes toolset
  * or a Prometheus exporter in this cluster, and Kafka's binary protocol defeats the
  * bash/curl fallback entirely — a profile without data produces confident nonsense
  * rather than an assessment, so the plumbing is the prerequisite, not the code.
+ *
+ * `kubernetes` is the one profile whose subject is not software inside a workload: it
+ * assesses the cluster itself, reached through the `cluster` target kind, and its
+ * checks are the only ones that name `appliesTo: ["cluster"]`. It is registered here
+ * like any other because the whole point of the target-kind approach is that the
+ * runner, the rubric resolver, the reconciler and both admin screens need to know
+ * nothing about it.
  *
  * The profiles are NOT uniformly well served, and each playbook says so in its own
  * `dataSources`. RabbitMQ is the sharpest case: its management API covers one broker
@@ -62,6 +70,11 @@ export const PROFILES: readonly TechnologyProfile[] = Object.freeze([
     checks: RABBITMQ_CHECKS,
   },
   { technology: "nodejs", playbook: NODEJS_PLAYBOOK, checks: NODEJS_CHECKS },
+  {
+    technology: "kubernetes",
+    playbook: KUBERNETES_PLAYBOOK,
+    checks: KUBERNETES_CHECKS,
+  },
 ]);
 
 /**

@@ -27,7 +27,11 @@ import {
   monitoringWorkloads,
 } from "./schema";
 import { PROFILED_TECHNOLOGIES } from "@/lib/monitoring/profiles";
-import { DISMISSED_STATUSES } from "@/lib/monitoring/types";
+import {
+  CLUSTER_TECHNOLOGY,
+  DISMISSED_STATUSES,
+  isClusterTarget,
+} from "@/lib/monitoring/types";
 import type {
   ExpectedObservations,
   ObservationSpec,
@@ -42,6 +46,7 @@ import type {
   RunCoverage,
   RunTrigger,
   Severity,
+  TargetKind,
   WorkloadKind,
   WorkloadTechnology,
 } from "@/lib/monitoring/types";
@@ -498,7 +503,9 @@ export async function listWorkloads(clusterId: string): Promise<WorkloadRow[]> {
  */
 export async function setWorkloadTechnology(
   clusterId: string,
-  target: AssessmentTarget,
+  // A workload identity, deliberately not an AssessmentTarget: this table can only
+  // ever hold Deployments and StatefulSets, and the type is what says so.
+  target: { kind: WorkloadKind; namespace: string; name: string },
   technology: WorkloadTechnology | null,
 ): Promise<boolean> {
   const rows = await db
@@ -796,7 +803,13 @@ export async function getResolvedJobTargets(
     .orderBy(asc(monitoringJobTargets.namespace), asc(monitoringJobTargets.name));
   return rows.map(({ technology, technologyOverride, ...target }) => ({
     ...target,
-    technology: effectiveTechnology({ technology, technologyOverride }),
+    // The cluster's technology is implied by its kind. There is no inventory row for
+    // it to have been detected on and no human override to respect, and without this
+    // it would resolve to null — which means "no playbook" and, because every cluster
+    // check is scoped to `kubernetes`, an empty rubric and a failed run.
+    technology: isClusterTarget(target)
+      ? CLUSTER_TECHNOLOGY
+      : effectiveTechnology({ technology, technologyOverride }),
   }));
 }
 
@@ -1134,7 +1147,7 @@ export interface ConcernRow {
   checkId: string;
   checkVersion: number;
   category: MonitorCategory;
-  targetKind: WorkloadKind;
+  targetKind: TargetKind;
   targetNamespace: string;
   targetName: string;
   scope: string;
@@ -1266,7 +1279,7 @@ export interface ConcernUpsert {
   checkId: string;
   checkVersion: number;
   category: MonitorCategory;
-  targetKind: WorkloadKind;
+  targetKind: TargetKind;
   targetNamespace: string;
   targetName: string;
   scope: string;

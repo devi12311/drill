@@ -10,9 +10,10 @@ import { playbookViews } from "@/lib/monitoring/playbooks";
  * import them anyway. What it returns is the same object the prompt is built
  * from, which is what lets this screen be trusted as documentation.
  *
- * Each entry also carries what it drifted from (`shipped`, present only when
- * edited) and which observation keys already have readings (`lockedKeys`), so the
- * editor can show drift and refuse a rename that would orphan a trend.
+ * Each entry also carries when it was last edited (`editedAt`, null while it is
+ * still the shipped text) and how many readings each observation key already has
+ * (`readings`), so the editor can show drift and refuse a rename that would
+ * orphan a trend.
  */
 export async function GET() {
   if (!(await getAdminActor())) return forbidden();

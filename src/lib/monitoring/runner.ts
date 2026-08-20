@@ -108,7 +108,12 @@ function assessOnce(
 }
 
 /**
- * A deep run: one investigation per workload, sequentially.
+ * A deep run: one investigation per target, sequentially.
+ *
+ * "Per target" rather than "per workload" because the cluster itself is a target
+ * kind, and a cluster job has exactly one — so this loop runs once and the whole
+ * mechanism below (its own rubric, its own method, its own failure isolation)
+ * applies unchanged.
  *
  * Sequential for the same reason the queue drains serially — concurrent agentic
  * investigations hit LLM rate limits, which Holmes surfaces as SSE error_code 5204.
@@ -198,7 +203,7 @@ async function executeRun(runId: string, jobId: string): Promise<void> {
   if (targets.length === 0) {
     await failRun(
       runId,
-      "The job has no target workloads — select at least one Deployment or StatefulSet",
+      "The job has no targets — select the cluster itself, or at least one Deployment or StatefulSet",
     );
     return;
   }
@@ -250,7 +255,7 @@ async function executeRun(runId: string, jobId: string): Promise<void> {
       if (outcomes.length === 0) {
         await failRun(
           runId,
-          `No workload could be assessed. ${failures.join("; ")}`,
+          `Nothing could be assessed. ${failures.join("; ")}`,
         );
         return;
       }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -101,7 +102,7 @@ export function ResolveDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85dvh] max-w-[640px] flex-col">
+      <DialogContent size="md">
         <DialogHeader>
           <DialogTitle>Resolve investigation</DialogTitle>
           <DialogDescription>
@@ -168,12 +169,12 @@ export function ResolveDialog({
 
         {phase.name === "editing" && (
           <>
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <DialogBody>
               <ArtifactForm
                 draft={phase.draft}
                 onChange={(draft) => setPhase({ name: "editing", draft })}
               />
-            </div>
+            </DialogBody>
             <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
               <p className="min-w-0 flex-1 truncate text-body-sm text-traffic-red">
                 {saveError}

@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { Gauge, Microscope, Scan, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -17,7 +18,12 @@ import {
   DEPTH_LABEL,
   TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
-import { MONITOR_DEPTHS } from "@/lib/monitoring/types";
+import {
+  CLUSTER_TARGET,
+  MONITOR_DEPTHS,
+  WORKLOAD_KINDS,
+  isClusterTarget,
+} from "@/lib/monitoring/types";
 import type {
   AssessmentTarget,
   CheckView,
@@ -39,34 +45,101 @@ const CATEGORY_BLURB: Record<MonitorCategory, string> = {
     "Restarts and OOM kills, replica availability, resource sizing and throttling, probes, disruption budgets.",
 };
 
+/** An existing job, as the form needs it. Its presence switches to edit mode. */
+export interface EditableJob {
+  id: string;
+  name: string;
+  type: MonitorCategory;
+  depth: MonitorDepth;
+  model: string;
+  schedule: string | null;
+  enabled: boolean;
+  targets: AssessmentTarget[];
+  overrides: CheckOverride[];
+}
+
+/** Everything an edit can change — and therefore what the PATCH body carries. */
+interface JobDraft {
+  name: string;
+  depth: MonitorDepth;
+  model: string;
+  schedule: string | null;
+  enabled: boolean;
+  targets: AssessmentTarget[];
+  overrides: CheckOverride[];
+}
+
 /**
- * Create a monitoring job. The check catalogue is shown up front — the point of
- * the rubric is that an operator can see exactly what will be assessed before
- * spending anything.
+ * Order-insensitive over the two list fields: unticking a workload and ticking it
+ * again must not leave the job looking edited, or "Save changes" stops meaning
+ * anything and every visit writes an audit row.
+ */
+function sameDraft(a: JobDraft, b: JobDraft) {
+  const key = (draft: JobDraft) =>
+    JSON.stringify({
+      ...draft,
+      targets: draft.targets.map(targetKey).sort(),
+      overrides: draft.overrides
+        .map((o) => `${o.checkId}:${o.enabled}:${o.severityOverride ?? ""}`)
+        .sort(),
+    });
+  return key(a) === key(b);
+}
+
+/**
+ * Create or retune a monitoring job. The check catalogue is shown up front — the
+ * point of the rubric is that an operator can see exactly what will be assessed
+ * before spending anything.
+ *
+ * One form for both modes, because the two would otherwise have to agree
+ * independently on the target limits, the cluster/depth coupling and the rubric
+ * preview — three rules that are only correct while they are stated once. What
+ * edit mode cannot change is the category: see the note in the fieldset.
  */
 export function JobForm({
   clusterId,
   workloads,
   models,
   checks,
+  startOnCluster = false,
+  job,
 }: {
   clusterId: string;
   workloads: PickableWorkload[];
   models: string[];
   /** The live catalogue; the job may disable or re-rate any of it. */
   checks: CheckView[];
+  /**
+   * Open with the cluster itself selected — the cluster page's "Assess this
+   * cluster" shortcut. A seeded initial state rather than an effect, so nothing
+   * overwrites the operator's edits on a later render.
+   */
+  startOnCluster?: boolean;
+  /** Omitted to create; supplied to edit that job in place. */
+  job?: EditableJob;
 }) {
   const router = useRouter();
-  const [name, setName] = useState("");
-  const [type, setType] = useState<MonitorCategory>("security");
-  const [depth, setDepth] = useState<MonitorDepth>("posture");
-  const [model, setModel] = useState(models[0] ?? "gpt-5-mini");
-  const [schedule, setSchedule] = useState("");
-  const [targets, setTargets] = useState<AssessmentTarget[]>([]);
-  const [overrides, setOverrides] = useState<CheckOverride[]>([]);
+  const [name, setName] = useState(job?.name ?? "");
+  const [type, setType] = useState<MonitorCategory>(
+    job?.type ?? (startOnCluster ? "performance" : "security"),
+  );
+  const [depth, setDepth] = useState<MonitorDepth>(
+    job?.depth ?? (startOnCluster ? "deep" : "posture"),
+  );
+  const [model, setModel] = useState(job?.model ?? models[0] ?? "gpt-5-mini");
+  const [schedule, setSchedule] = useState(job?.schedule ?? "");
+  const [enabled, setEnabled] = useState(job?.enabled ?? true);
+  const [targets, setTargets] = useState<AssessmentTarget[]>(
+    job?.targets ?? (startOnCluster ? [CLUSTER_TARGET] : []),
+  );
+  const [overrides, setOverrides] = useState<CheckOverride[]>(
+    job?.overrides ?? [],
+  );
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const cluster = targets.some(isClusterTarget);
   const limits = TARGET_LIMITS[depth];
   const byKey = useMemo(
     () => new Map(workloads.map((w) => [targetKey(w), w])),
@@ -81,8 +154,13 @@ export function JobForm({
     [targets],
   );
   const technologies = useMemo(
-    () => [...new Set(picked.map((w) => w.technology).filter((t) => t !== null))],
-    [picked],
+    () =>
+      targets.some(isClusterTarget)
+        ? // The cluster's technology comes from the target kind, not from the
+          // workload inventory — there is no inventory row for it to be detected on.
+          (["kubernetes"] as const)
+        : [...new Set(picked.map((w) => w.technology).filter((t) => t !== null))],
+    [picked, targets],
   );
   /**
    * Mirrors `applicableChecks` on the server, so the operator sees the same rubric
@@ -90,16 +168,16 @@ export function JobForm({
    * Postgres workload makes the PG questions appear.
    */
   const applicable = useMemo(() => {
-    const wantedKinds =
-      kinds.length > 0 ? kinds : (["deployment", "statefulset"] as const);
+    const wantedKinds = kinds.length > 0 ? kinds : WORKLOAD_KINDS;
     return checks.filter(
       (c) =>
         c.enabled &&
         c.category === type &&
-        (c.appliesTo.length === 0 ||
-          c.appliesTo.some((k) =>
-            (wantedKinds as readonly string[]).includes(k),
-          )) &&
+        // An empty `appliesTo` means every WORKLOAD kind and never the cluster —
+        // same rule as applicableChecks(), which this preview exists to mirror.
+        (c.appliesTo.length ? c.appliesTo : WORKLOAD_KINDS).some((k) =>
+          (wantedKinds as readonly string[]).includes(k),
+        ) &&
         (c.appliesToTechnologies.length === 0 ||
           c.appliesToTechnologies.some((t) =>
             (technologies as readonly string[]).includes(t),
@@ -118,31 +196,89 @@ export function JobForm({
     [picked],
   );
 
+  /**
+   * A job's model outlives the cluster's model list — an entry can be commented
+   * out of Holmes's config long after a job was pointed at it. Keeping the stored
+   * value in the options means the select shows what will actually be sent instead
+   * of rendering blank and silently saving something else.
+   */
+  const modelOptions = useMemo(
+    () => (models.includes(model) ? models : [model, ...models]),
+    [models, model],
+  );
+
+  const draft: JobDraft = useMemo(
+    () => ({
+      name,
+      depth,
+      model,
+      schedule: schedule || null,
+      enabled,
+      targets,
+      overrides,
+    }),
+    [name, depth, model, schedule, enabled, targets, overrides],
+  );
+  /** What is stored, moved forward on every successful save. */
+  const [baseline, setBaseline] = useState<JobDraft | null>(
+    job
+      ? {
+          name: job.name,
+          depth: job.depth,
+          model: job.model,
+          schedule: job.schedule,
+          enabled: job.enabled,
+          targets: job.targets,
+          overrides: job.overrides,
+        }
+      : null,
+  );
+  const dirty = baseline === null || !sameDraft(draft, baseline);
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/admin/monitoring/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          clusterId,
-          name,
-          type,
-          depth,
-          model,
-          schedule: schedule || null,
-          targets,
-          overrides,
-        }),
-      });
+      const res = await fetch(
+        job
+          ? `/api/admin/monitoring/jobs/${job.id}`
+          : "/api/admin/monitoring/jobs",
+        {
+          method: job ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          // `type` is create-only, and PATCH ignores it — see the fieldset note.
+          body: JSON.stringify(job ? draft : { clusterId, type, ...draft }),
+        },
+      );
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      // Re-runs the layout, so the tree picks up the new name / paused state.
       router.refresh();
-      router.push(`/admin/monitoring/${clusterId}/jobs/${body.id}`);
+      if (!job) {
+        // Deliberately still busy: the button is about to be unmounted by the
+        // navigation, and re-enabling it invites a second create on a slow push.
+        router.push(`/admin/monitoring/${clusterId}/jobs/${body.id}`);
+        return;
+      }
+      setBaseline(draft);
+      // Unchecking a check closes the concerns citing it, server-side. Saying so
+      // is the only way the operator learns their history just moved.
+      const closed: number = body.autoResolved ?? 0;
+      setSaved(
+        closed === 0
+          ? "Saved."
+          : closed === 1
+            ? "Saved. One open concern was resolved, because the check it cites no longer runs in this job."
+            : `Saved. ${closed} open concerns were resolved, because the checks they cite no longer run in this job.`,
+      );
+      setBusy(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the job");
+      setError(
+        err instanceof Error
+          ? err.message
+          : `Could not ${job ? "save the changes" : "create the job"}`,
+      );
       setBusy(false);
     }
   }
@@ -165,6 +301,14 @@ export function JobForm({
         <legend className="text-body-sm font-medium text-warm-off-white">
           What should Holmes assess?
         </legend>
+        {job && (
+          <p className="text-body-sm text-bone-gray">
+            Fixed after creation. Every concern this job has recorded cites a
+            check from this category, and switching would leave those concerns
+            open forever because nothing would ever assess them again — create a
+            second job for the other category.
+          </p>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           {(["security", "performance"] as MonitorCategory[]).map((option) => {
             const Icon = option === "security" ? ShieldCheck : Gauge;
@@ -175,11 +319,15 @@ export function JobForm({
                 type="button"
                 onClick={() => setType(option)}
                 aria-pressed={active}
+                disabled={Boolean(job)}
                 className={cn(
                   "rounded-lg border p-4 text-left transition-colors",
                   active
                     ? "border-warm-off-white/40 bg-smoke-charcoal"
-                    : "border-border hover:bg-smoke-charcoal",
+                    : "border-border",
+                  job
+                    ? ["cursor-not-allowed", !active && "opacity-40"]
+                    : "hover:bg-smoke-charcoal",
                 )}
               >
                 <span className="flex items-center gap-2 text-body-sm text-warm-off-white">
@@ -203,17 +351,28 @@ export function JobForm({
           {MONITOR_DEPTHS.map((option) => {
             const Icon = option === "posture" ? Scan : Microscope;
             const active = depth === option;
+            // Every cluster check needs measured data and a method to find it with.
+            // A posture run carries no playbook, so it would ask them all and skip
+            // most — a worse deep run that still costs a call.
+            const unavailable = cluster && option === "posture";
             return (
               <button
                 key={option}
                 type="button"
                 onClick={() => setDepth(option)}
                 aria-pressed={active}
+                disabled={unavailable}
+                title={
+                  unavailable
+                    ? "A cluster assessment is always deep: its questions need measurements, and only a deep run carries the method that finds them."
+                    : undefined
+                }
                 className={cn(
                   "rounded-lg border p-4 text-left transition-colors",
                   active
                     ? "border-warm-off-white/40 bg-smoke-charcoal"
                     : "border-border hover:bg-smoke-charcoal",
+                  unavailable && "cursor-not-allowed opacity-40 hover:bg-transparent",
                 )}
               >
                 <span className="flex items-center gap-2 text-body-sm text-warm-off-white">
@@ -238,6 +397,8 @@ export function JobForm({
             Holmes answers exactly these questions. Uncheck one to leave it out
             of this job, or re-rate its severity for this job only — the
             catalogue itself is unchanged.
+            {job &&
+              " Unchecking one also resolves the open concerns that cite it, since nothing will assess them from now on."}
           </p>
         </div>
         <RubricEditor
@@ -254,31 +415,54 @@ export function JobForm({
 
       <div className="space-y-2">
         <div className="flex items-baseline justify-between gap-3">
-          <Label>Workloads to assess</Label>
+          <Label>What to assess</Label>
           <span
             className={cn(
               "text-body-sm",
-              targets.length > limits.soft
+              !cluster && targets.length > limits.soft
                 ? "text-traffic-yellow"
                 : "text-bone-gray",
             )}
           >
-            {targets.length} selected
+            {cluster ? "the cluster" : `${targets.length} selected`}
           </span>
         </div>
         <WorkloadPicker
           workloads={workloads}
           selected={targets}
-          onChange={setTargets}
+          onChange={(next) => {
+            setTargets(next);
+            // Selecting the cluster must actually change the depth, not merely grey
+            // out the other option: a posture cluster run would be accepted by the
+            // server and produce a run with no method.
+            if (next.some(isClusterTarget)) setDepth("deep");
+          }}
         />
-        {targets.length > limits.soft && (
+        {cluster && (
+          <p className="text-body-sm text-bone-gray">
+            One investigation covering the control plane, etcd, every node,
+            scheduling, DNS, the pod network, storage and clusterwide workload
+            health. It is the longest single run in the system — expect tens of
+            minutes — and findings are addressed to the node, namespace or component
+            they are about, so each keeps its own history.
+          </p>
+        )}
+        {cluster && applicable.length === 0 && (
+          <p className="text-body-sm text-traffic-yellow">
+            No {CATEGORY_LABEL[type].toLowerCase()} check is scoped to the cluster,
+            so this job would assess nothing. Only performance and reliability
+            checks ship for the cluster today; switch the category, or author a
+            cluster-scoped check in the catalogue first.
+          </p>
+        )}
+        {!cluster && targets.length > limits.soft && (
           <p className="text-body-sm text-traffic-yellow">
             {depth === "deep"
               ? `Each workload is a separate full investigation, run one after another — ${targets.length} of them will take a long time and cost accordingly. The hard limit is ${limits.hard}.`
               : `One run covers every selected workload in a single investigation. Past about ${limits.soft} the agent's attention is spread thin and coverage gets less reliable — consider splitting this into several jobs.`}
           </p>
         )}
-        {depth === "deep" && unprofiled.length > 0 && (
+        {!cluster && depth === "deep" && unprofiled.length > 0 && (
           <p className="text-body-sm text-bone-gray">
             No playbook exists yet for{" "}
             {unprofiled
@@ -303,7 +487,7 @@ export function JobForm({
             onChange={(e) => setModel(e.target.value)}
             className="h-9 w-full rounded-md border border-input bg-transparent px-2.5 text-body-sm text-warm-off-white outline-none focus-visible:border-ring"
           >
-            {models.map((option) => (
+            {modelOptions.map((option) => (
               <option key={option} value={option} className="bg-popover">
                 {option}
               </option>
@@ -311,6 +495,8 @@ export function JobForm({
           </select>
           <p className="text-body-sm text-bone-gray">
             A temperature-0 model gives the most comparable results run to run.
+            {!models.includes(model) &&
+              " This cluster's Holmes does not currently serve the model this job is set to."}
           </p>
         </div>
 
@@ -344,10 +530,45 @@ export function JobForm({
         </div>
       </div>
 
-      {error && <p className="text-body-sm text-traffic-red">{error}</p>}
+      {/* Pausing only makes sense once there is a job to pause; a new one is
+          created active, which is what the create button already says. */}
+      {job && (
+        <label className="flex cursor-pointer items-start gap-2.5">
+          <Checkbox
+            checked={enabled}
+            onCheckedChange={(value) => setEnabled(value === true)}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="block text-body-sm text-warm-off-white">
+              Active
+            </span>
+            <span className="block text-body-sm text-bone-gray">
+              Pausing stops the schedule and nothing else: the concern history
+              stays, and &ldquo;Run now&rdquo; still works. Re-activating counts
+              the next fire time from then, so a paused stretch never fires as a
+              burst of catch-up runs.
+            </span>
+          </span>
+        </label>
+      )}
 
-      <Button type="submit" disabled={busy || targets.length === 0}>
-        {busy ? "Creating…" : "Create job"}
+      {error && <p className="text-body-sm text-traffic-red">{error}</p>}
+      {saved && !dirty && (
+        <p className="text-body-sm text-traffic-green">{saved}</p>
+      )}
+
+      <Button
+        type="submit"
+        disabled={busy || targets.length === 0 || (Boolean(job) && !dirty)}
+      >
+        {job
+          ? busy
+            ? "Saving…"
+            : "Save changes"
+          : busy
+            ? "Creating…"
+            : "Create job"}
       </Button>
     </form>
   );

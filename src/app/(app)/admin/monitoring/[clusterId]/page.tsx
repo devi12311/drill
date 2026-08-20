@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useState } from "react";
-import { Gauge, RefreshCw, ShieldCheck } from "lucide-react";
+import { Gauge, Radar, RefreshCw, ShieldCheck } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import { formatNumber, formatRelative } from "@/lib/admin/format";
 import { useAdminData } from "@/lib/admin/use-admin-data";
 import type { PickableWorkload } from "@/components/monitoring/workload-picker";
 import { CATEGORY_LABEL, TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
-import { WORKLOAD_TECHNOLOGIES } from "@/lib/monitoring/types";
+import { WORKLOAD_TECHNOLOGY_OPTIONS } from "@/lib/monitoring/types";
 import type {
   MonitorCategory,
   WorkloadKind,
@@ -166,7 +166,7 @@ export default function ClusterPage({
             <option value="" className="bg-popover">
               — none —
             </option>
-            {WORKLOAD_TECHNOLOGIES.map((option) => (
+            {WORKLOAD_TECHNOLOGY_OPTIONS.map((option) => (
               <option key={option} value={option} className="bg-popover">
                 {TECHNOLOGY_LABEL[option]}
               </option>
@@ -284,6 +284,17 @@ export default function ClusterPage({
         >
           <RefreshCw className="size-3.5" />
           {busy === "discover" ? "Scanning…" : "Rescan workloads"}
+        </Button>
+        {/* The cluster's own assessment is a job like any other — this is a
+            shortcut into the same form with the cluster preselected, because
+            "how is this cluster doing" is the question this page invites. */}
+        <Button variant="outline" asChild>
+          <Link
+            href={`/admin/monitoring/${clusterId}/jobs/new?target=cluster`}
+          >
+            <Radar className="size-3.5" />
+            Assess this cluster
+          </Link>
         </Button>
         <Button asChild>
           <Link href={`/admin/monitoring/${clusterId}/jobs/new`}>New job</Link>

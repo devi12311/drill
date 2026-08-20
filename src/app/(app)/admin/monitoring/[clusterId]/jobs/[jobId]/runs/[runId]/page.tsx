@@ -14,6 +14,10 @@ import {
   TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
 import type { ExpectedObservations } from "@/lib/monitoring/playbook";
+import {
+  targetLabel,
+  targetNamespaceLabel,
+} from "@/lib/monitoring/types";
 import type {
   ObservationSource,
   RunCoverage,
@@ -195,8 +199,10 @@ export default function RunPage({
                   {finding.title}
                 </span>
                 <span className="font-mono text-[12px] text-bone-gray">
-                  {finding.targetKind === "statefulset" ? "sts" : "deploy"}/
-                  {finding.targetName}
+                  {targetLabel({
+                    kind: finding.targetKind,
+                    name: finding.targetName,
+                  })}
                 </span>
                 {finding.isNew && (
                   <span className="text-caption-tracked uppercase text-traffic-yellow">
@@ -299,11 +305,12 @@ export default function RunPage({
         {run.coverage?.targets.map((entry) => (
           <Card key={`${entry.target.namespace}/${entry.target.name}`} className="p-4">
             <p className="font-mono text-[12px] text-warm-off-white">
-              {entry.target.kind === "statefulset" ? "sts" : "deploy"}/
-              {entry.target.name}{" "}
-              <span className="text-bone-gray">
-                in {entry.target.namespace}
-              </span>
+              {targetLabel(entry.target)}{" "}
+              {targetNamespaceLabel(entry.target) && (
+                <span className="text-bone-gray">
+                  in {targetNamespaceLabel(entry.target)}
+                </span>
+              )}
             </p>
             <p className="mt-1 text-body-sm text-bone-gray">
               {entry.evaluated.length} evaluated

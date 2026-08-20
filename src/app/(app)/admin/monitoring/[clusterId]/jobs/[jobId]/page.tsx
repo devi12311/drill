@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useState } from "react";
-import { Play, Trash2 } from "lucide-react";
+import { Pencil, Play, Trash2 } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
 import { Button } from "@/components/ui/button";
@@ -205,16 +205,31 @@ export default function JobPage({
   // The catalogue is live data, so titles/citations arrive with the response
   // rather than being imported by the card.
   const checkInfo = new Map(concerns.data.checks.map((c) => [c.id, c]));
+  const cluster = job.targets.some((t) => t.kind === "cluster");
+  // Paused is only meaningful for a scheduled job: `enabled` gates the scheduler
+  // tick alone, and "Run now" works either way.
+  const scheduleLabel = job.schedule
+    ? `schedule ${job.schedule} UTC${job.enabled ? "" : " · paused"}`
+    : "manual runs only";
+  const scopeLabel = cluster
+    ? "the cluster itself"
+    : `${job.targets.length} workload${job.targets.length === 1 ? "" : "s"}`;
 
   return (
     <div className="space-y-8">
       <AdminPageHeader
         title={job.name}
-        description={`${CATEGORY_LABEL[job.type]} · ${DEPTH_LABEL[job.depth]} · ${job.targets.length} workload${job.targets.length === 1 ? "" : "s"} · ${job.schedule ? `schedule ${job.schedule} UTC` : "manual runs only"} · ${job.model}`}
+        description={`${CATEGORY_LABEL[job.type]} · ${DEPTH_LABEL[job.depth]} · ${scopeLabel} · ${scheduleLabel} · ${job.model}`}
       >
         <Button onClick={runNow} disabled={busy !== null}>
           <Play className="size-3.5" />
           {busy === "run" ? "Investigating…" : "Run now"}
+        </Button>
+        <Button variant="outline" asChild>
+          <Link href={`/admin/monitoring/${clusterId}/jobs/${jobId}/edit`}>
+            <Pencil className="size-3.5" />
+            Edit
+          </Link>
         </Button>
         <Button
           variant="outline"
@@ -230,11 +245,12 @@ export default function JobPage({
       {busy === "run" && (
         <Card className="p-4">
           <p className="text-body-sm text-pale-stone">
-            Holmes is investigating {job.targets.length} workload
-            {job.targets.length === 1 ? "" : "s"}.{" "}
-            {job.depth === "deep"
-              ? "A deep run investigates each workload separately, one after another — expect several minutes each, and up to 20 per workload before it is given up on."
-              : "This takes tens of seconds to a few minutes."}{" "}
+            Holmes is investigating {scopeLabel}.{" "}
+            {cluster
+              ? "One investigation covers the control plane, the nodes, scheduling, DNS, the pod network, storage and clusterwide workload health — the widest run in the system, and it is given up to 45 minutes."
+              : job.depth === "deep"
+                ? "A deep run investigates each workload separately, one after another — expect several minutes each, and up to 20 per workload before it is given up on."
+                : "This takes tens of seconds to a few minutes."}{" "}
             The work runs on the server, so leaving the page does not cancel it —
             come back and the run will be in the list below.
           </p>

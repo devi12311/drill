@@ -36,12 +36,34 @@ export const WORKLOAD_KINDS = ["deployment", "statefulset"] as const;
 export type WorkloadKind = (typeof WORKLOAD_KINDS)[number];
 
 /**
- * The software running INSIDE the workload, as opposed to its Kubernetes kind.
+ * What an assessment can be pointed AT: every workload kind, plus the cluster
+ * itself.
+ *
+ * Deliberately a separate vocabulary from {@link WORKLOAD_KINDS} rather than a
+ * third member of it. Discovery, the workload inventory cache and the picker's
+ * namespace grouping all genuinely mean "a Deployment or a StatefulSet", and
+ * widening their type would let a cluster row into tables that can never hold
+ * one. Only the target-shaped surfaces — job targets, concerns, observations —
+ * speak `TargetKind`.
+ */
+export const TARGET_KINDS = [...WORKLOAD_KINDS, "cluster"] as const;
+export type TargetKind = (typeof TARGET_KINDS)[number];
+
+/**
+ * The software being assessed, as opposed to the Kubernetes kind it is packaged
+ * as.
  *
  * This is the dimension the generic rubric lacks: "is this StatefulSet healthy?"
  * and "is this PostgreSQL healthy?" are different questions, and only the second
  * one is worth asking. A check may be scoped to one or more technologies, and a
  * deep assessment loads that technology's playbook.
+ *
+ * `kubernetes` is the odd member and the one to read carefully: it is the only
+ * value that does not name software running *inside* a workload, because its
+ * subject is the cluster itself (see {@link CLUSTER_TARGET}). It therefore must
+ * never be produced by detection, and must never be offered as an override for a
+ * workload — `WORKLOAD_TECHNOLOGY_OPTIONS` in monitoring/profiles is the list any
+ * workload-facing picker uses.
  *
  * Deliberately limited to what we can actually observe today. Kafka and ksqlDB
  * are absent on purpose: neither has a Holmes toolset or a Prometheus exporter in
@@ -55,8 +77,22 @@ export const WORKLOAD_TECHNOLOGIES = [
   "clickhouse",
   "rabbitmq",
   "nodejs",
+  "kubernetes",
 ] as const;
 export type WorkloadTechnology = (typeof WORKLOAD_TECHNOLOGIES)[number];
+
+/** The one technology whose subject is the cluster rather than a workload. */
+export const CLUSTER_TECHNOLOGY = "kubernetes" satisfies WorkloadTechnology;
+
+/**
+ * The technologies a WORKLOAD can be. Every workload-facing surface uses this
+ * instead of the full vocabulary: the picker's override dropdown, and the route
+ * behind it. Marking a Deployment as `kubernetes` would hand it the cluster
+ * playbook and file its findings under a cluster check, so it is refused rather
+ * than merely discouraged.
+ */
+export const WORKLOAD_TECHNOLOGY_OPTIONS: readonly WorkloadTechnology[] =
+  Object.freeze(WORKLOAD_TECHNOLOGIES.filter((t) => t !== CLUSTER_TECHNOLOGY));
 
 /**
  * How much work one run does per workload.
@@ -135,9 +171,29 @@ export interface MonitorEvidence {
 }
 
 export interface AssessmentTarget {
-  kind: WorkloadKind;
+  kind: TargetKind;
   namespace: string;
   name: string;
+}
+
+/**
+ * The cluster as an assessment target.
+ *
+ * These three strings are CONSTANT, and deliberately not the registered
+ * cluster's display name: a concern's identity is fingerprinted from
+ * `clusterId + kind + namespace + name + checkId + scope`, so a target that
+ * carried the name would orphan every cluster finding the moment someone
+ * renamed the cluster in Drill. `clusterId` already disambiguates which cluster
+ * this is; the namespace is a visible sentinel because a cluster is not in one.
+ */
+export const CLUSTER_TARGET: AssessmentTarget = Object.freeze({
+  kind: "cluster",
+  namespace: "-",
+  name: "cluster",
+});
+
+export function isClusterTarget(target: { kind: string }) {
+  return target.kind === "cluster";
 }
 
 /**
@@ -251,19 +307,42 @@ function targetKey(t: AssessmentTarget) {
   return `${t.kind}/${t.namespace}/${t.name}`;
 }
 
-export function targetLabel(t: AssessmentTarget) {
+/**
+ * How a target is written wherever it appears: `deploy/x`, `sts/y`, or plain
+ * `cluster`. Takes the loose shape rather than {@link AssessmentTarget} because the
+ * UI holds targets as three flat columns off a database row, and three components
+ * had each grown their own copy of this ternary.
+ */
+export function targetLabel(t: { kind: string; name: string }) {
+  if (isClusterTarget(t)) return "cluster";
   return `${t.kind === "statefulset" ? "sts" : "deploy"}/${t.name}`;
+}
+
+/**
+ * The namespace to print after a target's label, or null when there is none to
+ * print. A cluster is not in a namespace, and rendering its sentinel would be
+ * worse than rendering nothing.
+ */
+export function targetNamespaceLabel(t: {
+  kind: string;
+  namespace: string;
+}): string | null {
+  return isClusterTarget(t) ? null : t.namespace;
 }
 
 function parseTarget(raw: unknown): AssessmentTarget | null {
   if (!raw || typeof raw !== "object") return null;
   const t = raw as Record<string, unknown>;
   const kind = str(t.kind, 40).toLowerCase();
-  if (!(WORKLOAD_KINDS as readonly string[]).includes(kind)) return null;
+  if (!(TARGET_KINDS as readonly string[]).includes(kind)) return null;
+  // The cluster target is canonicalised rather than trusted: the model echoes the
+  // target back to us, and a second spelling of it would fingerprint as a second
+  // cluster and split every trend in half.
+  if (isClusterTarget({ kind })) return CLUSTER_TARGET;
   const namespace = str(t.namespace, 253);
   const name = str(t.name, 253);
   if (!namespace || !name) return null;
-  return { kind: kind as WorkloadKind, namespace, name };
+  return { kind: kind as TargetKind, namespace, name };
 }
 
 function parseEvidence(raw: unknown): MonitorEvidence[] {

@@ -11,7 +11,8 @@ import { renderPlaybook, type Playbook } from "./playbook";
 import {
   OBSERVATION_SOURCES,
   SEVERITIES,
-  WORKLOAD_KINDS,
+  TARGET_KINDS,
+  isClusterTarget,
   parseAssessment,
   targetLabel,
   type Assessment,
@@ -69,6 +70,18 @@ const ASSESS_TIMEOUT_MS: Record<MonitorDepth, number> = {
   deep: 1_200_000,
 };
 
+/**
+ * The cluster's own deep run gets longer than a workload's.
+ *
+ * It is the widest investigation the system asks for — one method covering the
+ * control plane, every node, scheduling, DNS, the CNI dataplane, storage and a
+ * clusterwide workload rollup, with ~50 measurements to bring back. At the 20
+ * minutes a workload gets, the failure mode is a timeout mid-investigation, which
+ * costs the whole run and teaches nothing. Still well inside `STALE_RUN_MS.deepMs`
+ * (6 hours), so a hung run is still reaped.
+ */
+const CLUSTER_ASSESS_TIMEOUT_MS = 2_700_000;
+
 /** What lands in `monitoring_runs.raw_response`; conversation history is both enormous and server-only. */
 export type StoredHolmesResponse = Omit<
   HolmesChatResponse,
@@ -112,7 +125,7 @@ export function buildResponseFormat(
     additionalProperties: false,
     required: ["kind", "namespace", "name"],
     properties: {
-      kind: { type: "string", enum: [...WORKLOAD_KINDS] },
+      kind: { type: "string", enum: [...TARGET_KINDS] },
       namespace: { type: "string" },
       name: { type: "string" },
     },
@@ -303,6 +316,18 @@ const CATEGORY_FRAMING: Record<MonitorCategory, string> = {
     "You are performing a scheduled PERFORMANCE AND RELIABILITY assessment: how these workloads are actually behaving and whether they are configured to stay healthy under load, disruption and failure.",
 };
 
+/**
+ * The same category, aimed at the cluster instead of at workloads. Kept separate
+ * rather than made vague enough to cover both: the framing is the sentence that
+ * decides where the agent looks first, and "how these workloads are behaving" sends
+ * it to the wrong layer entirely when the subject is the platform underneath them.
+ */
+const CLUSTER_CATEGORY_FRAMING: Record<MonitorCategory, string> = {
+  security: `You are performing a scheduled SECURITY POSTURE assessment of a Kubernetes cluster itself. Scope: ${SECURITY_SCOPE_CAVEAT}`,
+  performance:
+    "You are performing a scheduled PERFORMANCE AND RELIABILITY assessment of a Kubernetes cluster itself: whether the platform is fast, has capacity, can place and keep work running, and can survive losing a node — not whether any single application is healthy.",
+};
+
 export function buildAssessmentPrompt(input: {
   category: MonitorCategory;
   clusterName: string;
@@ -312,11 +337,12 @@ export function buildAssessmentPrompt(input: {
   playbook?: Playbook;
 }): string {
   const { category, clusterName, targets, checks, playbook } = input;
-  // A deep run is always one workload, so the playbook renders against it.
+  // A deep run is always one target, so the playbook renders against it.
   const method =
     playbook && targets.length === 1
       ? `\n${renderPlaybook(playbook, targets[0])}\n`
       : "";
+  const cluster = targets.length === 1 && isClusterTarget(targets[0]);
   const deepRules = playbook
     ? `
 - Follow the investigation method above. It tells you where this technology's data actually lives; do not fall back to reading only the Kubernetes manifest.
@@ -325,14 +351,18 @@ export function buildAssessmentPrompt(input: {
 - Checks whose evidence you could not obtain go in "skipped". Never pass a check because nothing looked wrong in the data you did not read.`
     : "";
 
-  return `${CATEGORY_FRAMING[category]}
+  return `${(cluster ? CLUSTER_CATEGORY_FRAMING : CATEGORY_FRAMING)[category]}
 
 You are running unattended, on a schedule, in cluster "${clusterName}". Your output is stored and compared against previous runs, so it must be evidence-based and use the exact check IDs below.
 
-TARGET WORKLOADS — assess every one, and nothing else:
+${
+  cluster
+    ? `TARGET — the CLUSTER ITSELF, registered here as "${clusterName}": its control plane and etcd, its nodes, scheduling, networking and DNS, its storage, and the health of its workloads in aggregate. Not any one workload.`
+    : `TARGET WORKLOADS — assess every one, and nothing else:
 ${targets
   .map((t, i) => `${i + 1}. ${t.kind} "${t.name}" in namespace "${t.namespace}"`)
-  .join("\n")}
+  .join("\n")}`
+}
 ${method}
 CHECKS — answer exactly these questions, for each target:
 
@@ -342,13 +372,29 @@ RULES
 - Investigate with your tools. Never infer a verdict from a workload's name or from what is "typical" — read the live spec, status, events and metrics.
 - "findings" contains one entry per FAILING check per target. Omit passing checks entirely.
 - "coverage" MUST contain one entry per target listing the check IDs you evaluated and the ones you skipped with a reason. A check you could not judge — missing metrics, RBAC denied, resource absent — belongs in "skipped". Never report it as evaluated, and never let it look like a pass.
+- The reverse matters just as much: "skipped" is ONLY for a check you could not judge. A check you DID judge and found nothing wrong with is a pass — list it in "evaluated", omit it from "findings", and do not put it in "skipped" at all. A skip reason that describes a healthy result ("the numbers were fine", "no failure to report", "nothing was wrong", "not proven") turns a clean answer into an unknown, and an unknown can never close a problem that was open before. Never list the same check in both "evaluated" and "skipped". If you judged a check on partial evidence, judge it and say which evidence was missing in the finding — that is a verdict, not a skip.
 - Use ONLY the check IDs listed above, exactly as written. Do not invent checks; if you notice something important that no check covers, mention it in "summary" instead.
-- Do not report the same check twice for the same target and scope. When several containers of one workload fail the same check, use "scope" to distinguish them.
+- Do not report the same check twice for the same target and scope. When several containers of one workload fail the same check, use "scope" to distinguish them.${
+    cluster
+      ? `
+- "scope" is what gives a cluster finding its address: put the node, namespace, component, workload or object it is about in it. A finding about one node and a finding about another are two separate concerns with separate evidence — report them separately. Leave "scope" empty only for something genuinely clusterwide.
+- Every "target" must be exactly {"kind":"cluster","namespace":"-","name":"cluster"}. Never put a node or namespace name there; that is what "scope" is for.
+- An aggregate number is not a finding on its own. Whenever you report a clusterwide figure, name the nodes, namespaces or workloads that dominate it and their share of it.`
+      : ""
+  }
 - effective_severity starts at the check's base severity. Adjust it only when this cluster's context justifies it (production exposure, replica count, blast radius) and explain the change in severity_rationale; leave severity_rationale empty when you keep the base.
 - evidence must be observed values — numbers, field paths, event messages, PromQL results — not a restatement of the question.
-- remediation must be the specific change for that workload: the field to set and the value to set it to.
+- remediation must be the specific change to make${
+    cluster
+      ? ", named down to the object: the node, component, manifest field or setting, and the value to set it to. Never general advice about Kubernetes."
+      : " for that workload: the field to set and the value to set it to."
+  }
 - Never output Secret values, tokens, passwords or certificate material. Reference secrets by name only.
-- If a target workload does not exist, put every check for it in "skipped" with reason "workload not found".${deepRules}`;
+${
+    cluster
+      ? '- If a cluster component you were told to examine does not exist here (no NodeLocal DNSCache, no cluster-autoscaler, no ResourceQuotas anywhere), that is an observation about this cluster, not a missing target. Say so in the finding or the summary; do not skip the check as "not found".'
+      : '- If a target workload does not exist, put every check for it in "skipped" with reason "workload not found".'
+  }${deepRules}`;
 }
 
 function countToolCalls(response: HolmesChatResponse) {
@@ -386,6 +432,7 @@ async function askHolmes(
   ask: string,
   responseFormat: unknown,
   depth: MonitorDepth,
+  timeoutMs: number,
 ): Promise<HolmesChatResponse> {
   const base = target.url.replace(/\/$/, "");
   const res = await fetch(`${base}/api/chat`, {
@@ -415,7 +462,7 @@ async function askHolmes(
           }
         : {}),
     }),
-    signal: AbortSignal.timeout(ASSESS_TIMEOUT_MS[depth]),
+    signal: AbortSignal.timeout(timeoutMs),
     cache: "no-store",
   });
   if (!res.ok || !res.body) {
@@ -509,8 +556,22 @@ export async function runAssessment(input: {
   });
   const agent = { url: cluster.holmesUrl, apiKey: cluster.holmesApiKey };
 
+  // The cluster investigation is wider than any workload's, so it is allowed
+  // longer before the transport gives up on it.
+  const timeoutMs =
+    depth === "deep" && targets.some(isClusterTarget)
+      ? CLUSTER_ASSESS_TIMEOUT_MS
+      : ASSESS_TIMEOUT_MS[depth];
+
   const startedAt = Date.now();
-  let response = await askHolmes(agent, model, ask, responseFormat, depth);
+  let response = await askHolmes(
+    agent,
+    model,
+    ask,
+    responseFormat,
+    depth,
+    timeoutMs,
+  );
   let assessment: Assessment;
   try {
     assessment = parseAssessment(response.analysis, allowedChecks, targets);
@@ -521,6 +582,7 @@ export async function runAssessment(input: {
       `${ask}\n\nIMPORTANT: Return ONLY the JSON object matching the schema — no prose, no code fences.`,
       responseFormat,
       depth,
+      timeoutMs,
     );
     assessment = parseAssessment(response.analysis, allowedChecks, targets);
   }

@@ -6,11 +6,12 @@ import {
 import {
   MONITOR_CATEGORIES,
   SEVERITIES,
+  TARGET_KINDS,
   WORKLOAD_KINDS,
   WORKLOAD_TECHNOLOGIES,
   type MonitorCategory,
   type Severity,
-  type WorkloadKind,
+  type TargetKind,
   type WorkloadTechnology,
 } from "./types";
 
@@ -27,7 +28,7 @@ export interface CheckInput {
   evidence: string;
   reference: string;
   baseSeverity: Severity;
-  appliesTo: WorkloadKind[];
+  appliesTo: TargetKind[];
   appliesToTechnologies: WorkloadTechnology[];
   excludesTechnologies: WorkloadTechnology[];
   requires: CheckRequirement | null;
@@ -88,21 +89,27 @@ export function parseCheckInput(
   )
     throw new Error(`baseSeverity must be one of: ${SEVERITIES.join(", ")}`);
 
-  let appliesTo: WorkloadKind[];
+  let appliesTo: TargetKind[];
   if (body.appliesTo === undefined) {
     appliesTo = existing?.appliesTo ?? [];
   } else if (Array.isArray(body.appliesTo)) {
     appliesTo = body.appliesTo
       .map((k) => (typeof k === "string" ? k.toLowerCase() : ""))
-      .filter((k): k is WorkloadKind =>
-        (WORKLOAD_KINDS as readonly string[]).includes(k),
+      .filter((k): k is TargetKind =>
+        (TARGET_KINDS as readonly string[]).includes(k),
       );
   } else {
-    throw new Error("appliesTo must be an array of workload kinds");
+    throw new Error("appliesTo must be an array of target kinds");
   }
-  // Both kinds selected means "no restriction" — store it as such so the
-  // catalogue has one representation of "applies to everything".
-  if (appliesTo.length === WORKLOAD_KINDS.length) appliesTo = [];
+  // Both WORKLOAD kinds and nothing else means "no restriction" — stored as the
+  // empty list so the catalogue has one representation of it. The cluster is
+  // pointedly not part of that collapse: `[]` means every workload kind, so a
+  // selection containing `cluster` must be kept verbatim or it would lose it.
+  if (
+    appliesTo.length === WORKLOAD_KINDS.length &&
+    appliesTo.every((k) => (WORKLOAD_KINDS as readonly string[]).includes(k))
+  )
+    appliesTo = [];
 
   // Note both lists are stored verbatim. "Every technology selected" is NOT the
   // same as "no restriction": the empty list also reaches workloads whose
