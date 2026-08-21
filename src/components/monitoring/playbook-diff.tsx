@@ -139,7 +139,13 @@ function LineChanges({ diff, numbered }: { diff: LineDiff; numbered: boolean }) 
                 numbered && op.kind !== "removed" ? op.index + 1 : undefined
               }
             >
-              {op.kind === "changed" ? <Words segments={op.words} /> : op.text}
+              {/* `words` is only built for a detailed diff; the panel always asks
+                  for one, so the fallback is defence rather than a real case. */}
+              {op.kind === "changed" && op.words ? (
+                <Words segments={op.words} />
+              ) : (
+                op.text
+              )}
             </Row>
           );
         })}

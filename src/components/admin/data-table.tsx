@@ -1,5 +1,3 @@
-"use client";
-
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +13,11 @@ export interface Column<T> {
 /**
  * Minimal, DESIGN-true table (no table primitive exists in the app). Rows are
  * optionally clickable; header is a tracked caption row.
+ *
+ * Deliberately NOT a client component. It uses no hooks, and dropping the
+ * directive is what lets a server page pass `render` callbacks — the column
+ * definitions execute wherever the table does. `onRowClick` is the one prop that
+ * needs a client boundary, so only pass it from a client component.
  */
 export function DataTable<T>({
   columns,

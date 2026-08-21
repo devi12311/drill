@@ -4,10 +4,11 @@ import { useState } from "react";
 import { ChevronRight, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Field } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
 import { autoSize } from "@/components/monitoring/auto-size";
 import type { ObservationSpec } from "@/lib/monitoring/playbook";
+import { PLAYBOOK_LIMITS } from "@/lib/monitoring/playbook-input";
 import { OBSERVATION_SOURCE_LABEL, SELECT_CLASS } from "@/lib/monitoring/ui";
 import {
   OBSERVATION_SOURCES,
@@ -40,15 +41,29 @@ export function MeasurementRows({
   observations,
   readings,
   onChange,
+  error,
 }: {
   observations: ObservationSpec[];
   /** Reading counts per key. A key with readings is locked — see below. */
   readings: Record<string, number>;
   onChange: (next: ObservationSpec[]) => void;
+  /** The first thing wrong with the set, named where the set is edited. */
+  error?: string;
 }) {
-  const [openIndex, setOpenIndex] = useState<number | null>(null);
+  /**
+   * Which row is open, tracked by KEY rather than by position.
+   *
+   * With an index, removing row 3 left the row that used to be row 4 open —
+   * `openIndex` still pointed at 3, which is now something else. A new row has no
+   * key yet, so it opens as the empty string, which is also what makes it the only
+   * blank row that can exist at a time.
+   */
+  const [openKey, setOpenKey] = useState<string | null>(null);
 
   function setSpec(index: number, patch: Partial<ObservationSpec>) {
+    // A rename of the open row has to carry the open state with it.
+    if (patch.key !== undefined && observations[index]?.key === openKey)
+      setOpenKey(patch.key);
     onChange(
       observations.map((spec, i) => (i === index ? { ...spec, ...patch } : spec)),
     );
@@ -65,7 +80,7 @@ export function MeasurementRows({
     )
       return;
     onChange(observations.filter((_, i) => i !== index));
-    setOpenIndex(null);
+    setOpenKey(null);
   }
 
   return (
@@ -79,18 +94,22 @@ export function MeasurementRows({
         manifest is what actually forces a multi-source investigation. Keys with
         readings are locked: the key is the axis its trend is plotted on.
       </p>
+      {error && <p className="text-body-sm text-traffic-red">{error}</p>}
 
       <div className="divide-y divide-border rounded-lg border border-border">
         {observations.map((spec, index) => {
           const count = readings[spec.key] ?? 0;
-          const open = openIndex === index;
+          const open = openKey === spec.key;
           return (
-            <div key={index}>
+            // Keyed on the measurement, not its position: these rows are
+            // reorderable and removable, and an index key hands one row's DOM (and
+            // the height `autoSize` set on it) to a different measurement.
+            <div key={spec.key || `new-${index}`}>
               <div className="flex items-start gap-1">
                 <button
                   type="button"
                   aria-expanded={open}
-                  onClick={() => setOpenIndex(open ? null : index)}
+                  onClick={() => setOpenKey(open ? null : spec.key)}
                   className="flex min-w-0 flex-1 items-start gap-2 px-2 py-2 text-left transition-colors hover:bg-accent/40"
                 >
                   <ChevronRight
@@ -137,66 +156,89 @@ export function MeasurementRows({
               {open && (
                 <div className="space-y-3 border-t border-border/60 px-3 py-3">
                   <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-                    <div className="space-y-1.5">
-                      <Label htmlFor={`spec-key-${index}`}>Key</Label>
-                      <Input
-                        id={`spec-key-${index}`}
-                        value={spec.key}
-                        onChange={(e) =>
-                          setSpec(index, { key: e.target.value.toLowerCase() })
-                        }
-                        disabled={count > 0}
-                        placeholder="wal.generation_bytes_per_day"
-                        className="font-mono text-[12px]"
-                        autoComplete="off"
-                      />
-                      {count > 0 && (
-                        <p className="text-body-sm text-bone-gray">
-                          Locked — renaming it would split one trend into two.
-                          Remove the measurement instead if it should stop being
-                          taken.
-                        </p>
+                    <Field
+                      id={`spec-key-${index}`}
+                      label="Key"
+                      description={
+                        count > 0
+                          ? "Locked — renaming it would split one trend into two. Remove the measurement instead if it should stop being taken."
+                          : "Lowercase, dotted: a group and a name, e.g. wal.generation_bytes_per_day. Two engines that measure the same thing should deliberately share a key, because the key IS the trend axis."
+                      }
+                    >
+                      {(props) => (
+                        <Input
+                          {...props}
+                          value={spec.key}
+                          onChange={(e) =>
+                            setSpec(index, { key: e.target.value.toLowerCase() })
+                          }
+                          disabled={count > 0}
+                          placeholder="wal.generation_bytes_per_day"
+                          className="font-mono text-[12px]"
+                          autoComplete="off"
+                        />
                       )}
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor={`spec-source-${index}`}>Source</Label>
-                      <select
-                        id={`spec-source-${index}`}
-                        value={spec.source}
-                        onChange={(e) =>
-                          setSpec(index, {
-                            source: e.target.value as ObservationSource,
-                          })
-                        }
-                        className={SELECT_CLASS}
-                      >
-                        {OBSERVATION_SOURCES.map((source) => (
-                          <option
-                            key={source}
-                            value={source}
-                            className="bg-popover"
-                          >
-                            {OBSERVATION_SOURCE_LABEL[source]}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor={`spec-unit-${index}`}>Unit</Label>
-                      <Input
-                        id={`spec-unit-${index}`}
-                        value={spec.unit}
-                        onChange={(e) => setSpec(index, { unit: e.target.value })}
-                        placeholder="bytes"
-                        autoComplete="off"
-                      />
-                    </div>
+                    </Field>
+                    <Field
+                      id={`spec-source-${index}`}
+                      label="Source"
+                      description="Where the number comes from. Anything but a manifest is what forces a real investigation rather than a config read."
+                    >
+                      {(props) => (
+                        <select
+                          {...props}
+                          value={spec.source}
+                          onChange={(e) =>
+                            setSpec(index, {
+                              source: e.target.value as ObservationSource,
+                            })
+                          }
+                          className={SELECT_CLASS}
+                        >
+                          {OBSERVATION_SOURCES.map((source) => (
+                            <option
+                              key={source}
+                              value={source}
+                              className="bg-popover"
+                            >
+                              {OBSERVATION_SOURCE_LABEL[source]}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </Field>
+                    <Field
+                      id={`spec-unit-${index}`}
+                      label="Unit"
+                      optional
+                      value={spec.unit}
+                      limit={PLAYBOOK_LIMITS.unit}
+                      description="Shown beside the reading, and what makes two runs comparable."
+                    >
+                      {(props) => (
+                        <Input
+                          {...props}
+                          value={spec.unit}
+                          onChange={(e) =>
+                            setSpec(index, { unit: e.target.value })
+                          }
+                          placeholder="bytes"
+                          autoComplete="off"
+                        />
+                      )}
+                    </Field>
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label htmlFor={`spec-how-${index}`}>What to measure</Label>
+                  <Field
+                    id={`spec-how-${index}`}
+                    label="What to measure"
+                    value={spec.how}
+                    limit={PLAYBOOK_LIMITS.how}
+                    description="The instruction, not the name: which counter, which query, against what. This is what the agent is actually told, so a vague one comes back as a missing reading."
+                  >
+                    {(props) => (
                     <Textarea
-                      id={`spec-how-${index}`}
+                      {...props}
                       value={spec.how}
                       ref={autoSize}
                       onChange={(e) => {
@@ -206,7 +248,8 @@ export function MeasurementRows({
                       placeholder="how to obtain it, and from where"
                       className="min-h-20 resize-none overflow-hidden text-body-sm"
                     />
-                  </div>
+                    )}
+                  </Field>
                 </div>
               )}
             </div>
@@ -220,7 +263,8 @@ export function MeasurementRows({
         size="sm"
         onClick={() => {
           onChange([...observations, { ...BLANK_SPEC }]);
-          setOpenIndex(observations.length);
+          // The new row's key is "" until it is named, which is how it opens.
+          setOpenKey("");
         }}
       >
         <Plus />

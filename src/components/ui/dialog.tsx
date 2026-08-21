@@ -32,6 +32,18 @@ function DialogClose({
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
 }
 
+/**
+ * A flat scrim, deliberately NOT a `backdrop-filter` blur.
+ *
+ * A full-viewport `backdrop-blur` makes the browser keep a blurred copy of
+ * everything painted beneath it, and re-derive that copy whenever the region is
+ * invalidated — which the dialog's own zoom-in, the loading skeletons'
+ * `animate-pulse` and every hover transition inside the panel all do, at frame
+ * rate. The cost scales with how much page is behind the overlay, so it was
+ * worst exactly where it was most noticeable: the check catalogue, ~180 tiles
+ * deep. Opacity carries the same "the page is inert" signal for free, and
+ * #121212 at 70% is the overlay treatment DESIGN.md already describes.
+ */
 function DialogOverlay({
   className,
   ...props
@@ -40,7 +52,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed inset-0 z-50 bg-deep-ember/70 duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}

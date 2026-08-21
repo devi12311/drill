@@ -3,7 +3,6 @@ import { writeAudit } from "@/lib/db/admin-queries";
 import {
   createJob,
   getClusterSummary,
-  listJobs,
   replaceJobOverrides,
 } from "@/lib/db/monitoring-queries";
 import { DEFAULT_MODEL } from "@/lib/holmes/types";
@@ -14,13 +13,6 @@ import {
   parseTargetList,
 } from "@/lib/monitoring/job-input";
 import { MONITOR_CATEGORIES, type MonitorCategory } from "@/lib/monitoring/types";
-
-export async function GET(request: Request) {
-  if (!(await getAdminActor())) return forbidden();
-  const clusterId =
-    new URL(request.url).searchParams.get("clusterId") ?? undefined;
-  return Response.json({ jobs: await listJobs(clusterId) });
-}
 
 export async function POST(request: Request) {
   const actor = await getAdminActor();

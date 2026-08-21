@@ -23,13 +23,20 @@ type Context = { params: Promise<{ id: string }> };
 export async function GET(_request: Request, context: Context) {
   if (!(await getAdminActor())) return forbidden();
   const { id } = await context.params;
-  const job = await getJob(id);
+  /**
+   * All reads fire together, and the existence check happens after.
+   *
+   * They have no data dependency on each other — only the 404 did, and paying
+   * three sequential round-trips to save two cheap queries on the one request
+   * that 404s is the wrong trade. A missing id makes the others return empty.
+   */
+  const [job, runs, overrides] = await Promise.all([
+    getJob(id),
+    listRuns(id, 20),
+    listJobOverrides(id),
+  ]);
   if (!job) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json({
-    job,
-    runs: await listRuns(id, 20),
-    overrides: await listJobOverrides(id),
-  });
+  return Response.json({ job, runs, overrides });
 }
 
 export async function PATCH(request: Request, context: Context) {

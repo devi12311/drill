@@ -1,6 +1,13 @@
+// The seed data below pulls in every technology profile — ~2 700 lines of prose
+// that must never reach the browser. The client-safe half of this module
+// (the requirement vocabulary, the ID rule, the security caveat) lives in
+// `types.ts` and `ui.ts` precisely so this barrier can exist.
+import "server-only";
+
 import { PROFILE_CHECKS } from "./profiles";
 import { WORKLOAD_KINDS } from "./types";
 import type {
+  CheckRequirement,
   MonitorCategory,
   Severity,
   TargetKind,
@@ -29,53 +36,6 @@ import type {
  *
  * IDs are permanent. Renaming one orphans every concern that references it.
  */
-
-/**
- * Extra data a check needs, which the cluster may not have.
- *
- * This list is load-bearing rather than decorative: a check that cannot name its
- * dependency cannot legitimately be *skipped*, and a skipped check is the only
- * thing standing between "we could not look" and a silent pass. Engine-level
- * checks need engine-level dependencies, so the two original Kubernetes-shaped
- * values are not enough on their own.
- */
-export type CheckRequirement =
-  | "prometheus"
-  | "control-plane-metrics"
-  | "metrics-server"
-  | "engine-sql"
-  | "pg-stat-statements"
-  | "performance-schema"
-  | "queue-api"
-  | "logs"
-  | "traces"
-  | "node"
-  | "code";
-
-export const REQUIREMENT_LABEL: Record<CheckRequirement, string> = {
-  prometheus: "Prometheus metrics",
-  // Separate from `prometheus` because it fails separately and often: the
-  // kube-prometheus-stack ServiceMonitors for etcd, the scheduler and the
-  // controller-manager need certificates and non-loopback bind addresses, and on
-  // a managed control plane they cannot work at all. Without this requirement
-  // "etcd fsync is fine" and "we never scraped etcd" are the same answer.
-  "control-plane-metrics":
-    "scrapeable control-plane components (etcd, kube-scheduler, kube-controller-manager)",
-  "metrics-server": "metrics-server (kubectl top)",
-  // Named for the common case; it means the engine's own query interface, which for
-  // MongoDB is the database command surface rather than SQL. Kept as-is rather than
-  // renamed because ~20 seeded checks reference the value and the label carries the
-  // meaning perfectly well.
-  "engine-sql":
-    "a read-only query connection to the engine itself (SQL, or its equivalent on a non-relational engine)",
-  "pg-stat-statements": "the pg_stat_statements extension, loaded and enabled",
-  "performance-schema": "MySQL performance_schema, enabled",
-  "queue-api": "the broker's management API",
-  logs: "pod logs or Loki",
-  traces: "distributed traces",
-  node: "read access to the node the workload runs on",
-  code: "read access to the service's source repository",
-};
 
 export interface MonitorCheck {
   /** Permanent, stable identifier. Never rename. */
@@ -535,24 +495,3 @@ export function applicableChecks<T extends MonitorCheck>(
   );
 }
 
-/** Check-ID validity for admin-authored checks. Uppercase, dotted, immutable. */
-export const CHECK_ID_PATTERN = /^[A-Z][A-Z0-9]*\.[A-Z0-9_]{2,}$/;
-
-export function validateCheckId(raw: unknown): string {
-  const id = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-  if (!CHECK_ID_PATTERN.test(id))
-    throw new Error(
-      "A check ID looks like PREFIX.NAME — uppercase letters, digits and underscores, e.g. CUSTOM.INGRESS_TLS. It can never be changed afterwards, because concerns reference it by value.",
-    );
-  return id;
-}
-
-/**
- * What a security job can NOT tell you. Holmes has no vulnerability scanner
- * (no Trivy/kubescape/CVE toolset exists) and its RBAC deliberately excludes
- * Secret values, so these assessments are configuration posture only. Shown in
- * the UI so the feature does not overpromise.
- */
-export const SECURITY_SCOPE_CAVEAT =
-  "Configuration posture only — Holmes has no image-vulnerability scanner and cannot read Secret values. " +
-  "CVE scanning and secret-content leakage are out of scope.";

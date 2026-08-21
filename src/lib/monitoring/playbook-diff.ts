@@ -29,7 +29,8 @@ export type LineOp =
       text: string;
       before: string;
       index: number;
-      words: WordSegment[];
+      /** Present only when the diff was asked for detail — see `diffLines`. */
+      words?: WordSegment[];
     };
 
 export interface LineDiff {
@@ -164,6 +165,12 @@ const CHANGED_THRESHOLD = 0.35;
 export function diffLines(
   before: readonly string[],
   after: readonly string[],
+  /**
+   * Whether to word-diff the lines that paired up. The LINE diff is cheap — a
+   * handful of lines — but a word diff per changed line is not, and the counts in
+   * the footer do not need it. Off while typing, on for the review panel.
+   */
+  options: { words?: boolean } = {},
 ): LineDiff {
   const raw = lcsOps(before, after, (x, y) => x === y);
   const ops: LineOp[] = [];
@@ -195,7 +202,7 @@ export function diffLines(
         text: to,
         before: from,
         index: added[k],
-        words: diffWords(from, to),
+        words: options.words ? diffWords(from, to) : undefined,
       });
       paired++;
     }
@@ -281,21 +288,37 @@ function countPhrase(
  * both textual changes but they are not the same news, and the summary line is often
  * the only thing anyone reads.
  */
-function framingVerb(segments: WordSegment[]): string {
-  const total = segments.reduce((n, s) => n + s.text.split(/\s+/).length, 0);
-  const touched = segments
-    .filter((s) => s.kind !== "same")
-    .reduce((n, s) => n + s.text.split(/\s+/).length, 0);
-  return touched / Math.max(total, 1) > 0.25 ? "framing rewritten" : "framing edited";
+function framingVerb(before: string, after: string): string {
+  // Token overlap rather than the fraction of words the word-diff touched. It is
+  // the same judgement to within a rounding error, and it is O(n) — which is what
+  // lets the footer stay honest on every keystroke without building a word matrix
+  // over a few hundred words each time.
+  return similarity(before, after) < 0.75
+    ? "framing rewritten"
+    : "framing edited";
 }
 
 export function diffMethod(
   before: MethodText,
   after: MethodText,
+  /**
+   * With `detail: false` the result carries the counts, the sections and the
+   * headline but no word-level segments — everything the footer shows, and nothing
+   * the review panel needs.
+   *
+   * The distinction is the difference between a responsive editor and a janky one.
+   * The full diff builds a word-level LCS matrix over the framing paragraph (a few
+   * hundred words, so on the order of a hundred thousand cells) plus another one
+   * per changed line, and the form calls this on every keystroke to keep the save
+   * button and the footer honest. That work is only ever LOOKED at behind the
+   * "Review changes" toggle.
+   */
+  options: { detail?: boolean } = {},
 ): PlaybookDiff | null {
   const framingChanged = before.framing !== after.framing;
-  const dataSources = diffLines(before.dataSources, after.dataSources);
-  const method = diffLines(before.method, after.method);
+  const lineOptions = { words: options.detail === true };
+  const dataSources = diffLines(before.dataSources, after.dataSources, lineOptions);
+  const method = diffLines(before.method, after.method, lineOptions);
   const observations = diffObservations(before.observations, after.observations);
 
   const sourcesTouched =
@@ -323,12 +346,13 @@ export function diffMethod(
     observationsTouched ? "measurements" : null,
   ].filter(Boolean) as string[];
 
-  const framing = framingChanged
-    ? diffWords(before.framing, after.framing)
-    : null;
+  const framing =
+    framingChanged && options.detail
+      ? diffWords(before.framing, after.framing)
+      : null;
 
   const headline = [
-    framing ? framingVerb(framing) : null,
+    framingChanged ? framingVerb(before.framing, after.framing) : null,
     sourcesTouched ? countPhrase("data source", "data sources", dataSources) : null,
     methodTouched ? countPhrase("step", "steps", method) : null,
     observationsTouched

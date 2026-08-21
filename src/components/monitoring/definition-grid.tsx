@@ -1,5 +1,7 @@
 "use client";
 
+import { memo } from "react";
+
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,6 +22,12 @@ import { cn } from "@/lib/utils";
  */
 
 export interface DefinitionTileProps {
+  /**
+   * Handed back to `onOpen` so the handler can be shared by every tile in the
+   * grid. A per-tile `() => open(thisId)` arrow would be a new function on every
+   * render of the page, which defeats the memo below entirely.
+   */
+  id: string;
   /** The line you scan for — the human name, not the identifier. */
   title: string;
   /** Mono second line: the stable ID. Omitted when the title already is one. */
@@ -36,10 +44,20 @@ export interface DefinitionTileProps {
   marker?: string;
   /** Retired/inactive: the whole tile recedes rather than being annotated. */
   dimmed?: boolean;
-  onOpen: () => void;
+  onOpen: (id: string) => void;
 }
 
-export function DefinitionTile({
+/**
+ * Memoised, and every prop it takes is a primitive or a stable callback so the
+ * comparison can actually succeed.
+ *
+ * The catalogue renders ~180 of these under a filter box, and opening a panel
+ * re-renders the page (the open definition lives in the URL). Without a memo
+ * that holds, both cost a re-render of all 180 tiles — including the ones
+ * nothing about them changed.
+ */
+export const DefinitionTile = memo(function DefinitionTile({
+  id,
   title,
   caption,
   railClass,
@@ -51,7 +69,7 @@ export function DefinitionTile({
   return (
     <button
       type="button"
-      onClick={onOpen}
+      onClick={() => onOpen(id)}
       className={cn(
         "relative flex min-h-[74px] w-full flex-col gap-1 overflow-hidden rounded-lg border border-border bg-card p-3 pl-4 text-left transition-colors",
         "hover:border-input hover:bg-accent focus-visible:border-ring focus-visible:outline-none",
@@ -84,7 +102,7 @@ export function DefinitionTile({
       )}
     </button>
   );
-}
+});
 
 /** Three across in the 900px admin column; two, then one, as it narrows. */
 export function DefinitionGrid({ children }: { children: React.ReactNode }) {

@@ -1,14 +1,12 @@
 import {
-  REQUIREMENT_LABEL,
-  validateCheckId,
-  type CheckRequirement,
-} from "./catalogue";
-import {
+  CHECK_REQUIREMENTS,
   MONITOR_CATEGORIES,
   SEVERITIES,
   TARGET_KINDS,
   WORKLOAD_KINDS,
   WORKLOAD_TECHNOLOGIES,
+  validateCheckId,
+  type CheckRequirement,
   type MonitorCategory,
   type Severity,
   type TargetKind,
@@ -20,6 +18,20 @@ import {
  * update routes so the two cannot drift. Throws with a user-facing message
  * (the repo validates by hand — there is no zod).
  */
+
+/**
+ * Field length caps, exported so the FORM can enforce and count against exactly
+ * the numbers the server enforces. Every one of these used to surface only as a
+ * 400 with a message at the bottom of a scrolling dialog, after a round trip.
+ */
+export const CHECK_LIMITS = {
+  title: 120,
+  question: 2000,
+  evidence: 2000,
+  reference: 300,
+  /** Consecutive clean runs before a concern auto-resolves. */
+  absentRuns: { min: 1, max: 10 },
+} as const;
 
 export interface CheckInput {
   category: MonitorCategory;
@@ -36,7 +48,7 @@ export interface CheckInput {
   enabled: boolean;
 }
 
-const REQUIREMENTS = Object.keys(REQUIREMENT_LABEL) as CheckRequirement[];
+const REQUIREMENTS = CHECK_REQUIREMENTS;
 
 function text(raw: unknown, field: string, max: number, required = true) {
   const value = typeof raw === "string" ? raw.trim() : "";
@@ -144,18 +156,32 @@ export function parseCheckInput(
     body.resolveAfterAbsentRuns === undefined
       ? (existing?.resolveAfterAbsentRuns ?? 1)
       : Number(body.resolveAfterAbsentRuns);
-  if (!Number.isInteger(absentRaw) || absentRaw < 1 || absentRaw > 10)
-    throw new Error("resolveAfterAbsentRuns must be a whole number from 1 to 10");
+  if (
+    !Number.isInteger(absentRaw) ||
+    absentRaw < CHECK_LIMITS.absentRuns.min ||
+    absentRaw > CHECK_LIMITS.absentRuns.max
+  )
+    throw new Error(
+      `resolveAfterAbsentRuns must be a whole number from ${CHECK_LIMITS.absentRuns.min} to ${CHECK_LIMITS.absentRuns.max}`,
+    );
 
   return {
     category,
-    title: text(body.title ?? existing?.title, "title", 120),
-    question: text(body.question ?? existing?.question, "question", 2000),
-    evidence: text(body.evidence ?? existing?.evidence, "evidence", 2000),
+    title: text(body.title ?? existing?.title, "title", CHECK_LIMITS.title),
+    question: text(
+      body.question ?? existing?.question,
+      "question",
+      CHECK_LIMITS.question,
+    ),
+    evidence: text(
+      body.evidence ?? existing?.evidence,
+      "evidence",
+      CHECK_LIMITS.evidence,
+    ),
     reference: text(
       body.reference ?? existing?.reference ?? "",
       "reference",
-      300,
+      CHECK_LIMITS.reference,
       false,
     ),
     baseSeverity: severityRaw as Severity,

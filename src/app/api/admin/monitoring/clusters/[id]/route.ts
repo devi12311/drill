@@ -17,13 +17,20 @@ type Context = { params: Promise<{ id: string }> };
 export async function GET(_request: Request, context: Context) {
   if (!(await getAdminActor())) return forbidden();
   const { id } = await context.params;
-  const cluster = await getClusterSummary(id);
+  /**
+   * All reads fire together, and the existence check happens after.
+   *
+   * They have no data dependency on each other — only the 404 did, and paying
+   * three sequential round-trips to save two cheap queries on the one request
+   * that 404s is the wrong trade. A missing id makes the others return empty.
+   */
+  const [cluster, workloads, jobs] = await Promise.all([
+    getClusterSummary(id),
+    listWorkloads(id),
+    listJobs(id),
+  ]);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json({
-    cluster,
-    workloads: await listWorkloads(id),
-    jobs: await listJobs(id),
-  });
+  return Response.json({ cluster, workloads, jobs });
 }
 
 /**

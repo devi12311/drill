@@ -1,9 +1,12 @@
 "use client";
 
+import { useMemo, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { SEVERITIES, type Severity } from "@/lib/monitoring/types";
-import type { CheckView } from "@/lib/monitoring/types";
+import { SEVERITY_LABEL } from "@/lib/monitoring/ui";
+import type { CheckRubricItem } from "@/lib/monitoring/types";
 
 export interface CheckOverride {
   checkId: string;
@@ -21,11 +24,15 @@ export function RubricEditor({
   overrides,
   onChange,
 }: {
-  checks: CheckView[];
+  checks: CheckRubricItem[];
   overrides: CheckOverride[];
   onChange: (next: CheckOverride[]) => void;
 }) {
-  const byId = new Map(overrides.map((o) => [o.checkId, o]));
+  // Memoised: this is rebuilt while rendering ~180 rows, each of which reads it.
+  const byId = useMemo(
+    () => new Map(overrides.map((o) => [o.checkId, o])),
+    [overrides],
+  );
 
   function set(checkId: string, patch: Partial<CheckOverride>) {
     const current: CheckOverride =
@@ -45,14 +52,40 @@ export function RubricEditor({
     Boolean(byId.get(c.id)?.severityOverride),
   ).length;
 
+  /**
+   * The list renders only once it is opened.
+   *
+   * The counts are what most visits need — "124 of 176 checks · 3 disabled" is the
+   * answer to "what will this cost me and what will it look at". The rows are a
+   * hundred-and-eighty checkboxes and a hundred-and-eighty selects, and they were
+   * being rendered, hydrated and serialised into the RSC payload on every visit to
+   * either job route whether or not anyone opened them. The summary above stays
+   * honest either way, because it is computed from the same data.
+   */
+  const [open, setOpen] = useState(false);
+
   return (
     <div className="space-y-2">
-      <p className="text-body-sm text-bone-gray">
-        {checks.length - disabledCount} of {checks.length} checks
-        {disabledCount > 0 && ` · ${disabledCount} disabled`}
-        {reratedCount > 0 && ` · ${reratedCount} re-rated`}
-      </p>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 text-left text-body-sm text-bone-gray transition-colors hover:text-warm-off-white"
+      >
+        <ChevronRight
+          className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+        />
+        <span>
+          {checks.length - disabledCount} of {checks.length} checks
+          {disabledCount > 0 && ` · ${disabledCount} disabled`}
+          {reratedCount > 0 && ` · ${reratedCount} re-rated`}
+        </span>
+        <span className="ml-auto text-caption-tracked uppercase">
+          {open ? "hide" : "review and tune"}
+        </span>
+      </button>
 
+      {open && (
       <div className="max-h-[420px] divide-y divide-border/60 overflow-y-auto rounded-lg border border-border">
         {checks.map((check) => {
           const override = byId.get(check.id);
@@ -105,7 +138,7 @@ export function RubricEditor({
                 >
                   {SEVERITIES.map((option) => (
                     <option key={option} value={option} className="bg-popover">
-                      {option}
+                      {SEVERITY_LABEL[option]}
                     </option>
                   ))}
                 </select>
@@ -122,6 +155,7 @@ export function RubricEditor({
           );
         })}
       </div>
+      )}
     </div>
   );
 }

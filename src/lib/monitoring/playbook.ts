@@ -55,6 +55,24 @@ export interface Playbook {
  * instead of importing the code definition. Extends {@link Playbook} rather than
  * restating it, so the editor and the prompt can never disagree about the shape.
  */
+/**
+ * A method as the SHELF needs it: a name and two counts.
+ *
+ * Separate from {@link PlaybookView} because the full view is the whole method —
+ * framing, every data source, every step and every observation spec. Seven of
+ * them came to ~93 KB of JSON, downloaded to render seven tiles showing two
+ * integers each, and downloaded again after every save. It also cost an
+ * `observedKeyCounts` group-by over every key of every playbook on each load;
+ * the panel now asks for the one method it opens.
+ */
+export interface PlaybookSummary {
+  technology: WorkloadTechnology;
+  checkCount: number;
+  observationCount: number;
+  /** When it was last edited; null while it is still the shipped text. */
+  editedAt: string | null;
+}
+
 export interface PlaybookView extends Playbook {
   /** The checks this method exists to answer — read-only context for the editor. */
   checkIds: string[];

@@ -1,30 +1,25 @@
-"use client";
-
 import Link from "next/link";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
 import { Card } from "@/components/ui/card";
 import { ClusterForm } from "@/components/monitoring/cluster-form";
 import { formatNumber, formatRelative } from "@/lib/admin/format";
-import { useAdminData } from "@/lib/admin/use-admin-data";
+import { listClusters, type ClusterListRow } from "@/lib/db/monitoring-queries";
 
-interface ClusterRow {
-  id: string;
-  name: string;
-  holmesUrl: string;
-  lastDiscoveredAt: string | null;
-  discoveryError: string | null;
-  workloadCount: number;
-  jobCount: number;
-  openConcerns: number;
-}
+/**
+ * The cluster index, rendered on the server.
+ *
+ * It used to be a client component that fetched `/api/admin/monitoring/clusters`
+ * on mount, so the page arrived as the word "Loading…" and the table appeared a
+ * round-trip later — for data the server already had in hand while rendering the
+ * sidebar tree from the very same query. Reading the query directly removes the
+ * HTTP hop, the second auth pass and the waterfall. The API route stays: it is
+ * what `ClusterForm` posts to.
+ */
+export default async function MonitoringHomePage() {
+  const clusters = await listClusters();
 
-export default function MonitoringHomePage() {
-  const { data, loading, error, refetch } = useAdminData<{
-    clusters: ClusterRow[];
-  }>("/api/admin/monitoring/clusters", []);
-
-  const columns: Column<ClusterRow>[] = [
+  const columns: Column<ClusterListRow>[] = [
     {
       key: "name",
       header: "Cluster",
@@ -84,17 +79,9 @@ export default function MonitoringHomePage() {
         description="Register a cluster, choose the Deployments and StatefulSets that matter, and let Holmes assess them on a schedule. Findings accumulate as a history of concerns per job."
       />
 
-      {error ? (
-        <p className="py-8 text-body-sm text-traffic-red">{error}</p>
-      ) : loading || !data ? (
-        <p className="py-8 text-body-sm text-bone-gray">Loading…</p>
-      ) : data.clusters.length > 0 ? (
-        <DataTable
-          columns={columns}
-          rows={data.clusters}
-          getKey={(c) => c.id}
-        />
-      ) : null}
+      {clusters.length > 0 && (
+        <DataTable columns={columns} rows={clusters} getKey={(c) => c.id} />
+      )}
 
       <Card className="space-y-4 p-6">
         <div className="space-y-1">
@@ -106,7 +93,9 @@ export default function MonitoringHomePage() {
             Holmes endpoint running inside that cluster to investigate them.
           </p>
         </div>
-        <ClusterForm onCreated={refetch} />
+        {/* No `onCreated` callback any more: this table is server-rendered, and
+            the form's refresh-then-navigate updates it along with the tree. */}
+        <ClusterForm />
       </Card>
     </div>
   );

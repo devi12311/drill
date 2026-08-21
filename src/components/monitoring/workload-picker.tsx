@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -52,6 +53,21 @@ export function WorkloadPicker({
   onChange: (next: AssessmentTarget[]) => void;
 }) {
   const [filter, setFilter] = useState("");
+  // Hundreds of rows in this list; typing must not wait for them to re-group.
+  const deferredFilter = useDeferredValue(filter);
+  const filtering = deferredFilter.trim().length > 0;
+  const [openNamespaces, setOpenNamespaces] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  function toggleOpen(namespace: string) {
+    setOpenNamespaces((prev) => {
+      const next = new Set(prev);
+      if (next.has(namespace)) next.delete(namespace);
+      else next.add(namespace);
+      return next;
+    });
+  }
   const clusterSelected = selected.some(isClusterTarget);
   const selectedKeys = useMemo(
     () => new Set(selected.map(targetKey)),
@@ -59,7 +75,7 @@ export function WorkloadPicker({
   );
 
   const groups = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
+    const needle = deferredFilter.trim().toLowerCase();
     const matching = needle
       ? workloads.filter(
           (w) =>
@@ -74,7 +90,7 @@ export function WorkloadPicker({
       byNamespace.set(workload.namespace, list);
     }
     return [...byNamespace.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [workloads, filter]);
+  }, [workloads, deferredFilter]);
 
   function toggle(workload: PickableWorkload) {
     const key = targetKey(workload);
@@ -93,16 +109,17 @@ export function WorkloadPicker({
   }
 
   function toggleNamespace(items: PickableWorkload[]) {
-    const keys = items.map(targetKey);
-    const allSelected = keys.every((k) => selectedKeys.has(k));
-    const kept = clusterSelected
-      ? []
-      : selected.filter((t) => !keys.includes(targetKey(t)));
+    // A Set, not `keys.includes(...)` inside a `.filter(...)`. On a namespace of
+    // any size, against a selection of any size, that pairing is quadratic — and
+    // "select all" in a big namespace is exactly when both are large.
+    const keys = new Set(items.map(targetKey));
+    const allSelected = items.every((w) => selectedKeys.has(targetKey(w)));
+    const without = selected.filter((t) => !keys.has(targetKey(t)));
     onChange(
       allSelected
-        ? selected.filter((t) => !keys.includes(targetKey(t)))
+        ? without
         : [
-            ...kept,
+            ...(clusterSelected ? [] : without),
             ...items.map((w) => ({
               kind: w.kind,
               namespace: w.namespace,
@@ -174,17 +191,52 @@ export function WorkloadPicker({
             const allSelected = items.every((w) =>
               selectedKeys.has(targetKey(w)),
             );
+            const chosen = items.filter((w) =>
+              selectedKeys.has(targetKey(w)),
+            ).length;
+            /**
+             * Namespaces are CLOSED until opened — unless you are filtering, or
+             * something in them is picked, in which case hiding it would be a lie.
+             *
+             * A real cluster's inventory is hundreds of workloads across dozens of
+             * namespaces (464 across 31, on the cluster this was built against),
+             * and rendering every row put most of a megabyte on the wire for a
+             * picker where the answer is usually two workloads in one namespace.
+             */
+            const expanded =
+              filtering || chosen > 0 || openNamespaces.has(namespace);
             return (
               <div key={namespace} className="border-b border-border/60 last:border-0">
-                <button
-                  type="button"
-                  onClick={() => toggleNamespace(items)}
-                  className="flex w-full items-center justify-between px-4 py-2 text-left text-caption-tracked uppercase text-bone-gray transition-colors hover:bg-smoke-charcoal hover:text-warm-off-white"
-                >
-                  <span>{namespace}</span>
-                  <span>{allSelected ? "clear all" : "select all"}</span>
-                </button>
-                {items.map((workload) => {
+                <div className="flex items-center gap-1 px-2 py-1.5 text-caption-tracked uppercase text-bone-gray">
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
+                    onClick={() => toggleOpen(namespace)}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left transition-colors hover:text-warm-off-white"
+                  >
+                    <ChevronRight
+                      className={cn(
+                        "size-3.5 shrink-0 transition-transform",
+                        expanded && "rotate-90",
+                      )}
+                    />
+                    <span className="truncate">{namespace}</span>
+                    <span className="shrink-0 normal-case text-bone-gray/70">
+                      {chosen > 0
+                        ? `${chosen} of ${items.length} picked`
+                        : items.length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleNamespace(items)}
+                    className="shrink-0 px-2 transition-colors hover:text-warm-off-white"
+                  >
+                    {allSelected ? "clear all" : "select all"}
+                  </button>
+                </div>
+                {expanded &&
+                items.map((workload) => {
                   const key = targetKey(workload);
                   const checked = selectedKeys.has(key);
                   return (

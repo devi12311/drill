@@ -1,3 +1,9 @@
+// `cron-parser` is ~114 KB, and this module was reaching the browser purely
+// because the job form imported `SCHEDULE_PRESETS` — five label/expression
+// pairs — from here. The presets now live in `ui.ts`; the barrier keeps the
+// parser server-side for good.
+import "server-only";
+
 import { CronExpressionParser } from "cron-parser";
 
 /**
@@ -9,21 +15,6 @@ import { CronExpressionParser } from "cron-parser";
  * deliberately not accepted: an assessment costs real money and takes tens of
  * seconds, so per-second scheduling is never the right answer.
  */
-
-export const SCHEDULE_PRESETS = [
-  { label: "Every hour", expression: "0 * * * *" },
-  { label: "Every 6 hours", expression: "0 */6 * * *" },
-  { label: "Daily at 06:00 UTC", expression: "0 6 * * *" },
-  { label: "Weekdays at 06:00 UTC", expression: "0 6 * * 1-5" },
-  { label: "Weekly, Monday 06:00 UTC", expression: "0 6 * * 1" },
-] as const;
-
-/**
- * A run costs roughly what one Holmes investigation costs. Hourly on one job is
- * ~720 runs/month, so the UI warns rather than silently letting someone spend
- * hundreds of dollars a month per job.
- */
-export const HIGH_FREQUENCY_RUNS_PER_DAY = 12;
 
 export class InvalidScheduleError extends Error {}
 

@@ -1,40 +1,29 @@
-"use client";
-
 import Link from "next/link";
-import { use } from "react";
+import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { Card } from "@/components/ui/card";
+import { RunPrompts } from "@/components/monitoring/run-prompts";
 import { SeverityBadge } from "@/components/monitoring/severity-badge";
 import { formatDateTime, formatDuration, formatUsd } from "@/lib/admin/format";
-import { useAdminData } from "@/lib/admin/use-admin-data";
+import {
+  getRun,
+  getRunFindings,
+  getRunObservations,
+  runPromptIndex,
+} from "@/lib/db/monitoring-queries";
+import { checkSummaries } from "@/lib/monitoring/checks";
 import {
   OBSERVATION_SOURCE_LABEL,
   RUN_STATUS_CLASS,
   TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
-import type { ExpectedObservations } from "@/lib/monitoring/playbook";
 import {
   targetLabel,
   targetNamespaceLabel,
+  isUuid,
 } from "@/lib/monitoring/types";
-import type {
-  ObservationSource,
-  RunCoverage,
-  Severity,
-} from "@/lib/monitoring/types";
-
-interface RunFinding {
-  concernId: string;
-  checkId: string;
-  severity: Severity;
-  baseSeverity: Severity;
-  isNew: boolean;
-  title: string;
-  targetKind: string;
-  targetNamespace: string;
-  targetName: string;
-}
+import type { ObservationSource } from "@/lib/monitoring/types";
 
 interface RunObservation {
   targetKind: string;
@@ -47,34 +36,6 @@ interface RunObservation {
   source: ObservationSource;
 }
 
-interface RunPayload {
-  run: {
-    id: string;
-    status: string;
-    trigger: string;
-    model: string | null;
-    costUsd: number | null;
-    totalTokens: number | null;
-    durationMs: number | null;
-    toolCallsTotal: number | null;
-    toolCallsFailed: number | null;
-    findingsNew: number | null;
-    findingsResolved: number | null;
-    findingsOpen: number | null;
-    coverage: RunCoverage | null;
-    rejected: string[] | null;
-    /** What the agent was actually told, one entry per call. */
-    prompts: { target: string; prompt: string }[] | null;
-    error: string | null;
-    finishedAt: string | null;
-    createdAt: string;
-  };
-  findings: RunFinding[];
-  observations: RunObservation[];
-  expected: ExpectedObservations[];
-  checks: { id: string; title: string; reference: string }[];
-}
-
 function targetOf(t: { kind: string; namespace: string; name: string }) {
   return `${t.kind}/${t.namespace}/${t.name}`;
 }
@@ -83,28 +44,61 @@ function shortKind(kind: string) {
   return kind === "statefulset" ? "sts" : "deploy";
 }
 
-export default function RunPage({
+/**
+ * One run, server-rendered.
+ *
+ * The client version fetched `/api/admin/monitoring/runs/[id]` after hydration —
+ * a payload that carried the whole check catalogue AND every verbatim prompt the
+ * run sent, all of it parsed and put in the DOM whether or not anyone opened a
+ * `<details>`. The prompts are now indexed by label and size and fetched one at a
+ * time; the catalogue is read here and narrowed to the checks this run mentions.
+ */
+export default async function RunPage({
   params,
 }: {
   params: Promise<{ clusterId: string; jobId: string; runId: string }>;
 }) {
-  const { clusterId, jobId, runId } = use(params);
-  const { data, loading, error } = useAdminData<RunPayload>(
-    `/api/admin/monitoring/runs/${runId}`,
-    [runId],
+  const { clusterId, jobId, runId } = await params;
+  if (!isUuid(jobId) || !isUuid(runId)) notFound();
+  const [runRow, findings, observations, catalogue, prompts] =
+    await Promise.all([
+      getRun(runId),
+      getRunFindings(runId),
+      getRunObservations(runId),
+      checkSummaries(),
+      runPromptIndex(runId),
+    ]);
+  if (!runRow) notFound();
+
+  const run = runRow;
+  /**
+   * What the run was SUPPOSED to measure, sent alongside what it did measure so the
+   * page can name the missing readings — a measurement that never came back is the
+   * whole reason observations exist, and it is invisible from the data alone.
+   *
+   * Taken from the run's own snapshot and never re-derived: methods are editable, so
+   * today's playbook would grade an old run against questions it was never asked. A
+   * run older than the column shows no measurement panel, which is the honest answer.
+   */
+  const expected = run.expectedObservations ?? [];
+  // Only the checks this run mentions, rather than all ~180 of them.
+  const mentioned = new Set([
+    ...findings.map((f) => f.checkId),
+    ...(run.coverage?.targets.flatMap((t) => [
+      ...t.evaluated,
+      ...t.skipped.map((s) => s.checkId),
+    ]) ?? []),
+  ]);
+  const checkTitle = new Map(
+    catalogue.filter((c) => mentioned.has(c.id)).map((c) => [c.id, c.title]),
   );
-
-  if (error)
-    return <p className="py-8 text-body-sm text-traffic-red">{error}</p>;
-  if (loading || !data)
-    return <p className="py-8 text-body-sm text-bone-gray">Loading…</p>;
-
-  const { run, findings, observations, expected, checks } = data;
-  const checkTitle = new Map(checks.map((c) => [c.id, c.title]));
   const skippedTotal =
     run.coverage?.targets.reduce((n, t) => n + t.skipped.length, 0) ?? 0;
   // Grouped per workload, and matched against what the playbook asked for, so a
   // reading that never came back is named rather than merely absent.
+  // One pass, pushing into the bucket. It used to rebuild the array on every
+  // observation (`[...(observed.get(key) ?? []), observation]`), which is
+  // quadratic in the readings for a single workload.
   const observed = new Map<string, RunObservation[]>();
   for (const observation of observations) {
     const key = targetOf({
@@ -112,7 +106,9 @@ export default function RunPage({
       namespace: observation.targetNamespace,
       name: observation.targetName,
     });
-    observed.set(key, [...(observed.get(key) ?? []), observation]);
+    const bucket = observed.get(key);
+    if (bucket) bucket.push(observation);
+    else observed.set(key, [observation]);
   }
   const measurements = expected.map((entry) => {
     const rows = observed.get(targetOf(entry.target)) ?? [];
@@ -372,7 +368,7 @@ export default function RunPage({
         )}
       </section>
 
-      {run.prompts && run.prompts.length > 0 && (
+      {prompts.length > 0 && (
         <section className="space-y-2">
           <h2 className="text-body font-medium text-warm-off-white">
             What the agent was told
@@ -383,19 +379,7 @@ export default function RunPage({
             a run actually used has to mean reading what was sent — not re-deriving it
             from today&apos;s code.
           </p>
-          {run.prompts.map((entry, i) => (
-            <details key={i} className="rounded-lg border border-border">
-              <summary className="cursor-pointer px-4 py-2 text-body-sm text-pale-stone transition-colors hover:bg-smoke-charcoal hover:text-warm-off-white">
-                {entry.target}
-                <span className="ml-2 text-caption-tracked text-bone-gray">
-                  {Math.round(entry.prompt.length / 1024)} KB
-                </span>
-              </summary>
-              <pre className="max-h-[420px] overflow-auto border-t border-border px-4 py-3 font-mono text-[12px] whitespace-pre-wrap text-bone-gray">
-                {entry.prompt}
-              </pre>
-            </details>
-          ))}
+          <RunPrompts runId={runId} entries={prompts} />
         </section>
       )}
 

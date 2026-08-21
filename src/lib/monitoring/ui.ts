@@ -1,4 +1,5 @@
 import type {
+  CheckRequirement,
   ConcernStatus,
   MonitorCategory,
   MonitorDepth,
@@ -24,6 +25,19 @@ import type {
  */
 export const SELECT_CLASS =
   "h-9 w-full rounded-md border border-input bg-transparent px-2.5 text-body-sm text-warm-off-white outline-none focus-visible:border-ring";
+
+/**
+ * Severity, written out. The check editor's select rendered the raw lowercase enum
+ * — the only control in the module that did — so "info" and "critical" arrived as
+ * database values in a form where every other choice was a sentence.
+ */
+export const SEVERITY_LABEL: Record<Severity, string> = {
+  critical: "Critical",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  info: "Info",
+};
 
 export const SEVERITY_CLASS: Record<Severity, string> = {
   critical: "text-traffic-red",
@@ -160,4 +174,63 @@ export function worstSeverity(
     if (severities.includes(severity)) return severity;
   }
   return null;
+}
+
+export const REQUIREMENT_LABEL: Record<CheckRequirement, string> = {
+  prometheus: "Prometheus metrics",
+  // Separate from `prometheus` because it fails separately and often: the
+  // kube-prometheus-stack ServiceMonitors for etcd, the scheduler and the
+  // controller-manager need certificates and non-loopback bind addresses, and on
+  // a managed control plane they cannot work at all. Without this requirement
+  // "etcd fsync is fine" and "we never scraped etcd" are the same answer.
+  "control-plane-metrics":
+    "scrapeable control-plane components (etcd, kube-scheduler, kube-controller-manager)",
+  "metrics-server": "metrics-server (kubectl top)",
+  // Named for the common case; it means the engine's own query interface, which for
+  // MongoDB is the database command surface rather than SQL. Kept as-is rather than
+  // renamed because ~20 seeded checks reference the value and the label carries the
+  // meaning perfectly well.
+  "engine-sql":
+    "a read-only query connection to the engine itself (SQL, or its equivalent on a non-relational engine)",
+  "pg-stat-statements": "the pg_stat_statements extension, loaded and enabled",
+  "performance-schema": "MySQL performance_schema, enabled",
+  "queue-api": "the broker's management API",
+  logs: "pod logs or Loki",
+  traces: "distributed traces",
+  node: "read access to the node the workload runs on",
+  code: "read access to the service's source repository",
+};
+
+/**
+ * Schedule presets for the job form. Label/expression pairs only: they live
+ * here rather than beside the cron parser in `schedule.ts` because importing
+ * them from there pulled `cron-parser` into the client bundle of the two
+ * heaviest routes in the module for no runtime benefit.
+ */
+export const SCHEDULE_PRESETS = [
+  { label: "Every hour", expression: "0 * * * *" },
+  { label: "Every 6 hours", expression: "0 */6 * * *" },
+  { label: "Daily at 06:00 UTC", expression: "0 6 * * *" },
+  { label: "Weekdays at 06:00 UTC", expression: "0 6 * * 1-5" },
+  { label: "Weekly, Monday 06:00 UTC", expression: "0 6 * * 1" },
+] as const;
+
+/**
+ * Short forms for the requirement select, where {@link REQUIREMENT_LABEL} is a
+ * sentence. Sparse on purpose: most labels are already a couple of words, and a
+ * second complete copy of the vocabulary is a second thing to keep in step. The
+ * full label is still shown, as the field's description.
+ */
+export const REQUIREMENT_SHORT: Partial<Record<CheckRequirement, string>> = {
+  "control-plane-metrics": "Control-plane metrics",
+  "engine-sql": "A query connection to the engine",
+  "pg-stat-statements": "pg_stat_statements",
+  "performance-schema": "performance_schema",
+  "queue-api": "The broker's management API",
+  node: "Node access",
+  code: "Source access",
+};
+
+export function requirementLabel(requirement: CheckRequirement): string {
+  return REQUIREMENT_SHORT[requirement] ?? REQUIREMENT_LABEL[requirement];
 }

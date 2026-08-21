@@ -1,143 +1,69 @@
-"use client";
-
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { use, useState } from "react";
-import { Gauge, Radar, RefreshCw, ShieldCheck } from "lucide-react";
+import { notFound } from "next/navigation";
+import { isUuid } from "@/lib/monitoring/types";
+import { Gauge, Radar, ShieldCheck } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  DeleteClusterButton,
+  RescanButton,
+} from "@/components/monitoring/cluster-actions";
+import { TechnologyCell } from "@/components/monitoring/technology-cell";
+import { WorkloadFilter } from "@/components/monitoring/workload-filter";
 import { formatNumber, formatRelative } from "@/lib/admin/format";
-import { useAdminData } from "@/lib/admin/use-admin-data";
-import type { PickableWorkload } from "@/components/monitoring/workload-picker";
-import { CATEGORY_LABEL, TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
-import { WORKLOAD_TECHNOLOGY_OPTIONS } from "@/lib/monitoring/types";
-import type {
-  MonitorCategory,
-  WorkloadKind,
-  WorkloadTechnology,
-} from "@/lib/monitoring/types";
+import {
+  getClusterSummary,
+  listJobs,
+  listWorkloadPage,
+  type JobListRow,
+  type WorkloadRow,
+} from "@/lib/db/monitoring-queries";
+import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
 
-interface ClusterDetail {
-  cluster: {
-    id: string;
-    name: string;
-    holmesUrl: string;
-    lastDiscoveredAt: string | null;
-    lastValidatedAt: string | null;
-    discoveryError: string | null;
-  };
-  workloads: (PickableWorkload & {
-    images: string[];
-    technologyDetected: WorkloadTechnology | null;
-    technologyReason: string | null;
-    technologyOverride: WorkloadTechnology | null;
-  })[];
-  jobs: {
-    id: string;
-    name: string;
-    type: MonitorCategory;
-    enabled: boolean;
-    schedule: string | null;
-    targetCount: number;
-    openConcerns: number;
-    criticalConcerns: number;
-    lastRunAt: string | null;
-  }[];
-}
+/**
+ * One cluster: its jobs, its discovered inventory, and the way out.
+ *
+ * Server-rendered. It used to be a client component whose single fetch of
+ * `/api/admin/monitoring/clusters/[id]` returned the cluster, every workload
+ * (with the container images nothing displayed) and every job — 164 KB, arriving
+ * a round-trip after hydration, behind the word "Loading…". The reads it needs
+ * run in parallel here and arrive with the page.
+ *
+ * The inventory is a PAGE of rows, matched in SQL from `?q=`. Four hundred and
+ * sixty-four rows is not a surface anyone reads top to bottom — it is a surface
+ * you look something up in — and both of the alternatives (render them all, or
+ * ship them all so the browser can filter them) cost hundreds of kilobytes for a
+ * lookup that touches one row.
+ */
+/**
+ * Rows per page. Kept small deliberately: each row carries an editable technology
+ * cell, which is a client boundary, and every row costs its markup twice — once as
+ * HTML and once in the RSC payload. A page of 25 plus a filter is a lookup
+ * surface; 464 rows is a download.
+ */
+const INVENTORY_PAGE = 25;
 
-export default function ClusterPage({
+export default async function ClusterPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ clusterId: string }>;
+  searchParams: Promise<{ q?: string }>;
 }) {
-  const { clusterId } = use(params);
-  const router = useRouter();
-  const { data, loading, error, refetch } = useAdminData<ClusterDetail>(
-    `/api/admin/monitoring/clusters/${clusterId}`,
-    [clusterId],
-  );
-  const [busy, setBusy] = useState<"discover" | "delete" | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const { clusterId } = await params;
+  if (!isUuid(clusterId)) notFound();
+  const { q } = await searchParams;
+  const [cluster, inventory, jobs] = await Promise.all([
+    getClusterSummary(clusterId),
+    listWorkloadPage(clusterId, { search: q, limit: INVENTORY_PAGE }),
+    listJobs(clusterId),
+  ]);
+  if (!cluster) notFound();
 
-  async function discover() {
-    setBusy("discover");
-    setActionError(null);
-    try {
-      const res = await fetch(
-        `/api/admin/monitoring/clusters/${clusterId}/discover`,
-        { method: "POST" },
-      );
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      refetch();
-      router.refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Discovery failed");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  /**
-   * Overrule detection for one workload. Optimistically refetched rather than
-   * locally patched: the effective technology is derived server-side from the
-   * override plus the detected value, and duplicating that rule in the client is
-   * how the two drift apart.
-   */
-  async function setTechnology(
-    workload: { kind: WorkloadKind; namespace: string; name: string },
-    technology: string,
-  ) {
-    setActionError(null);
-    try {
-      const res = await fetch(
-        `/api/admin/monitoring/clusters/${clusterId}/workloads`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: workload.kind,
-            namespace: workload.namespace,
-            name: workload.name,
-            technology: technology || null,
-          }),
-        },
-      );
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      refetch();
-    } catch (err) {
-      setActionError(
-        err instanceof Error ? err.message : "Could not set the technology",
-      );
-    }
-  }
-
-  async function remove() {
-    if (
-      !confirm(
-        "Delete this cluster? Its monitoring jobs and their entire concern history go with it.",
-      )
-    )
-      return;
-    setBusy("delete");
-    try {
-      const res = await fetch(`/api/admin/monitoring/clusters/${clusterId}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      router.refresh();
-      router.push("/admin/monitoring");
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Delete failed");
-      setBusy(null);
-    }
-  }
-
-  const workloadColumns: Column<ClusterDetail["workloads"][number]>[] = [
+  const workloadColumns: Column<WorkloadRow>[] = [
     {
       key: "kind",
       header: "Kind",
@@ -156,31 +82,7 @@ export default function ClusterPage({
     {
       key: "technology",
       header: "Technology",
-      render: (w) => (
-        <div className="space-y-0.5">
-          <select
-            value={w.technology ?? ""}
-            onChange={(e) => setTechnology(w, e.target.value)}
-            className="h-7 rounded-md border border-input bg-transparent px-1.5 text-body-sm text-warm-off-white outline-none focus-visible:border-ring"
-          >
-            <option value="" className="bg-popover">
-              — none —
-            </option>
-            {WORKLOAD_TECHNOLOGY_OPTIONS.map((option) => (
-              <option key={option} value={option} className="bg-popover">
-                {TECHNOLOGY_LABEL[option]}
-              </option>
-            ))}
-          </select>
-          {/* Why we think so, or that a human said so — a guess you cannot
-              interrogate is a guess you cannot correct with confidence. */}
-          <p className="text-caption-tracked text-bone-gray">
-            {w.technologyOverride
-              ? "set by hand"
-              : (w.technologyReason ?? "not recognised")}
-          </p>
-        </div>
-      ),
+      render: (w) => <TechnologyCell clusterId={clusterId} workload={w} />,
     },
     {
       key: "replicas",
@@ -190,7 +92,7 @@ export default function ClusterPage({
     },
   ];
 
-  const jobColumns: Column<ClusterDetail["jobs"][number]>[] = [
+  const jobColumns: Column<JobListRow>[] = [
     {
       key: "name",
       header: "Job",
@@ -258,40 +160,24 @@ export default function ClusterPage({
     },
   ];
 
-  if (error)
-    return <p className="py-8 text-body-sm text-traffic-red">{error}</p>;
-  if (loading || !data)
-    return <p className="py-8 text-body-sm text-bone-gray">Loading…</p>;
-
   return (
     <div className="space-y-8">
       <AdminPageHeader
-        title={data.cluster.name}
+        title={cluster.name}
         description={
           <>
             Investigated by{" "}
-            <span className="font-mono text-[12px]">
-              {data.cluster.holmesUrl}
-            </span>
-            . Inventory refreshed {formatRelative(data.cluster.lastDiscoveredAt)}.
+            <span className="font-mono text-[12px]">{cluster.holmesUrl}</span>.
+            Inventory refreshed {formatRelative(cluster.lastDiscoveredAt)}.
           </>
         }
       >
-        <Button
-          variant="outline"
-          onClick={discover}
-          disabled={busy !== null}
-        >
-          <RefreshCw className="size-3.5" />
-          {busy === "discover" ? "Scanning…" : "Rescan workloads"}
-        </Button>
+        <RescanButton clusterId={clusterId} />
         {/* The cluster's own assessment is a job like any other — this is a
             shortcut into the same form with the cluster preselected, because
             "how is this cluster doing" is the question this page invites. */}
         <Button variant="outline" asChild>
-          <Link
-            href={`/admin/monitoring/${clusterId}/jobs/new?target=cluster`}
-          >
+          <Link href={`/admin/monitoring/${clusterId}/jobs/new?target=cluster`}>
             <Radar className="size-3.5" />
             Assess this cluster
           </Link>
@@ -301,16 +187,13 @@ export default function ClusterPage({
         </Button>
       </AdminPageHeader>
 
-      {actionError && (
-        <p className="text-body-sm text-traffic-red">{actionError}</p>
-      )}
-      {data.cluster.discoveryError && (
+      {cluster.discoveryError && (
         <Card className="border-traffic-yellow/40 p-4">
           <p className="text-body-sm text-traffic-yellow">
             The last inventory scan failed, so this list may be out of date.
           </p>
           <p className="mt-1 font-mono text-[12px] text-bone-gray">
-            {data.cluster.discoveryError}
+            {cluster.discoveryError}
           </p>
         </Card>
       )}
@@ -321,27 +204,43 @@ export default function ClusterPage({
         </h2>
         <DataTable
           columns={jobColumns}
-          rows={data.jobs}
+          rows={jobs}
           getKey={(j) => j.id}
           empty="No jobs yet — create one to start assessing workloads."
         />
       </section>
 
       <section className="space-y-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-body font-medium text-warm-off-white">
             Discovered workloads
           </h2>
           <Badge variant="outline" className="text-bone-gray">
-            {data.workloads.length}
+            {q
+              ? `${formatNumber(inventory.matching)} of ${formatNumber(inventory.total)}`
+              : formatNumber(inventory.total)}
           </Badge>
+          <div className="ml-auto">
+            <WorkloadFilter />
+          </div>
         </div>
         <DataTable
           columns={workloadColumns}
-          rows={data.workloads}
+          rows={inventory.workloads}
           getKey={(w) => `${w.kind}/${w.namespace}/${w.name}`}
-          empty="Nothing discovered. Check the kubeconfig's permissions and rescan."
+          empty={
+            q
+              ? "No workload matches that filter."
+              : "Nothing discovered. Check the kubeconfig's permissions and rescan."
+          }
         />
+        {inventory.matching > inventory.workloads.length && (
+          <p className="text-body-sm text-bone-gray">
+            Showing the first {formatNumber(inventory.workloads.length)} of{" "}
+            {formatNumber(inventory.matching)} matches — narrow the filter to see
+            the rest.
+          </p>
+        )}
       </section>
 
       <section className="space-y-2 border-t border-border pt-6">
@@ -352,14 +251,7 @@ export default function ClusterPage({
           Deletes the cluster, its monitoring jobs and every concern recorded
           against them. The cluster itself is untouched.
         </p>
-        <Button
-          variant="outline"
-          className="text-traffic-red"
-          onClick={remove}
-          disabled={busy !== null}
-        >
-          {busy === "delete" ? "Deleting…" : "Delete cluster"}
-        </Button>
+        <DeleteClusterButton clusterId={clusterId} />
       </section>
     </div>
   );

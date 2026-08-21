@@ -1,0 +1,2 @@
+CREATE INDEX "monitoring_concerns_check_idx" ON "monitoring_concerns" USING btree ("check_id");--> statement-breakpoint
+CREATE INDEX "monitoring_observations_key_idx" ON "monitoring_observations" USING btree ("key");

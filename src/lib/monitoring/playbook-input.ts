@@ -36,20 +36,27 @@ export interface PlaybookPatch extends PlaybookContent {
   dropKeys: string[];
 }
 
-const LIMITS = {
+/**
+ * Exported so the EDITOR can enforce and count against exactly what the route
+ * enforces. Every one of these used to surface only as a 400 with a message at the
+ * foot of a scrolling dialog, after a round trip.
+ */
+export const PLAYBOOK_LIMITS = {
   framing: 4000,
   entry: 3000,
   entries: 40,
   how: 1000,
   unit: 24,
   observations: 150,
-};
+} as const;
+
+const LIMITS = PLAYBOOK_LIMITS;
 
 /** Lowercase dotted path, e.g. `wal.generation_bytes_per_day`. */
-const KEY_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/;
+export const KEY_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/;
 
-/** What `renderPlaybook` actually substitutes. */
-const PLACEHOLDERS = ["namespace", "name"];
+/** What `renderPlaybook` actually substitutes. Exported for the editor's hints. */
+export const PLACEHOLDERS = ["namespace", "name"];
 const PLACEHOLDER_PATTERN = /\{\{([^}]*)\}\}/g;
 
 function assertPlaceholders(value: string, field: string) {

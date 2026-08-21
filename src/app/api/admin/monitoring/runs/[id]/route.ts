@@ -12,7 +12,21 @@ type Context = { params: Promise<{ id: string }> };
 export async function GET(_request: Request, context: Context) {
   if (!(await getAdminActor())) return forbidden();
   const { id } = await context.params;
-  const run = await getRun(id);
+  /**
+   * All reads fire together, and the existence check happens after.
+   *
+   * They have no data dependency on each other — only the 404 did, and paying
+   * three sequential round-trips to save two cheap queries on the one request
+   * that 404s is the wrong trade. A missing id makes the others return empty.
+   */
+  const [run, findings, observations, checks] = await Promise.all([
+    getRun(id),
+    getRunFindings(id),
+    getRunObservations(id),
+    // The catalogue travels with the run so the UI can name and cite a check
+    // (including ones that only appear in `coverage.skipped`, and custom ones).
+    checkSummaries(),
+  ]);
   if (!run) return Response.json({ error: "Not found" }, { status: 404 });
 
   // What the run was SUPPOSED to measure, sent alongside what it did measure so the
@@ -24,13 +38,5 @@ export async function GET(_request: Request, context: Context) {
   // run older than the column shows no measurement panel, which is the honest answer.
   const expected = run.expectedObservations ?? [];
 
-  return Response.json({
-    run,
-    findings: await getRunFindings(id),
-    observations: await getRunObservations(id),
-    expected,
-    // The catalogue travels with the run so the UI can name and cite a check
-    // (including ones that only appear in `coverage.skipped`, and custom ones).
-    checks: await checkSummaries(),
-  });
+  return Response.json({ run, findings, observations, expected, checks });
 }

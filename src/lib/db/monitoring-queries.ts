@@ -443,7 +443,6 @@ export interface WorkloadRow {
   namespace: string;
   name: string;
   replicas: number | null;
-  images: string[];
   /** EFFECTIVE technology: the admin's override where set, else the detected one. */
   technology: WorkloadTechnology | null;
   /** What detection inferred, kept so the UI can show a guess being corrected. */
@@ -463,26 +462,98 @@ function effectiveTechnology(row: {
   return row.technologyOverride ?? row.technology;
 }
 
+/**
+ * The inventory, optionally narrowed and capped.
+ *
+ * The options exist for the cluster page, which shows a page of rows rather than
+ * all of them: a real cluster has hundreds of workloads (the one this was built
+ * against has 464), and rendering every row — or shipping every row to a browser
+ * so it can filter them there — costs far more than the lookup anyone actually
+ * came to do. Callers that genuinely need the whole inventory (the job form's
+ * target picker) use `listWorkloads` and get today's behaviour.
+ *
+ * `matching` is the count BEFORE the limit, so the UI can say what it is hiding.
+ */
+export interface WorkloadPage {
+  workloads: WorkloadRow[];
+  /** Rows matching the search, before `limit` is applied. */
+  matching: number;
+  /** Everything in the cluster, ignoring the search. */
+  total: number;
+}
+
+export async function listWorkloadPage(
+  clusterId: string,
+  options: { search?: string; limit?: number } = {},
+): Promise<WorkloadPage> {
+  const search = options.search?.trim().toLowerCase();
+  const owned = eq(monitoringWorkloads.clusterId, clusterId);
+  // Matched in SQL so a big cluster never loads its whole inventory to show a
+  // page of it. The effective technology is included because "show me the
+  // postgres ones" is the search people actually type.
+  const matches = search
+    ? and(
+        owned,
+        sql`(lower(${monitoringWorkloads.namespace}) like ${"%" + search + "%"}
+          or lower(${monitoringWorkloads.name}) like ${"%" + search + "%"}
+          or lower(coalesce(${monitoringWorkloads.technologyOverride},
+                            ${monitoringWorkloads.technology}, '')) like ${"%" + search + "%"})`,
+      )
+    : owned;
+
+  const [workloads, matchingRows, totalRows] = await Promise.all([
+    listWorkloadsWhere(matches, options.limit),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(monitoringWorkloads)
+      .where(matches),
+    search
+      ? db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(monitoringWorkloads)
+          .where(owned)
+      : Promise.resolve([{ n: 0 }]),
+  ]);
+
+  const matching = matchingRows[0]?.n ?? 0;
+  return {
+    workloads,
+    matching,
+    total: search ? (totalRows[0]?.n ?? 0) : matching,
+  };
+}
+
 export async function listWorkloads(clusterId: string): Promise<WorkloadRow[]> {
-  const rows = await db
+  return listWorkloadsWhere(eq(monitoringWorkloads.clusterId, clusterId));
+}
+
+async function listWorkloadsWhere(
+  where: ReturnType<typeof eq> | undefined,
+  limit?: number,
+): Promise<WorkloadRow[]> {
+  const query = db
     .select({
       kind: monitoringWorkloads.kind,
       namespace: monitoringWorkloads.namespace,
       name: monitoringWorkloads.name,
       replicas: monitoringWorkloads.replicas,
-      images: monitoringWorkloads.images,
+      // `images` is deliberately NOT selected. Detection reads images straight
+      // from the cluster (lib/monitoring/discovery.ts) and nothing renders them,
+      // so selecting them here only put an image list per workload on the wire —
+      // hundreds of rows' worth on a real cluster.
       technology: monitoringWorkloads.technology,
       technologyReason: monitoringWorkloads.technologyReason,
       technologyOverride: monitoringWorkloads.technologyOverride,
       lastSeenAt: monitoringWorkloads.lastSeenAt,
     })
     .from(monitoringWorkloads)
-    .where(eq(monitoringWorkloads.clusterId, clusterId))
+    .where(where)
     .orderBy(
       asc(monitoringWorkloads.namespace),
       asc(monitoringWorkloads.kind),
       asc(monitoringWorkloads.name),
     );
+  const rows = await (limit ? query.limit(limit) : query);
   // Resolved here rather than in the routes, so every consumer of the inventory
   // agrees on what a workload IS and on whether a deep run has a method for it.
   return rows.map((row) => {
@@ -1017,6 +1088,31 @@ async function reapRunsForDepth(
   return rows.length;
 }
 
+/**
+ * The state of a job's most recent run, and nothing else — what "Run now" polls.
+ *
+ * Covered by `monitoring_runs_job_idx`; see the route for what this replaced.
+ */
+export async function latestRunStatus(
+  jobId: string,
+): Promise<{ active: boolean; status: string | null; error: string | null }> {
+  const [row] = await db
+    .select({
+      status: monitoringRuns.status,
+      error: monitoringRuns.error,
+    })
+    .from(monitoringRuns)
+    .where(eq(monitoringRuns.jobId, jobId))
+    .orderBy(desc(monitoringRuns.createdAt))
+    .limit(1);
+  if (!row) return { active: false, status: null, error: null };
+  return {
+    active: row.status === "queued" || row.status === "running",
+    status: row.status,
+    error: row.error,
+  };
+}
+
 export async function listRuns(jobId: string, limit = 50): Promise<RunRow[]> {
   return db
     .select(RUN_LIST_COLUMNS)
@@ -1033,7 +1129,9 @@ export async function getRun(id: string) {
       coverage: monitoringRuns.coverage,
       rejected: monitoringRuns.rejected,
       expectedObservations: monitoringRuns.expectedObservations,
-      prompts: monitoringRuns.prompts,
+      // `prompts` is NOT selected: a deep run stores one verbatim prompt per
+      // workload at ~20 KB each, and the page indexes them (`runPromptIndex`) and
+      // loads one at a time instead of shipping the lot.
       attempt: monitoringRuns.attempt,
     })
     .from(monitoringRuns)
@@ -1043,6 +1141,46 @@ export async function getRun(id: string) {
 }
 
 /** A run's measured facts, ordered so one workload's readings stay together. */
+/**
+ * The run's prompts, by label and size only — never their text.
+ *
+ * Done in SQL so a page that lists ten prompts does not pull a couple of hundred
+ * kilobytes of them into the server render either.
+ */
+export async function runPromptIndex(
+  runId: string,
+): Promise<{ index: number; target: string; bytes: number }[]> {
+  const rows = await db.execute<{
+    index: number;
+    target: string;
+    bytes: number;
+  }>(sql`
+    select (p.ordinality - 1)::int as index,
+           p.value->>'target' as target,
+           length(p.value->>'prompt')::int as bytes
+    from monitoring_runs r,
+         jsonb_array_elements(coalesce(r.prompts, '[]'::jsonb))
+           with ordinality as p(value, ordinality)
+    where r.id = ${runId}
+    order by p.ordinality
+  `);
+  return [...rows];
+}
+
+/** One stored prompt, by its position in the run's list. */
+export async function getRunPrompt(
+  runId: string,
+  index: number,
+): Promise<string | null> {
+  // The ::int cast is load-bearing. Bound as text, the -> operator takes its
+  // object-key overload and silently returns null for a JSON array.
+  const rows = await db.execute<{ prompt: string | null }>(sql`
+    select prompts->(${index}::int)->>'prompt' as prompt
+    from monitoring_runs where id = ${runId}
+  `);
+  return rows[0]?.prompt ?? null;
+}
+
 export async function getRunObservations(runId: string) {
   return db
     .select({
@@ -1171,10 +1309,30 @@ export interface ConcernRow {
   dismissalComment: string | null;
 }
 
+/**
+ * A concern as a LIST needs it: everything the card shows, and none of the
+ * identity machinery.
+ *
+ * `fingerprint`, `contentHash`, `checkVersion`, `category` and the absent-run
+ * counters exist for reconciliation (`concernsForJob`, which still reads the full
+ * row). They were being selected and serialised for every concern of every job on
+ * a page that cannot use any of them.
+ */
+export type ConcernListRow = Omit<
+  ConcernRow,
+  | "fingerprint"
+  | "contentHash"
+  | "checkVersion"
+  | "category"
+  | "lastResolvedAt"
+  | "severityChangedAt"
+  | "consecutiveRunsAbsent"
+>;
+
 export async function listConcerns(
   jobId: string,
   filters: { statuses?: ConcernStatus[]; severities?: Severity[] } = {},
-): Promise<ConcernRow[]> {
+): Promise<ConcernListRow[]> {
   const conditions = [eq(monitoringConcerns.jobId, jobId)];
   if (filters.statuses?.length)
     conditions.push(inArray(monitoringConcerns.status, filters.statuses));
@@ -1183,7 +1341,32 @@ export async function listConcerns(
       inArray(monitoringConcerns.effectiveSeverity, filters.severities),
     );
   return db
-    .select()
+    // A projection, not `select()`. `fingerprint` and `contentHash` are identity
+    // machinery — the client has no use for either, and they were on the wire for
+    // every concern of every job.
+    .select({
+      id: monitoringConcerns.id,
+      jobId: monitoringConcerns.jobId,
+      checkId: monitoringConcerns.checkId,
+      targetKind: monitoringConcerns.targetKind,
+      targetNamespace: monitoringConcerns.targetNamespace,
+      targetName: monitoringConcerns.targetName,
+      scope: monitoringConcerns.scope,
+      baseSeverity: monitoringConcerns.baseSeverity,
+      effectiveSeverity: monitoringConcerns.effectiveSeverity,
+      severityRationale: monitoringConcerns.severityRationale,
+      status: monitoringConcerns.status,
+      title: monitoringConcerns.title,
+      rationale: monitoringConcerns.rationale,
+      remediation: monitoringConcerns.remediation,
+      evidence: monitoringConcerns.evidence,
+      firstSeenAt: monitoringConcerns.firstSeenAt,
+      lastSeenAt: monitoringConcerns.lastSeenAt,
+      occurrenceCount: monitoringConcerns.occurrenceCount,
+      mutedUntil: monitoringConcerns.mutedUntil,
+      dismissalReason: monitoringConcerns.dismissalReason,
+      dismissalComment: monitoringConcerns.dismissalComment,
+    })
     .from(monitoringConcerns)
     .where(and(...conditions))
     .orderBy(

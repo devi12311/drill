@@ -1,7 +1,11 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+
 import { useMemo, useState } from "react";
+import { useAdminData } from "@/lib/admin/use-admin-data";
+import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
+import { KNOWN_MODELS } from "@/lib/holmes/types";
 import { Gauge, Microscope, Scan, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -9,24 +13,25 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { SECURITY_SCOPE_CAVEAT } from "@/lib/monitoring/catalogue";
+
 import { TARGET_LIMITS } from "@/lib/monitoring/job-input";
-import { SCHEDULE_PRESETS } from "@/lib/monitoring/schedule";
 import {
   CATEGORY_LABEL,
   DEPTH_BLURB,
   DEPTH_LABEL,
+  SCHEDULE_PRESETS,
   TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
 import {
   CLUSTER_TARGET,
   MONITOR_DEPTHS,
+  SECURITY_SCOPE_CAVEAT,
   WORKLOAD_KINDS,
   isClusterTarget,
 } from "@/lib/monitoring/types";
 import type {
   AssessmentTarget,
-  CheckView,
+  CheckRubricItem,
   MonitorCategory,
   MonitorDepth,
 } from "@/lib/monitoring/types";
@@ -99,16 +104,14 @@ function sameDraft(a: JobDraft, b: JobDraft) {
 export function JobForm({
   clusterId,
   workloads,
-  models,
   checks,
   startOnCluster = false,
   job,
 }: {
   clusterId: string;
   workloads: PickableWorkload[];
-  models: string[];
-  /** The live catalogue; the job may disable or re-rate any of it. */
-  checks: CheckView[];
+  /** The live catalogue, in the rubric editor's shape; the job may disable or re-rate any of it. */
+  checks: CheckRubricItem[];
   /**
    * Open with the cluster itself selected — the cluster page's "Assess this
    * cluster" shortcut. A seeded initial state rather than an effect, so nothing
@@ -118,7 +121,22 @@ export function JobForm({
   /** Omitted to create; supplied to edit that job in place. */
   job?: EditableJob;
 }) {
-  const router = useRouter();
+  const refreshThenNavigate = useRefreshThenNavigate();
+  /**
+   * The model list is the ONE thing this form still fetches from the browser.
+   *
+   * It is not a database read: the route calls the cluster's own Holmes and asks
+   * what it serves, with a 5 s timeout. Awaiting that on the server would hold up
+   * the whole page for an agent that may be unreachable, so the form renders
+   * against `KNOWN_MODELS` and swaps in the live list when it arrives.
+   */
+  const served = useAdminData<{ models?: string[] }>(
+    `/api/admin/monitoring/clusters/${clusterId}/models`,
+    [clusterId],
+  );
+  const models = served.data?.models?.length
+    ? served.data.models
+    : KNOWN_MODELS;
   const [name, setName] = useState(job?.name ?? "");
   const [type, setType] = useState<MonitorCategory>(
     job?.type ?? (startOnCluster ? "performance" : "security"),
@@ -136,7 +154,6 @@ export function JobForm({
     job?.overrides ?? [],
   );
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const cluster = targets.some(isClusterTarget);
@@ -219,8 +236,12 @@ export function JobForm({
     }),
     [name, depth, model, schedule, enabled, targets, overrides],
   );
-  /** What is stored, moved forward on every successful save. */
-  const [baseline, setBaseline] = useState<JobDraft | null>(
+  /**
+   * What is stored. Fixed for the lifetime of the form: a successful save now
+   * navigates to the job page, so there is no post-save state in which the
+   * baseline would need moving forward.
+   */
+  const [baseline] = useState<JobDraft | null>(
     job
       ? {
           name: job.name,
@@ -233,7 +254,12 @@ export function JobForm({
         }
       : null,
   );
-  const dirty = baseline === null || !sameDraft(draft, baseline);
+  // Memoised for the reason given in `check-form`: `sameDraft` stringifies and
+  // sorts both drafts, and this is read on every render of a long form.
+  const dirty = useMemo(
+    () => baseline === null || !sameDraft(draft, baseline),
+    [baseline, draft],
+  );
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -253,26 +279,26 @@ export function JobForm({
       );
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      // Re-runs the layout, so the tree picks up the new name / paused state.
-      router.refresh();
-      if (!job) {
-        // Deliberately still busy: the button is about to be unmounted by the
-        // navigation, and re-enabling it invites a second create on a slow push.
-        router.push(`/admin/monitoring/${clusterId}/jobs/${body.id}`);
-        return;
-      }
-      setBaseline(draft);
-      // Unchecking a check closes the concerns citing it, server-side. Saying so
-      // is the only way the operator learns their history just moved.
+      /**
+       * Both modes land on the job's own page, which is where "Run now" lives.
+       *
+       * Saving an edit used to stay put — and the submit button is the last child
+       * of a form roughly two viewports tall, so you were left at the bottom with
+       * the only route back (and the only way to run the job you just retuned)
+       * scrolled off the top. Returning to the job is both the confirmation and
+       * the next step.
+       *
+       * Deliberately still busy afterwards: the button is about to be unmounted
+       * by the navigation, and re-enabling it invites a second submit.
+       */
       const closed: number = body.autoResolved ?? 0;
-      setSaved(
-        closed === 0
-          ? "Saved."
-          : closed === 1
-            ? "Saved. One open concern was resolved, because the check it cites no longer runs in this job."
-            : `Saved. ${closed} open concerns were resolved, because the checks they cite no longer run in this job.`,
+      const target = `/admin/monitoring/${clusterId}/jobs/${job ? job.id : body.id}`;
+      // Unchecking a check closes the concerns citing it, server-side. Saying so
+      // is the only way the operator learns their history just moved, so the
+      // count travels to the job page and is announced there.
+      refreshThenNavigate(
+        closed > 0 ? `${target}?autoResolved=${closed}` : target,
       );
-      setBusy(false);
     } catch (err) {
       setError(
         err instanceof Error
@@ -553,23 +579,58 @@ export function JobForm({
         </label>
       )}
 
-      {error && <p className="text-body-sm text-traffic-red">{error}</p>}
-      {saved && !dirty && (
-        <p className="text-body-sm text-traffic-green">{saved}</p>
-      )}
-
-      <Button
-        type="submit"
-        disabled={busy || targets.length === 0 || (Boolean(job) && !dirty)}
-      >
-        {job
-          ? busy
-            ? "Saving…"
-            : "Save changes"
-          : busy
-            ? "Creating…"
-            : "Create job"}
-      </Button>
+      {/**
+        * A STICKY action bar, because this form is about two viewports tall.
+        *
+        * The submit button used to be its last child, and the page header — which
+        * holds the only way back to the job, and the only "Run now" — is not
+        * sticky. So retuning a job meant scrolling to the bottom to save and then
+        * scrolling all the way back up to do anything with what you had just
+        * saved. Sticking the bar to the bottom of the scroll container means the
+        * primary action, the reason it is unavailable, and the way out are all
+        * reachable from wherever you are in the form.
+        *
+        * `-mx-8 px-8` bleeds it to the edges of the 900px content column, so it
+        * reads as a bar over the page rather than a card floating in it.
+        */}
+      <div className="sticky bottom-0 -mx-8 flex flex-wrap items-center gap-3 border-t border-border bg-background px-8 py-3">
+        <Button
+          type="submit"
+          disabled={busy || targets.length === 0 || (Boolean(job) && !dirty)}
+        >
+          {job
+            ? busy
+              ? "Saving…"
+              : "Save changes"
+            : busy
+              ? "Creating…"
+              : "Create job"}
+        </Button>
+        <Button variant="ghost" asChild>
+          <Link
+            href={
+              job
+                ? `/admin/monitoring/${clusterId}/jobs/${job.id}`
+                : `/admin/monitoring/${clusterId}`
+            }
+          >
+            Cancel
+          </Link>
+        </Button>
+        {/* Says WHY the button is unavailable, next to the button. */}
+        {targets.length === 0 ? (
+          <span className="text-body-sm text-bone-gray">
+            Pick at least one target above.
+          </span>
+        ) : job && !dirty ? (
+          <span className="text-body-sm text-bone-gray">No changes yet.</span>
+        ) : null}
+        {error && (
+          <span role="alert" className="text-body-sm text-traffic-red">
+            {error}
+          </span>
+        )}
+      </div>
     </form>
   );
 }

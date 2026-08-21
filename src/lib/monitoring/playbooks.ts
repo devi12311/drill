@@ -1,11 +1,16 @@
 import "server-only";
 import {
+  getPlaybookRow,
   listPlaybookRows,
   observedKeyCounts,
   seedPlaybooks,
   type PlaybookRow,
 } from "@/lib/db/monitoring-queries";
-import { type Playbook, type PlaybookView } from "./playbook";
+import {
+  type Playbook,
+  type PlaybookSummary,
+  type PlaybookView,
+} from "./playbook";
 import { PROFILES } from "./profiles";
 import type { WorkloadTechnology } from "./types";
 
@@ -74,13 +79,27 @@ export async function livePlaybookRows(): Promise<PlaybookRow[]> {
   return listPlaybookRows();
 }
 
-/** The admin-facing shape: live text, plus what is locked and who last touched it. */
-export async function playbookViews(): Promise<PlaybookView[]> {
-  const rows = await livePlaybookRows();
-  const counts = await observedKeyCounts([
-    ...new Set(rows.flatMap((row) => row.observations.map((o) => o.key))),
-  ]);
-  return rows.map((row) => ({
+/** The shelf's shape — see PlaybookSummary for why it is separate. */
+export async function playbookSummaries(): Promise<PlaybookSummary[]> {
+  return (await livePlaybookRows()).map((row) => ({
+    technology: row.technology,
+    checkCount: (CHECK_IDS.get(row.technology) ?? []).length,
+    observationCount: row.observations.length,
+    editedAt: row.editedBy ? row.updatedAt.toISOString() : null,
+  }));
+}
+
+/** One method in full, for the panel that opens it. */
+export async function playbookView(
+  technology: WorkloadTechnology,
+): Promise<PlaybookView | null> {
+  await ensurePlaybooks();
+  const row = await getPlaybookRow(technology);
+  if (!row) return null;
+  const counts = await observedKeyCounts(
+    row.observations.map((o) => o.key),
+  );
+  return {
     ...toPlaybook(row),
     checkIds: CHECK_IDS.get(row.technology) ?? [],
     readings: Object.fromEntries(
@@ -89,7 +108,7 @@ export async function playbookViews(): Promise<PlaybookView[]> {
         .filter(([, n]) => n > 0),
     ),
     editedAt: row.editedBy ? row.updatedAt.toISOString() : null,
-  }));
+  };
 }
 
 /**

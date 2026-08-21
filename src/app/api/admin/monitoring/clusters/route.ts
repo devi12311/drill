@@ -51,10 +51,21 @@ export async function POST(request: Request) {
     );
   }
 
-  let discovered;
-  try {
-    discovered = await discoverWorkloads(kubeconfig);
-  } catch (err) {
+  /**
+   * Both credentials are proved concurrently. They are independent — one lists
+   * workloads through the kubeconfig, the other lists models on the Holmes
+   * endpoint — and each is a network call to a different cluster, so running
+   * them in sequence made "Add cluster" take the sum of two timeouts instead of
+   * the worse of the two. `allSettled` rather than `all` because each failure
+   * has its own `field`, and the kubeconfig's message keeps precedence so the
+   * reported error does not depend on which call happened to lose the race.
+   */
+  const [discovery, agent] = await Promise.allSettled([
+    discoverWorkloads(kubeconfig),
+    validateAgent(holmesUrl, holmesApiKey),
+  ]);
+  if (discovery.status === "rejected") {
+    const err = discovery.reason;
     return Response.json(
       {
         error: err instanceof Error ? err.message : "Kubeconfig validation failed",
@@ -63,11 +74,8 @@ export async function POST(request: Request) {
       { status: 422 },
     );
   }
-
-  let models: string[];
-  try {
-    models = await validateAgent(holmesUrl, holmesApiKey);
-  } catch (err) {
+  if (agent.status === "rejected") {
+    const err = agent.reason;
     return Response.json(
       {
         error: err instanceof Error ? err.message : "Holmes validation failed",
@@ -76,6 +84,8 @@ export async function POST(request: Request) {
       { status: 422 },
     );
   }
+  const discovered = discovery.value;
+  const models = agent.value;
 
   let cluster;
   try {

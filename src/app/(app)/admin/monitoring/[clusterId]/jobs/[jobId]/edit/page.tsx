@@ -1,46 +1,37 @@
-"use client";
-
 import Link from "next/link";
-import { use } from "react";
+import { notFound } from "next/navigation";
+import { isUuid } from "@/lib/monitoring/types";
 import { ArrowLeft } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { Button } from "@/components/ui/button";
-import { JobForm, type EditableJob } from "@/components/monitoring/job-form";
-import type { CheckOverride } from "@/components/monitoring/rubric-editor";
-import { useAdminData } from "@/lib/admin/use-admin-data";
-import { useJobFormData } from "@/lib/monitoring/use-job-form-data";
+import { JobForm } from "@/components/monitoring/job-form";
+import {
+  getJob,
+  listJobOverrides,
+  listWorkloads,
+} from "@/lib/db/monitoring-queries";
+import { checkRubricItems } from "@/lib/monitoring/checks";
 
-/**
- * The job detail route answers with the job and its rubric deviations separately
- * (runs come along too, and are none of this page's business).
- */
-interface JobPayload {
-  job: Omit<EditableJob, "overrides">;
-  overrides: CheckOverride[];
-}
-
-export default function EditJobPage({
+/** Retune a job. Server-rendered for the reasons given on the create page. */
+export default async function EditJobPage({
   params,
 }: {
   params: Promise<{ clusterId: string; jobId: string }>;
 }) {
-  const { clusterId, jobId } = use(params);
-  const form = useJobFormData(clusterId);
-  const job = useAdminData<JobPayload>(
-    `/api/admin/monitoring/jobs/${jobId}`,
-    [jobId],
-  );
-
-  const error = form.error ?? job.error;
-  if (error)
-    return <p className="py-8 text-body-sm text-traffic-red">{error}</p>;
-  if (form.loading || job.loading || !job.data)
-    return <p className="py-8 text-body-sm text-bone-gray">Loading…</p>;
+  const { clusterId, jobId } = await params;
+  if (!isUuid(clusterId) || !isUuid(jobId)) notFound();
+  const [job, overrides, workloads, checks] = await Promise.all([
+    getJob(jobId),
+    listJobOverrides(jobId),
+    listWorkloads(clusterId),
+    checkRubricItems(),
+  ]);
+  if (!job) notFound();
 
   return (
     <div className="space-y-6">
       <AdminPageHeader
-        title={`Edit ${job.data.job.name}`}
+        title={`Edit ${job.name}`}
         description="Changing what this job assesses does not rewrite its past: concerns already recorded keep their history, and the next run reconciles them against the new rubric."
       >
         <Button variant="outline" asChild>
@@ -52,10 +43,26 @@ export default function EditJobPage({
       </AdminPageHeader>
       <JobForm
         clusterId={clusterId}
-        workloads={form.workloads}
-        models={form.models}
-        checks={form.checks}
-        job={{ ...job.data.job, overrides: job.data.overrides }}
+        workloads={workloads.map((w) => ({
+          kind: w.kind,
+          namespace: w.namespace,
+          name: w.name,
+          replicas: w.replicas,
+          technology: w.technology,
+          profiled: w.profiled,
+        }))}
+        checks={checks}
+        job={{
+          id: job.id,
+          name: job.name,
+          type: job.type,
+          depth: job.depth,
+          model: job.model,
+          schedule: job.schedule,
+          enabled: job.enabled,
+          targets: job.targets,
+          overrides,
+        }}
       />
     </div>
   );

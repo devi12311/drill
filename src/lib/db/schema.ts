@@ -604,6 +604,12 @@ export const monitoringConcerns = pgTable(
     unique().on(t.jobId, t.fingerprint),
     // The concerns list for a job, filtered by lifecycle status.
     index("monitoring_concerns_job_status_idx").on(t.jobId, t.status),
+    /**
+     * Disabling a check has to find and auto-resolve every concern citing it, and
+     * the admin UI counts them before offering a delete. Both filter on
+     * `check_id` alone, which no other index leads with.
+     */
+    index("monitoring_concerns_check_idx").on(t.checkId),
   ],
 );
 
@@ -656,6 +662,13 @@ export const monitoringObservations = pgTable(
       t.key,
       t.createdAt,
     ),
+    /**
+     * `observedKeyCounts` asks "how many readings does each of these keys have",
+     * which is what locks a key against renaming. `key` is the third column of the
+     * trend index, so that filter could not use it — and this table grows by one
+     * row per measurement per workload per run, forever.
+     */
+    index("monitoring_observations_key_idx").on(t.key),
   ],
 );
 

@@ -13,7 +13,7 @@ import {
   parseCheckInput,
   type CheckInput,
 } from "@/lib/monitoring/check-input";
-import type { CheckRequirement } from "@/lib/monitoring/catalogue";
+import type { CheckRequirement } from "@/lib/monitoring/types";
 import type { TargetKind, WorkloadTechnology } from "@/lib/monitoring/types";
 
 // Next 16: route params are async.
@@ -39,12 +39,13 @@ function toInput(row: CheckRow): CheckInput {
 export async function GET(_request: Request, context: Context) {
   if (!(await getAdminActor())) return forbidden();
   const { id } = await context.params;
-  const check = await getCheckRow(id);
+  // Independent reads, and this route is now on the panel-open path.
+  const [check, concernCount] = await Promise.all([
+    getCheckRow(id),
+    countConcernsForCheck(id),
+  ]);
   if (!check) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json({
-    check,
-    concernCount: await countConcernsForCheck(id),
-  });
+  return Response.json({ check, concernCount });
 }
 
 /**

@@ -9,7 +9,11 @@ import {
   parsePlaybookPatch,
   unacknowledgedKeyLosses,
 } from "@/lib/monitoring/playbook-input";
-import { ensurePlaybooks, toPlaybook } from "@/lib/monitoring/playbooks";
+import {
+  ensurePlaybooks,
+  playbookView,
+  toPlaybook,
+} from "@/lib/monitoring/playbooks";
 import {
   WORKLOAD_TECHNOLOGIES,
   type WorkloadTechnology,
@@ -17,6 +21,24 @@ import {
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ technology: string }> };
+
+/**
+ * One method in full — what the panel loads when a tile is opened.
+ *
+ * The shelf endpoint deliberately returns only names and counts, so this is where
+ * the framing, the data sources, the ordered method and the observation specs
+ * (plus each key's reading count, which is what locks a rename) come from.
+ */
+export async function GET(_request: Request, context: Context) {
+  if (!(await getAdminActor())) return forbidden();
+  const { technology: raw } = await context.params;
+  const technology = raw.toLowerCase() as WorkloadTechnology;
+  if (!(WORKLOAD_TECHNOLOGIES as readonly string[]).includes(technology))
+    return Response.json({ error: "Not found" }, { status: 404 });
+  const profile = await playbookView(technology);
+  if (!profile) return Response.json({ error: "Not found" }, { status: 404 });
+  return Response.json({ profile });
+}
 
 /**
  * Edit a method. Edit and save is the whole lifecycle — there is no version, no

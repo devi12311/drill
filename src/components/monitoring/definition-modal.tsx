@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { ChevronRight } from "lucide-react";
 import {
   Collapsible,
@@ -34,24 +34,45 @@ import { cn } from "@/lib/utils";
  */
 
 export function useDefinitionParam(key: string) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const params = useSearchParams();
-  const value = params.get(key);
+  const value = useSearchParams().get(key);
 
   const set = useCallback(
     (next: string | null) => {
-      const query = new URLSearchParams(params.toString());
+      /**
+       * The live URL is read here, at call time, rather than closed over from
+       * `useSearchParams`/`usePathname`.
+       *
+       * Closing over them made this callback change identity on every URL
+       * change — and opening a panel IS a URL change. The catalogue hands the
+       * callback to ~180 memoised tiles, so a fresh identity meant every tile
+       * failed its memo comparison and re-rendered on every open AND every
+       * close. With `[key]` the callback is created once and the tiles the
+       * filter did not touch are skipped entirely.
+       */
+      const query = new URLSearchParams(window.location.search);
       if (next) query.set(key, next);
       else query.delete(key);
       const qs = query.toString();
-      const href = qs ? `${pathname}?${qs}` : pathname;
-      // Opening PUSHES so that Back closes the panel; closing REPLACES so that
-      // Back from the closed page does not immediately reopen it.
-      if (next) router.push(href, { scroll: false });
-      else router.replace(href, { scroll: false });
+      const href = qs ? `?${qs}` : window.location.pathname;
+      /**
+       * The native history API, NOT `router.push`/`replace`.
+       *
+       * `router.push` treats a search-param change as a navigation and fetches a
+       * fresh RSC payload for the route — so opening a card, and closing it
+       * again, each cost a server round-trip on a page whose data has not
+       * changed. That round-trip was the whole of the "the catalogue cards feel
+       * slow" complaint. Next patches these two methods so `useSearchParams`
+       * and `usePathname` still track the URL, which keeps both properties the
+       * URL was chosen for: a definition stays linkable, and Back still closes
+       * the panel instead of leaving the page.
+       *
+       * Opening PUSHES so that Back closes the panel; closing REPLACES so that
+       * Back from the closed page does not immediately reopen it.
+       */
+      if (next) window.history.pushState(null, "", href);
+      else window.history.replaceState(null, "", href);
     },
-    [key, params, pathname, router],
+    [key],
   );
 
   return [value, set] as const;

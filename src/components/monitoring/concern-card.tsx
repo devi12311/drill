@@ -8,6 +8,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { formatRelative } from "@/lib/admin/format";
@@ -54,11 +55,54 @@ export interface ConcernView {
   dismissalComment: string | null;
 }
 
-const ACTIONS: { action: string; label: string; needsComment: boolean }[] = [
-  { action: "resolve", label: "Mark fixed", needsComment: false },
-  { action: "mute", label: "Mute 30 days", needsComment: true },
-  { action: "accept_risk", label: "Accept risk", needsComment: true },
-  { action: "false_positive", label: "False positive", needsComment: true },
+/**
+ * The lifecycle decisions, each with what it actually means.
+ *
+ * `prompt` is the confirmation copy, because these are not undo-able bookkeeping:
+ * accepting a risk and calling a finding a false positive both stop it being
+ * reported and both go in the audit log under the operator's name. The reason was
+ * previously collected with `window.prompt("Why? (recorded in the audit log)")`,
+ * which is the same question asked without saying what it is for.
+ */
+const ACTIONS: {
+  action: string;
+  label: string;
+  title: string;
+  description: string;
+  needsComment: boolean;
+}[] = [
+  {
+    action: "resolve",
+    label: "Mark fixed",
+    title: "Mark this as fixed?",
+    description:
+      "The next run decides for itself: if the check fails again, the same concern reopens with its history intact.",
+    needsComment: false,
+  },
+  {
+    action: "mute",
+    label: "Mute 30 days",
+    title: "Mute this for 30 days?",
+    description:
+      "It stays recorded and keeps accumulating occurrences, but stops being reported as open until the mute expires.",
+    needsComment: true,
+  },
+  {
+    action: "accept_risk",
+    label: "Accept risk",
+    title: "Accept this risk?",
+    description:
+      "The finding stands and stops being reported. Runs will never silently reopen it — only a person can.",
+    needsComment: true,
+  },
+  {
+    action: "false_positive",
+    label: "False positive",
+    title: "Record this as a false positive?",
+    description:
+      "Says the check was wrong here, not that the problem went away. If it keeps happening, the check or its technology exclusions are what to change.",
+    needsComment: true,
+  },
 ];
 
 /**
@@ -81,12 +125,7 @@ export function ConcernCard({
   const [error, setError] = useState<string | null>(null);
   const dismissed = concern.status !== "open";
 
-  async function act(action: string, needsComment: boolean) {
-    let comment = "";
-    if (needsComment) {
-      comment = window.prompt("Why? (recorded in the audit log)")?.trim() ?? "";
-      if (!comment) return;
-    }
+  async function act(action: string, comment: string) {
     setBusy(true);
     setError(null);
     try {
@@ -215,20 +254,31 @@ export function ConcernCard({
               <Button
                 variant="outline"
                 disabled={busy}
-                onClick={() => act("reopen", false)}
+                onClick={() => act("reopen", "")}
               >
                 Reopen
               </Button>
             ) : (
-              ACTIONS.map(({ action, label, needsComment }) => (
-                <Button
-                  key={action}
-                  variant="outline"
+              ACTIONS.map((entry) => (
+                <ConfirmButton
+                  key={entry.action}
+                  label={entry.label}
+                  title={entry.title}
+                  description={entry.description}
+                  confirmLabel={entry.label}
                   disabled={busy}
-                  onClick={() => act(action, needsComment)}
-                >
-                  {label}
-                </Button>
+                  comment={
+                    entry.needsComment
+                      ? {
+                          label: "Why?",
+                          placeholder:
+                            "Recorded in the audit log against your name.",
+                          required: true,
+                        }
+                      : undefined
+                  }
+                  onConfirm={(comment) => act(entry.action, comment)}
+                />
               ))
             )}
           </div>

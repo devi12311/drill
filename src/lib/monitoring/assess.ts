@@ -1,15 +1,12 @@
 import "server-only";
 import { parseSse } from "@/lib/holmes/stream";
 import type { HolmesChatResponse, ToolCall } from "@/lib/holmes/types";
-import {
-  REQUIREMENT_LABEL,
-  SECURITY_SCOPE_CAVEAT,
-  type CheckRequirement,
-  type MonitorCheck,
-} from "./catalogue";
+import type { MonitorCheck } from "./catalogue";
+import { REQUIREMENT_LABEL } from "./ui";
 import { renderPlaybook, type Playbook } from "./playbook";
 import {
   OBSERVATION_SOURCES,
+  SECURITY_SCOPE_CAVEAT,
   SEVERITIES,
   TARGET_KINDS,
   isClusterTarget,
@@ -17,6 +14,7 @@ import {
   targetLabel,
   type Assessment,
   type AssessmentTarget,
+  type CheckRequirement,
   type MonitorCategory,
   type MonitorDepth,
 } from "./types";

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,8 +14,8 @@ import { Textarea } from "@/components/ui/textarea";
  * in, so the kubeconfig is Drill's (inventory) and the endpoint is the agent's
  * (investigating).
  */
-export function ClusterForm({ onCreated }: { onCreated?: () => void }) {
-  const router = useRouter();
+export function ClusterForm() {
+  const refreshThenNavigate = useRefreshThenNavigate();
   const [name, setName] = useState("");
   const [kubeconfig, setKubeconfig] = useState("");
   const [holmesUrl, setHolmesUrl] = useState("");
@@ -39,9 +39,8 @@ export function ClusterForm({ onCreated }: { onCreated?: () => void }) {
       setKubeconfig("");
       setHolmesUrl("");
       setHolmesApiKey("");
-      router.refresh();
-      onCreated?.();
-      router.push(`/admin/monitoring/${body.id}`);
+      // Refresh the tree first, then land on the new cluster — see the hook.
+      refreshThenNavigate(`/admin/monitoring/${body.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add the cluster");
     } finally {

@@ -9,10 +9,12 @@ import {
 import {
   BUILTIN_CHECKS,
   applicableChecks,
-  type CheckRequirement,
   type MonitorCheck,
 } from "./catalogue";
 import type {
+  CheckListItem,
+  CheckRubricItem,
+  CheckRequirement,
   CheckView,
   MonitorCategory,
   TargetKind,
@@ -155,6 +157,34 @@ export function checkIndex(
   checks: readonly EffectiveCheck[],
 ): Map<string, EffectiveCheck> {
   return new Map(checks.map((c) => [c.id, c]));
+}
+
+/** The catalogue in the rubric editor's shape — see CheckRubricItem. */
+export async function checkRubricItems(): Promise<CheckRubricItem[]> {
+  return (await liveChecks()).map((c) => ({
+    id: c.id,
+    category: c.category,
+    title: c.title,
+    baseSeverity: c.baseSeverity,
+    enabled: c.enabled,
+    appliesTo: c.appliesTo,
+    appliesToTechnologies: c.appliesToTechnologies,
+    excludesTechnologies: c.excludesTechnologies,
+    requires: c.requires,
+  }));
+}
+
+/** The catalogue in the grid's shape — see CheckListItem for why it is separate. */
+export async function checkListItems(): Promise<CheckListItem[]> {
+  return (await liveChecks()).map((c) => ({
+    id: c.id,
+    category: c.category,
+    title: c.title,
+    baseSeverity: c.baseSeverity,
+    builtin: c.builtin,
+    enabled: c.enabled,
+    version: c.version,
+  }));
 }
 
 /** The catalogue in the client-facing shape (see CheckView in ./types). */

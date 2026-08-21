@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   BookOpen,
   ChevronRight,
@@ -17,6 +17,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 export interface TreeJob {
@@ -53,6 +54,30 @@ export function MonitoringTree({
   jobs: TreeJob[];
 }) {
   const pathname = usePathname();
+  /**
+   * Grouped once, and the per-cluster concern totals rolled up with it.
+   *
+   * It used to be `jobs.filter(...)` per cluster on every render, with each branch
+   * then reducing its own two totals — so the tree, which re-renders on every
+   * navigation in the module, did O(clusters x jobs) work plus two reductions per
+   * cluster for numbers that only change when the data does.
+   */
+  const branches = useMemo(() => {
+    const byCluster = new Map<
+      string,
+      { jobs: TreeJob[]; open: number; critical: number }
+    >();
+    for (const cluster of clusters)
+      byCluster.set(cluster.id, { jobs: [], open: 0, critical: 0 });
+    for (const job of jobs) {
+      const branch = byCluster.get(job.clusterId);
+      if (!branch) continue;
+      branch.jobs.push(job);
+      branch.open += job.openConcerns;
+      branch.critical += job.criticalConcerns;
+    }
+    return byCluster;
+  }, [clusters, jobs]);
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
@@ -69,14 +94,19 @@ export function MonitoringTree({
             No clusters yet.
           </p>
         ) : (
-          clusters.map((cluster) => (
-            <ClusterBranch
-              key={cluster.id}
-              cluster={cluster}
-              jobs={jobs.filter((job) => job.clusterId === cluster.id)}
-              pathname={pathname}
-            />
-          ))
+          clusters.map((cluster) => {
+            const branch = branches.get(cluster.id);
+            return (
+              <ClusterBranch
+                key={cluster.id}
+                cluster={cluster}
+                jobs={branch?.jobs ?? []}
+                openConcerns={branch?.open ?? 0}
+                critical={branch?.critical ?? 0}
+                pathname={pathname}
+              />
+            );
+          })
         )}
 
         <Link
@@ -122,21 +152,34 @@ export function MonitoringTree({
 function ClusterBranch({
   cluster,
   jobs,
+  openConcerns,
+  critical,
   pathname,
 }: {
   cluster: TreeCluster;
   jobs: TreeJob[];
+  openConcerns: number;
+  critical: number;
   pathname: string;
 }) {
   const base = `/admin/monitoring/${cluster.id}`;
   const insideCluster = pathname.startsWith(base);
-  // Open when you are inside it; still collapsible from there.
+  /**
+   * Opens when you navigate into the cluster, and stays wherever you put it after
+   * that. The state was previously pinned open by `open || insideCluster`, which
+   * meant the branch you were working in was the one branch you could not collapse
+   * — the trigger moved the state and the `||` overrode it. Keyed on the cluster
+   * you are inside instead, so entering re-opens it without holding it open.
+   */
   const [open, setOpen] = useState(insideCluster);
-  const critical = jobs.reduce((n, job) => n + job.criticalConcerns, 0);
-  const openConcerns = jobs.reduce((n, job) => n + job.openConcerns, 0);
+  const [openedFor, setOpenedFor] = useState(insideCluster);
+  if (insideCluster !== openedFor) {
+    setOpenedFor(insideCluster);
+    if (insideCluster) setOpen(true);
+  }
 
   return (
-    <Collapsible open={open || insideCluster} onOpenChange={setOpen}>
+    <Collapsible open={open} onOpenChange={setOpen}>
       <div
         className={cn(
           "flex items-center gap-1 rounded-sm pr-2 transition-colors hover:bg-smoke-charcoal",
@@ -243,5 +286,27 @@ function ClusterBranch({
         </Link>
       </CollapsibleContent>
     </Collapsible>
+  );
+}
+
+/**
+ * The tree's shape while its two queries run. Same 260px column and header, so
+ * the content beside it does not move when the tree arrives.
+ */
+export function TreeSkeleton() {
+  return (
+    <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+      <div className="flex items-center gap-2 px-5 pb-3 pt-5">
+        <Radar className="size-4 text-bone-gray" />
+        <span className="text-caption-tracked uppercase text-bone-gray">
+          Monitored clusters
+        </span>
+      </div>
+      <div className="space-y-2 px-3">
+        {[0, 1, 2].map((i) => (
+          <Skeleton key={i} className="h-7" />
+        ))}
+      </div>
+    </aside>
   );
 }

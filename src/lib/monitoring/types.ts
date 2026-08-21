@@ -7,6 +7,22 @@
  * of importing the catalogue (which imports this file).
  */
 
+/**
+ * Does this look like an id at all?
+ *
+ * Every monitoring page takes ids straight from the URL and reads them with a
+ * query. Postgres rejects a malformed uuid with `invalid input syntax for type
+ * uuid`, so `/admin/monitoring/not-a-uuid` produced a database error rather than a
+ * missing page — and the error text carried the column type back to the browser.
+ * A URL that cannot name a row names no row, which is a 404.
+ */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
 export const SEVERITIES = [
   "critical",
   "high",
@@ -145,6 +161,47 @@ export const DISMISSED_STATUSES: readonly ConcernStatus[] = [
  * client components receive checks in API payloads instead of importing them;
  * this is the one shape they all speak.
  */
+/**
+ * A check as the catalogue GRID needs it — what you scan by, and nothing else.
+ *
+ * Separate from {@link CheckView} on purpose. The full view carries `question`
+ * and `evidence`, each capped at 2000 characters, so shipping it for every check
+ * to render a wall of tiles put a quarter of a megabyte on the wire for two
+ * fields per tile. The panel loads the one definition it opens.
+ */
+export interface CheckListItem {
+  id: string;
+  category: MonitorCategory;
+  title: string;
+  baseSeverity: Severity;
+  builtin: boolean;
+  enabled: boolean;
+  version: number;
+}
+
+/**
+ * A check as the JOB FORM's rubric editor needs it: identity, how it is rated, and
+ * the scope fields that decide whether the job asks it at all.
+ *
+ * A third shape alongside {@link CheckView} and {@link CheckListItem} because this
+ * one is genuinely different: the editor filters on scope (which the grid does not
+ * need) and shows the title and severity (which the filter does not), but it never
+ * shows `question` or `evidence` — the two 2000-character fields that made the
+ * whole catalogue 126 KB. Sending the full view here put that on both job-form
+ * routes, twice: once as HTML and once in the RSC payload.
+ */
+export interface CheckRubricItem {
+  id: string;
+  category: MonitorCategory;
+  title: string;
+  baseSeverity: Severity;
+  enabled: boolean;
+  appliesTo: string[];
+  appliesToTechnologies: string[];
+  excludesTechnologies: string[];
+  requires: string | null;
+}
+
 export interface CheckView {
   id: string;
   category: MonitorCategory;
@@ -565,3 +622,64 @@ export function parseAssessment(
   }
   return validateAssessment(parsed, allowedChecks, allowedTargets);
 }
+
+// ---- Check vocabulary shared by the seed, the DB, the API and the UI ----
+
+/**
+ * Extra data a check needs, which the cluster may not have.
+ *
+ * This list is load-bearing rather than decorative: a check that cannot name its
+ * dependency cannot legitimately be *skipped*, and a skipped check is the only
+ * thing standing between "we could not look" and a silent pass. Engine-level
+ * checks need engine-level dependencies, so the two original Kubernetes-shaped
+ * values are not enough on their own.
+ */
+export type CheckRequirement =
+  | "prometheus"
+  | "control-plane-metrics"
+  | "metrics-server"
+  | "engine-sql"
+  | "pg-stat-statements"
+  | "performance-schema"
+  | "queue-api"
+  | "logs"
+  | "traces"
+  | "node"
+  | "code";
+
+/** The legal `requires` values, for request validation. */
+export const CHECK_REQUIREMENTS: readonly CheckRequirement[] = [
+  "prometheus",
+  "control-plane-metrics",
+  "metrics-server",
+  "engine-sql",
+  "pg-stat-statements",
+  "performance-schema",
+  "queue-api",
+  "logs",
+  "traces",
+  "node",
+  "code",
+] as const;
+
+/** Check-ID validity for admin-authored checks. Uppercase, dotted, immutable. */
+export const CHECK_ID_PATTERN = /^[A-Z][A-Z0-9]*\.[A-Z0-9_]{2,}$/;
+
+export function validateCheckId(raw: unknown): string {
+  const id = typeof raw === "string" ? raw.trim().toUpperCase() : "";
+  if (!CHECK_ID_PATTERN.test(id))
+    throw new Error(
+      "A check ID looks like PREFIX.NAME — uppercase letters, digits and underscores, e.g. CUSTOM.INGRESS_TLS. It can never be changed afterwards, because concerns reference it by value.",
+    );
+  return id;
+}
+
+/**
+ * What a security job can NOT tell you. Holmes has no vulnerability scanner
+ * (no Trivy/kubescape/CVE toolset exists) and its RBAC deliberately excludes
+ * Secret values, so these assessments are configuration posture only. Shown in
+ * the UI so the feature does not overpromise.
+ */
+export const SECURITY_SCOPE_CAVEAT =
+  "Configuration posture only — Holmes has no image-vulnerability scanner and cannot read Secret values. " +
+  "CVE scanning and secret-content leakage are out of scope.";
