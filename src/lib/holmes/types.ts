@@ -106,15 +106,3 @@ export interface TodoItem {
   content: string;
   status: "pending" | "in_progress" | "completed";
 }
-
-export const DEFAULT_MODEL = "gpt-5-mini";
-
-/** Fallback list; the UI should prefer GET /api/models (proxying Holmes /api/model). */
-export const KNOWN_MODELS = [
-  "gpt-5-mini",
-  "gpt-5.4",
-  "gpt-5",
-  "gpt-4.1",
-  "gemini-pro",
-  "gemini-flash",
-];

@@ -1,4 +1,5 @@
 import "server-only";
+import { fixtureMode } from "./stream";
 
 /**
  * Validate a Holmes agent by listing its models.
@@ -41,4 +42,25 @@ export async function validateAgent(
     throw new Error("Holmes /api/model returned no models — wrong URL?");
   }
   return models;
+}
+
+/**
+ * What an agent serves right now, in its own order — the first entry is the
+ * default. Drill deliberately keeps no model list or default of its own: a
+ * hardcoded name outlives the agent's `modelList` (an entry gets deprecated
+ * and the stale name keeps being offered and sent).
+ *
+ * Fixture mode never calls the agent for chats, so an unreachable agent must
+ * not block UI work there.
+ */
+export async function servedModels(
+  url: string,
+  apiKey: string,
+): Promise<string[]> {
+  try {
+    return await validateAgent(url, apiKey);
+  } catch (err) {
+    if (fixtureMode()) return ["fixture"];
+    throw err;
+  }
 }

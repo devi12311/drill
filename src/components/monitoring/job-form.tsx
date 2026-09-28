@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useAdminData } from "@/lib/admin/use-admin-data";
 import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
-import { KNOWN_MODELS } from "@/lib/holmes/types";
 import { Gauge, Microscope, Scan, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -128,15 +127,14 @@ export function JobForm({
    * It is not a database read: the route calls the cluster's own Holmes and asks
    * what it serves, with a 5 s timeout. Awaiting that on the server would hold up
    * the whole page for an agent that may be unreachable, so the form renders
-   * against `KNOWN_MODELS` and swaps in the live list when it arrives.
+   * without it and fills the select when it arrives. There is no fallback
+   * list: a hardcoded one keeps offering models the agent has deprecated.
    */
   const served = useAdminData<{ models?: string[] }>(
     `/api/admin/monitoring/clusters/${clusterId}/models`,
     [clusterId],
   );
-  const models = served.data?.models?.length
-    ? served.data.models
-    : KNOWN_MODELS;
+  const models = served.data?.models ?? [];
   const [name, setName] = useState(job?.name ?? "");
   const [type, setType] = useState<MonitorCategory>(
     job?.type ?? (startOnCluster ? "performance" : "security"),
@@ -144,7 +142,10 @@ export function JobForm({
   const [depth, setDepth] = useState<MonitorDepth>(
     job?.depth ?? (startOnCluster ? "deep" : "posture"),
   );
-  const [model, setModel] = useState(job?.model ?? models[0] ?? "gpt-5-mini");
+  // A new job defaults to the cluster's first served model once the list
+  // arrives; "" until then, which the server resolves the same way.
+  const [pickedModel, setModel] = useState<string | null>(job?.model ?? null);
+  const model = pickedModel ?? models[0] ?? "";
   const [schedule, setSchedule] = useState(job?.schedule ?? "");
   const [enabled, setEnabled] = useState(job?.enabled ?? true);
   const [targets, setTargets] = useState<AssessmentTarget[]>(
@@ -220,7 +221,7 @@ export function JobForm({
    * of rendering blank and silently saving something else.
    */
   const modelOptions = useMemo(
-    () => (models.includes(model) ? models : [model, ...models]),
+    () => (!model || models.includes(model) ? models : [model, ...models]),
     [models, model],
   );
 
@@ -521,8 +522,10 @@ export function JobForm({
           </select>
           <p className="text-body-sm text-bone-gray">
             A temperature-0 model gives the most comparable results run to run.
-            {!models.includes(model) &&
+            {served.data && model && !models.includes(model) &&
               " This cluster's Holmes does not currently serve the model this job is set to."}
+            {served.error &&
+              ` Could not load this cluster's models (${served.error}).`}
           </p>
         </div>
 

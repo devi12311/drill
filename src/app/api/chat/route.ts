@@ -8,7 +8,8 @@ import {
   getReplayHistory,
 } from "@/lib/db/queries";
 import { fixtureMode, streamHolmes, type StreamOutcome } from "@/lib/holmes/stream";
-import { DEFAULT_MODEL, type HolmesChatRequest } from "@/lib/holmes/types";
+import type { HolmesChatRequest } from "@/lib/holmes/types";
+import { servedModels } from "@/lib/holmes/validate";
 import {
   buildInjectionPrompt,
   RELEVANCE_FLOOR,
@@ -46,8 +47,8 @@ export async function POST(request: Request) {
   if (!body.agent_id) {
     return Response.json({ error: "`agent_id` is required" }, { status: 400 });
   }
-  const model = body.model ?? DEFAULT_MODEL;
 
+  let model = body.model?.trim();
   let conversationId: string;
   let history: Awaited<ReturnType<typeof getReplayHistory>>;
   let agent: Awaited<ReturnType<typeof getAgent>>;
@@ -55,6 +56,20 @@ export async function POST(request: Request) {
     agent = await getAgent(user.id, body.agent_id);
     if (!agent) {
       return Response.json({ error: "Agent not found" }, { status: 404 });
+    }
+    // No model given → the agent's default (first served). Drill keeps no
+    // default of its own; it would outlive the agent's modelList.
+    if (!model) {
+      try {
+        model = (await servedModels(agent.url, agent.apiKey))[0];
+      } catch (err) {
+        return Response.json(
+          {
+            error: `No model given and the agent could not list its models: ${err instanceof Error ? err.message : String(err)}`,
+          },
+          { status: 502 },
+        );
+      }
     }
     if (body.conversation_id) {
       const conversation = await getConversation(user.id, body.conversation_id);

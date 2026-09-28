@@ -1,7 +1,6 @@
 import { getAuthUser, unauthorized } from "@/lib/auth/session";
 import { getAgent } from "@/lib/db/queries";
-import { validateAgent } from "@/lib/holmes/validate";
-import { KNOWN_MODELS } from "@/lib/holmes/types";
+import { servedModels } from "@/lib/holmes/validate";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -14,8 +13,11 @@ export async function GET(_request: Request, context: Context) {
     return Response.json({ error: "Agent not found" }, { status: 404 });
   }
   try {
-    return Response.json({ models: await validateAgent(agent.url, agent.apiKey) });
-  } catch {
-    return Response.json({ models: KNOWN_MODELS });
+    return Response.json({ models: await servedModels(agent.url, agent.apiKey) });
+  } catch (err) {
+    return Response.json(
+      { models: [], error: err instanceof Error ? err.message : String(err) },
+      { status: 502 },
+    );
   }
 }

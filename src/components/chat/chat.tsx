@@ -21,7 +21,6 @@ import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSession } from "@/components/session/session-provider";
 import { cn } from "@/lib/utils";
 import type { FollowUpAction, ToolCall } from "@/lib/holmes/types";
-import { DEFAULT_MODEL } from "@/lib/holmes/types";
 
 /** Events emitted by /api/chat (SSE data payloads). */
 type StreamEvent =
@@ -55,6 +54,22 @@ function ElapsedTimer() {
   );
 }
 
+/** The agent's served models, in its order; null while loading, [] on failure. */
+function useModels(agentId: string): string[] | null {
+  // Tagged with the agent it came from, so switching agents reads as loading
+  // instead of briefly offering the previous agent's models.
+  const [entry, setEntry] = useState<{ agentId: string; models: string[] } | null>(null);
+  useEffect(() => {
+    fetch(`/api/agents/${agentId}/models`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { models?: string[] } | null) =>
+        setEntry({ agentId, models: body?.models ?? [] }),
+      )
+      .catch(() => setEntry({ agentId, models: [] }));
+  }, [agentId]);
+  return entry?.agentId === agentId ? entry.models : null;
+}
+
 interface LiveState {
   calls: LiveToolCall[];
   aiNote?: string;
@@ -83,7 +98,14 @@ export function Chat({
   const { user } = useSession();
   const [entries, setEntries] = useState<ChatEntry[]>(initialEntries);
   const [live, setLive] = useState<LiveState | null>(null);
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  const models = useModels(agentId);
+  const [pickedModel, setModel] = useState<string | null>(null);
+  // Derived, not stored: the agent's first model IS the default, and a pick
+  // the agent no longer serves (or one from another agent) falls back to it.
+  const model =
+    pickedModel && models?.includes(pickedModel)
+      ? pickedModel
+      : (models?.[0] ?? null);
   const [conversationId, setConversationId] = useState(initialConversationId);
   const [resolveOpen, setResolveOpen] = useState(false);
   const conversationIdRef = useRef<string | null>(initialConversationId);
@@ -104,6 +126,7 @@ export function Chat({
   }, [entries, live]);
 
   async function send(ask: string, preNotice?: string) {
+    if (!model) return;
     setLive({ calls: [], notice: preNotice });
     setEntries((prev) => [
       ...prev,
@@ -359,9 +382,9 @@ export function Chat({
         )}
       >
         <Composer
-          agentId={agentId}
           onSend={send}
           busy={busy}
+          models={models}
           model={model}
           onModelChange={setModel}
         />

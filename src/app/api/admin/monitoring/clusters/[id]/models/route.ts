@@ -1,15 +1,14 @@
 import { forbidden, getAdminActor } from "@/lib/auth/session";
 import { getClusterSecrets } from "@/lib/db/monitoring-queries";
-import { validateAgent } from "@/lib/holmes/validate";
-import { KNOWN_MODELS } from "@/lib/holmes/types";
+import { servedModels } from "@/lib/holmes/validate";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
 
 /**
  * Models offered by THIS cluster's Holmes — the agent that will actually run
- * its jobs. Falls back to the known list rather than failing the job form,
- * mirroring GET /api/models.
+ * its jobs. No fallback list: offering names the agent may no longer serve is
+ * worse than offering none.
  */
 export async function GET(_request: Request, context: Context) {
   if (!(await getAdminActor())) return forbidden();
@@ -18,9 +17,12 @@ export async function GET(_request: Request, context: Context) {
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
   try {
     return Response.json({
-      models: await validateAgent(cluster.holmesUrl, cluster.holmesApiKey),
+      models: await servedModels(cluster.holmesUrl, cluster.holmesApiKey),
     });
-  } catch {
-    return Response.json({ models: KNOWN_MODELS, fallback: true });
+  } catch (err) {
+    return Response.json(
+      { models: [], error: err instanceof Error ? err.message : String(err) },
+      { status: 502 },
+    );
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ArrowUp, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,40 +9,26 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { KNOWN_MODELS } from "@/lib/holmes/types";
-
-function useModels(agentId: string): string[] {
-  const [models, setModels] = useState<string[]>(KNOWN_MODELS);
-  useEffect(() => {
-    fetch(`/api/agents/${agentId}/models`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { models?: string[] } | null) => {
-        if (body?.models?.length) setModels(body.models);
-      })
-      .catch(() => {});
-  }, [agentId]);
-  return models;
-}
-
 export function Composer({
-  agentId,
   onSend,
   busy,
+  models,
   model,
   onModelChange,
 }: {
-  agentId: string;
   onSend: (ask: string) => void;
   busy: boolean;
-  model: string;
+  /** Null while the agent's list is loading. */
+  models: string[] | null;
+  /** Null until the agent has served at least one model. */
+  model: string | null;
   onModelChange: (model: string) => void;
 }) {
   const [value, setValue] = useState("");
-  const models = useModels(agentId);
 
   function submit() {
     const ask = value.trim();
-    if (!ask || busy) return;
+    if (!ask || busy || !model) return;
     setValue("");
     onSend(ask);
   }
@@ -65,11 +51,11 @@ export function Composer({
       <div className="flex items-center justify-between px-3 pb-2.5">
         <DropdownMenu>
           <DropdownMenuTrigger className="flex items-center gap-1.5 rounded-sm px-2 py-1 font-mono text-[12px] text-pale-stone hover:bg-iron-veil hover:text-warm-off-white">
-            {model}
+            {model ?? (models ? "no models available" : "loading models…")}
             <ChevronDown className="size-3" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
-            {models.map((m) => (
+            {(models ?? []).map((m) => (
               <DropdownMenuItem
                 key={m}
                 onSelect={() => onModelChange(m)}
@@ -83,7 +69,7 @@ export function Composer({
         <Button
           size="icon-sm"
           onClick={submit}
-          disabled={busy || !value.trim()}
+          disabled={busy || !model || !value.trim()}
           aria-label="Send"
         >
           <ArrowUp />

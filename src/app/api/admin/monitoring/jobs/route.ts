@@ -2,10 +2,10 @@ import { forbidden, getAdminActor } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   createJob,
-  getClusterSummary,
+  getClusterSecrets,
   replaceJobOverrides,
 } from "@/lib/db/monitoring-queries";
-import { DEFAULT_MODEL } from "@/lib/holmes/types";
+import { servedModels } from "@/lib/holmes/validate";
 import { nextRunAfter, normaliseSchedule } from "@/lib/monitoring/schedule";
 import {
   parseDepth,
@@ -28,10 +28,8 @@ export async function POST(request: Request) {
   const clusterId = typeof body.clusterId === "string" ? body.clusterId : "";
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const type = typeof body.type === "string" ? body.type : "";
-  const model =
-    typeof body.model === "string" && body.model.trim()
-      ? body.model.trim()
-      : DEFAULT_MODEL;
+  const requestedModel =
+    typeof body.model === "string" ? body.model.trim() : "";
   const enabled = body.enabled !== false;
 
   if (!clusterId || !name)
@@ -44,8 +42,25 @@ export async function POST(request: Request) {
       { error: `type must be one of: ${MONITOR_CATEGORIES.join(", ")}` },
       { status: 400 },
     );
-  if (!(await getClusterSummary(clusterId)))
+  const cluster = await getClusterSecrets(clusterId);
+  if (!cluster)
     return Response.json({ error: "Cluster not found" }, { status: 404 });
+
+  // No model given → the cluster's Holmes default (first served), never a
+  // name hardcoded here that the agent may have since deprecated.
+  let model = requestedModel;
+  if (!model) {
+    try {
+      model = (await servedModels(cluster.holmesUrl, cluster.holmesApiKey))[0];
+    } catch (err) {
+      return Response.json(
+        {
+          error: `No model given and the cluster's Holmes could not list its models: ${err instanceof Error ? err.message : String(err)}`,
+        },
+        { status: 502 },
+      );
+    }
+  }
 
   let targets;
   let depth;
