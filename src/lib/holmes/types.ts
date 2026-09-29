@@ -60,8 +60,29 @@ export interface HolmesChatResponse {
   conversation_history: ConversationMessage[];
   tool_calls: ToolCall[];
   follow_up_actions: FollowUpAction[] | null;
-  pending_approvals: unknown;
+  /** Non-empty when Holmes paused for a human decision instead of answering. */
+  pending_approvals: PendingToolApproval[] | null;
+  /**
+   * Drill-only: knowledge-search results computed in the same pause as the
+   * approvals. Holmes needs them back alongside the decisions on resume.
+   */
+  drill_frontend_tool_results?: FrontendToolResult[];
   metadata?: HolmesMetadata;
+}
+
+/** Payload item of the `approval_required` SSE event for backend tools. */
+export interface PendingToolApproval {
+  tool_call_id: string;
+  tool_name: string;
+  description: string;
+  params: Record<string, unknown>;
+}
+
+/** Answer to a PendingToolApproval; `feedback` reaches Holmes only on a denial. */
+export interface ToolApprovalDecision {
+  tool_call_id: string;
+  approved: boolean;
+  feedback?: string;
 }
 
 /** Client-defined tool Holmes may call; `mode: "pause"` suspends the stream. */
@@ -98,6 +119,10 @@ export interface HolmesChatRequest {
   frontend_tools?: FrontendToolDef[];
   /** Resumes a stream paused by a frontend tool call. */
   frontend_tool_results?: FrontendToolResult[];
+  /** Pause on tools named in a toolset's approval_required_tools. */
+  enable_tool_approval?: boolean;
+  /** Resumes a stream paused for approval. */
+  tool_decisions?: ToolApprovalDecision[];
 }
 
 /** Todo item embedded in TodoWrite tool-call params. */

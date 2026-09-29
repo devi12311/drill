@@ -5,10 +5,15 @@ import {
   createConversation,
   getAgent,
   getConversation,
+  getPendingApproval,
   getReplayHistory,
 } from "@/lib/db/queries";
 import { fixtureMode, streamHolmes, type StreamOutcome } from "@/lib/holmes/stream";
-import type { HolmesChatRequest } from "@/lib/holmes/types";
+import type {
+  HolmesChatRequest,
+  HolmesChatResponse,
+  ToolApprovalDecision,
+} from "@/lib/holmes/types";
 import { servedModels } from "@/lib/holmes/validate";
 import {
   buildInjectionPrompt,
@@ -19,8 +24,26 @@ import {
 
 export const maxDuration = 900;
 
+/** How a decision reads in the transcript (stored as the user's turn). */
+function describeDecisions(
+  paused: HolmesChatResponse,
+  decisions: ToolApprovalDecision[],
+): string {
+  return decisions
+    .map((d) => {
+      const name =
+        paused.pending_approvals?.find((a) => a.tool_call_id === d.tool_call_id)
+          ?.tool_name ?? "tool";
+      if (d.approved) return `Approved ${name}`;
+      return d.feedback ? `Denied ${name}: ${d.feedback}` : `Denied ${name}`;
+    })
+    .join("\n");
+}
+
 /**
- * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }.
+ * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }, or
+ * { tool_decisions, agent_id, conversation_id, model? } to answer a paused
+ * tool approval (see lib/holmes/stream.ts).
  * Responds with an SSE stream of DrillEvents (see lib/holmes/stream.ts).
  * The first event is `meta` carrying the conversation id; `done` carries the
  * final response (without conversation_history — the server owns history).
@@ -34,15 +57,30 @@ export async function POST(request: Request) {
     model?: string;
     agent_id?: string;
     conversation_id?: string;
+    tool_decisions?: ToolApprovalDecision[];
   };
   try {
     body = await request.json();
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+  const decisions = Array.isArray(body.tool_decisions)
+    ? body.tool_decisions.map((d) => ({
+        tool_call_id: String(d.tool_call_id),
+        approved: d.approved === true,
+        ...(d.approved !== true &&
+          d.feedback?.trim() && { feedback: d.feedback.trim() }),
+      }))
+    : null;
   const ask = body.ask?.trim();
-  if (!ask) {
+  if (!ask && !decisions?.length) {
     return Response.json({ error: "`ask` is required" }, { status: 400 });
+  }
+  if (decisions && !body.conversation_id) {
+    return Response.json(
+      { error: "`tool_decisions` needs a `conversation_id`" },
+      { status: 400 },
+    );
   }
   if (!body.agent_id) {
     return Response.json({ error: "`agent_id` is required" }, { status: 400 });
@@ -51,6 +89,7 @@ export async function POST(request: Request) {
   let model = body.model?.trim();
   let conversationId: string;
   let history: Awaited<ReturnType<typeof getReplayHistory>>;
+  let paused: HolmesChatResponse | null = null;
   let agent: Awaited<ReturnType<typeof getAgent>>;
   try {
     agent = await getAgent(user.id, body.agent_id);
@@ -80,13 +119,38 @@ export async function POST(request: Request) {
         );
       }
       conversationId = conversation.id;
-      history = await getReplayHistory(conversationId);
+      if (decisions) {
+        paused = await getPendingApproval(conversationId);
+        const pendingIds = new Set(
+          paused?.pending_approvals?.map((a) => a.tool_call_id),
+        );
+        if (
+          !paused ||
+          decisions.length !== pendingIds.size ||
+          !decisions.every((d) => pendingIds.has(d.tool_call_id))
+        ) {
+          return Response.json(
+            { error: "No matching tool approval is pending in this conversation" },
+            { status: 409 },
+          );
+        }
+      } else {
+        history = await getReplayHistory(conversationId);
+      }
     } else {
       conversationId = (
-        await createConversation({ userId: user.id, agentId: agent.id, ask, model })
+        await createConversation({
+          userId: user.id,
+          agentId: agent.id,
+          ask: ask!,
+          model,
+        })
       ).id;
     }
-    await addUserMessage(conversationId, ask);
+    await addUserMessage(
+      conversationId,
+      paused ? describeDecisions(paused, decisions!) : ask!,
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return Response.json(
@@ -100,11 +164,26 @@ export async function POST(request: Request) {
   // Knowledge integration (live only): inject the top similar resolutions
   // into the system prompt and let Holmes search deeper via the frontend
   // tool. Search failures must never block an investigation.
-  const holmesReq: HolmesChatRequest = { ask, model, conversation_history: history };
+  // A decision resumes Holmes's paused history with no new user turn (empty
+  // `ask`); knowledge injection only applies to a fresh question.
+  const holmesReq: HolmesChatRequest = paused
+    ? {
+        ask: "",
+        model,
+        conversation_history: paused.conversation_history,
+        tool_decisions: decisions!,
+        ...(paused.drill_frontend_tool_results && {
+          frontend_tool_results: paused.drill_frontend_tool_results,
+        }),
+      }
+    : { ask: ask!, model, conversation_history: history };
   if (!fixtureMode()) {
+    holmesReq.enable_tool_approval = true;
     holmesReq.frontend_tools = [SEARCH_TOOL_DEF];
+  }
+  if (!fixtureMode() && !paused) {
     try {
-      const hits = (await searchArtifacts(ask, { limit: 3 })).filter(
+      const hits = (await searchArtifacts(ask!, { limit: 3 })).filter(
         (h) => h.score >= RELEVANCE_FLOOR,
       );
       if (hits.length) {

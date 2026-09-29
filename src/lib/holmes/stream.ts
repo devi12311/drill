@@ -8,6 +8,7 @@ import type {
   HolmesChatRequest,
   HolmesChatResponse,
   PendingFrontendToolCall,
+  PendingToolApproval,
   ToolCall,
 } from "./types";
 
@@ -116,6 +117,11 @@ export async function* parseSse(
  * server-side, emits it as a regular tool_start/tool_result pair (so the
  * timeline and persistence need no special casing), and resumes with a new
  * POST carrying `frontend_tool_results` + Holmes's paused history.
+ *
+ * Tool approvals: a pause that also carries `pending_approvals` ends the
+ * stream with a `done` whose response has them set. That response (with the
+ * paused history) is persisted; the user's decision comes back as a new
+ * /api/chat request with `tool_decisions`, which resumes from it.
  */
 async function* liveStream(
   req: HolmesChatRequest,
@@ -194,7 +200,8 @@ async function* liveStream(
             tool_calls: toolCalls,
             follow_up_actions: (payload.follow_up_actions ??
               null) as HolmesChatResponse["follow_up_actions"],
-            pending_approvals: payload.pending_approvals ?? null,
+            pending_approvals: (payload.pending_approvals ??
+              null) as HolmesChatResponse["pending_approvals"],
             metadata: payload.metadata as HolmesChatResponse["metadata"],
           };
           outcome.response = response;
@@ -208,15 +215,12 @@ async function* liveStream(
           return;
         }
         case "approval_required": {
-          const pending = payload.pending_frontend_tool_calls as
-            | PendingFrontendToolCall[]
-            | undefined;
-          if (!Array.isArray(pending) || pending.length === 0) {
-            // Backend tool approvals are disabled in this deployment; a
-            // pause without frontend calls is unrecoverable for Drill.
-            throw new Error(
-              "Holmes paused for tool approval — approvals are not supported by Drill",
-            );
+          const pending = (payload.pending_frontend_tool_calls ??
+            []) as PendingFrontendToolCall[];
+          const approvals = (payload.pending_approvals ??
+            []) as PendingToolApproval[];
+          if (pending.length === 0 && approvals.length === 0) {
+            throw new Error("Holmes paused with nothing pending");
           }
           const results: FrontendToolResult[] = [];
           for (const call of pending) {
@@ -242,6 +246,29 @@ async function* liveStream(
             yield { type: "tool_result", toolCall };
             results.push({ tool_call_id: id, tool_name: name, result: resultData });
           }
+          if (approvals.length > 0) {
+            const response: HolmesChatResponse = {
+              analysis: "",
+              conversation_history: (payload.conversation_history ??
+                []) as ConversationMessage[],
+              tool_calls: toolCalls,
+              follow_up_actions: null,
+              pending_approvals: approvals,
+              ...(results.length && { drill_frontend_tool_results: results }),
+            };
+            outcome.response = response;
+            const {
+              conversation_history: _history,
+              drill_frontend_tool_results: _results,
+              ...clientResponse
+            } = response;
+            yield {
+              type: "done",
+              response: clientResponse,
+              drill_duration_ms: Date.now() - started,
+            };
+            return;
+          }
           resume = {
             history: (payload.conversation_history ??
               []) as ConversationMessage[],
@@ -264,6 +291,7 @@ async function* liveStream(
     if (!resume) throw new Error("Holmes stream ended without ai_answer_end");
     body = {
       ...req, // keeps ask, model, frontend_tools, additional_system_prompt
+      tool_decisions: undefined, // already redeemed in the previous round
       stream: true,
       conversation_history: resume.history, // Holmes's own paused state
       frontend_tool_results: resume.results,

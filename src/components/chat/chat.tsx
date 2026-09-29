@@ -20,7 +20,11 @@ import { LiveTimeline, type LiveToolCall } from "./tool-timeline";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSession } from "@/components/session/session-provider";
 import { cn } from "@/lib/utils";
-import type { FollowUpAction, ToolCall } from "@/lib/holmes/types";
+import type {
+  FollowUpAction,
+  ToolApprovalDecision,
+  ToolCall,
+} from "@/lib/holmes/types";
 
 /** Events emitted by /api/chat (SSE data payloads). */
 type StreamEvent =
@@ -125,19 +129,43 @@ export function Chat({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries, live]);
 
-  async function send(ask: string, preNotice?: string) {
+  function send(ask: string, preNotice?: string) {
+    return run(ask, { ask }, preNotice);
+  }
+
+  /** Answers the pending approval; the summary mirrors what the server stores. */
+  function decide(decisions: ToolApprovalDecision[]) {
+    const pending =
+      entries[entries.length - 1]?.response?.pending_approvals ?? [];
+    const summary = decisions
+      .map((d) => {
+        const name =
+          pending.find((a) => a.tool_call_id === d.tool_call_id)?.tool_name ??
+          "tool";
+        if (d.approved) return `Approved ${name}`;
+        return d.feedback ? `Denied ${name}: ${d.feedback}` : `Denied ${name}`;
+      })
+      .join("\n");
+    return run(summary, { tool_decisions: decisions });
+  }
+
+  async function run(
+    userLine: string,
+    payload: { ask: string } | { tool_decisions: ToolApprovalDecision[] },
+    preNotice?: string,
+  ) {
     if (!model) return;
     setLive({ calls: [], notice: preNotice });
     setEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: "user", ask },
+      { id: crypto.randomUUID(), role: "user", ask: userLine },
     ]);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ask,
+          ...payload,
           model,
           agent_id: agentId,
           conversation_id: conversationIdRef.current ?? undefined,
@@ -342,7 +370,7 @@ export function Chat({
             </div>
           ) : (
             <div className="space-y-8 py-8">
-              {entries.map((entry) =>
+              {entries.map((entry, i) =>
                 entry.role === "user" ? (
                   <UserMessage key={entry.id} ask={entry.ask!} />
                 ) : (
@@ -350,7 +378,9 @@ export function Chat({
                     key={entry.id}
                     entry={entry}
                     onFollowUp={onFollowUp}
+                    onDecide={decide}
                     busy={busy}
+                    isLatest={i === entries.length - 1}
                   />
                 ),
               )}

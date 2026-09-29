@@ -502,7 +502,8 @@ async function askHolmes(
         follow_up_actions:
           (payload.follow_up_actions as HolmesChatResponse["follow_up_actions"]) ??
           null,
-        pending_approvals: payload.pending_approvals ?? null,
+        pending_approvals: (payload.pending_approvals ??
+              null) as HolmesChatResponse["pending_approvals"],
         metadata: payload.metadata as HolmesChatResponse["metadata"],
       };
     }

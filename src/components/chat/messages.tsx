@@ -2,7 +2,12 @@
 
 import { Markdown } from "./markdown";
 import { ToolTimeline } from "./tool-timeline";
-import type { FollowUpAction, HolmesChatResponse } from "@/lib/holmes/types";
+import { ApprovalCard } from "./approval-card";
+import type {
+  FollowUpAction,
+  HolmesChatResponse,
+  ToolApprovalDecision,
+} from "@/lib/holmes/types";
 
 export interface ChatEntry {
   id: string;
@@ -82,11 +87,16 @@ export function FollowUpChips({
 export function AssistantMessage({
   entry,
   onFollowUp,
+  onDecide,
   busy,
+  isLatest,
 }: {
   entry: ChatEntry;
   onFollowUp: (action: FollowUpAction) => void;
+  onDecide: (decisions: ToolApprovalDecision[]) => void;
   busy: boolean;
+  /** Only the latest entry's pending approval can still be answered. */
+  isLatest: boolean;
 }) {
   if (entry.error) {
     return (
@@ -104,6 +114,13 @@ export function AssistantMessage({
     <div className="space-y-4">
       <ToolTimeline toolCalls={response.tool_calls ?? []} />
       <Markdown>{response.analysis}</Markdown>
+      {!!response.pending_approvals?.length && (
+        <ApprovalCard
+          approvals={response.pending_approvals}
+          actionable={isLatest && !busy}
+          onDecide={onDecide}
+        />
+      )}
       <FollowUpChips
         actions={response.follow_up_actions ?? []}
         onPick={onFollowUp}

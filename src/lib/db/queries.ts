@@ -190,6 +190,30 @@ export async function getReplayHistory(
   return undefined;
 }
 
+/**
+ * The paused Holmes state awaiting a tool approval, or null when the latest
+ * assistant message is not a pause (answered, errored, or already decided).
+ */
+export async function getPendingApproval(
+  conversationId: string,
+): Promise<HolmesChatResponse | null> {
+  const [row] = await db
+    .select({ raw: messages.rawResponse })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        eq(messages.role, "assistant"),
+      ),
+    )
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+  const raw = row?.raw as HolmesChatResponse | null | undefined;
+  return raw?.pending_approvals?.length && raw.conversation_history?.length
+    ? raw
+    : null;
+}
+
 export async function addUserMessage(conversationId: string, ask: string) {
   await db
     .insert(messages)
