@@ -4,6 +4,7 @@ import type {
   MonitorCategory,
   MonitorDepth,
   ObservationSource,
+  RunStatus,
   Severity,
   TargetKind,
   WorkloadTechnology,
@@ -159,11 +160,12 @@ export const OBSERVATION_SOURCE_LABEL: Record<ObservationSource, string> = {
   code: "Code",
 };
 
-export const RUN_STATUS_CLASS: Record<string, string> = {
+export const RUN_STATUS_CLASS: Record<RunStatus, string> = {
   queued: "text-bone-gray",
   running: "text-traffic-yellow",
   completed: "text-traffic-green",
   failed: "text-traffic-red",
+  cancelled: "text-bone-gray",
 };
 
 /** Worst severity in a list, for cluster/job rollup dots. */

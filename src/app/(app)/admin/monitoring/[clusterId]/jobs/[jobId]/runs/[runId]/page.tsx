@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { Card } from "@/components/ui/card";
+import { RunProgress } from "@/components/monitoring/run-progress";
 import { RunPrompts } from "@/components/monitoring/run-prompts";
 import { SeverityBadge } from "@/components/monitoring/severity-badge";
 import { formatDateTime, formatDuration, formatUsd } from "@/lib/admin/format";
@@ -10,6 +11,7 @@ import {
   getRun,
   getRunFindings,
   getRunObservations,
+  runProgress,
   runPromptIndex,
 } from "@/lib/db/monitoring-queries";
 import { checkSummaries } from "@/lib/monitoring/checks";
@@ -60,17 +62,53 @@ export default async function RunPage({
 }) {
   const { clusterId, jobId, runId } = await params;
   if (!isUuid(jobId) || !isUuid(runId)) notFound();
-  const [runRow, findings, observations, catalogue, prompts] =
+  const [runRow, findings, observations, catalogue, prompts, progress] =
     await Promise.all([
       getRun(runId),
       getRunFindings(runId),
       getRunObservations(runId),
       checkSummaries(),
       runPromptIndex(runId),
+      runProgress(runId),
     ]);
   if (!runRow) notFound();
 
   const run = runRow;
+  const chrome = (
+    <>
+      <Link
+        href={`/admin/monitoring/${clusterId}/jobs/${jobId}`}
+        className="inline-flex items-center gap-1.5 text-body-sm text-bone-gray hover:text-warm-off-white"
+      >
+        <ArrowLeft className="size-3.5" />
+        Back to job
+      </Link>
+
+      <AdminPageHeader
+        title={`Run — ${formatDateTime(run.finishedAt ?? run.createdAt)}`}
+        description={
+          <>
+            <span className={RUN_STATUS_CLASS[run.status]}>{run.status}</span>
+            {" · "}
+            {run.trigger} · {run.model ?? "—"} ·{" "}
+            {run.durationMs ? formatDuration(run.durationMs) : "—"} ·{" "}
+            {run.costUsd === null ? "—" : formatUsd(run.costUsd)}
+          </>
+        }
+      />
+    </>
+  );
+
+  // Nothing below means anything until the run ends — an unfinished run used to
+  // render "Nothing failed in this run", which reads as a clean pass.
+  if ((run.status === "queued" || run.status === "running") && progress)
+    return (
+      <div className="space-y-8">
+        {chrome}
+        <RunProgress key={runId} runId={runId} initial={progress} />
+      </div>
+    );
+
   /**
    * What the run was SUPPOSED to measure, sent alongside what it did measure so the
    * page can name the missing readings — a measurement that never came back is the
@@ -122,35 +160,26 @@ export default async function RunPage({
 
   return (
     <div className="space-y-8">
-      <Link
-        href={`/admin/monitoring/${clusterId}/jobs/${jobId}`}
-        className="inline-flex items-center gap-1.5 text-body-sm text-bone-gray hover:text-warm-off-white"
-      >
-        <ArrowLeft className="size-3.5" />
-        Back to job
-      </Link>
-
-      <AdminPageHeader
-        title={`Run — ${formatDateTime(run.finishedAt ?? run.createdAt)}`}
-        description={
-          <>
-            <span className={RUN_STATUS_CLASS[run.status] ?? ""}>
-              {run.status}
-            </span>
-            {" · "}
-            {run.trigger} · {run.model ?? "—"} ·{" "}
-            {run.durationMs ? formatDuration(run.durationMs) : "—"} ·{" "}
-            {run.costUsd === null ? "—" : formatUsd(run.costUsd)}
-          </>
-        }
-      />
+      {chrome}
 
       {run.error && (
-        <Card className="border-traffic-red/40 p-4">
+        <Card
+          className={
+            run.status === "cancelled"
+              ? "p-4"
+              : "border-traffic-red/40 p-4"
+          }
+        >
           <p className="text-caption-tracked uppercase text-bone-gray">
-            Run failed
+            {run.status === "cancelled" ? "Run cancelled" : "Run failed"}
+            {/* Reconciled anyway: a run cut short still keeps what finished. */}
+            {run.findingsNew !== null && " — partial results below"}
           </p>
-          <p className="mt-1 text-body-sm text-traffic-red">{run.error}</p>
+          <p
+            className={`mt-1 text-body-sm ${run.status === "cancelled" ? "text-pale-stone" : "text-traffic-red"}`}
+          >
+            {run.error}
+          </p>
         </Card>
       )}
 
@@ -175,7 +204,9 @@ export default async function RunPage({
         </h2>
         {findings.length === 0 ? (
           <p className="text-body-sm text-bone-gray">
-            Nothing failed in this run.
+            {run.findingsNew === null
+              ? "No results — the run ended before anything was assessed."
+              : "Nothing failed in this run."}
           </p>
         ) : (
           <div className="space-y-1.5">

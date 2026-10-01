@@ -4,32 +4,18 @@ import {
   enqueueRun,
   getJob,
   hasActiveRun,
-  reapStaleRuns,
 } from "@/lib/db/monitoring-queries";
-import { STALE_RUN_MS, executeRunNow } from "@/lib/monitoring/runner";
-
-// Kept for the enqueue path itself, which is fast. The investigation deliberately
-// does NOT run inside this request any more — see the handler.
-export const maxDuration = 900;
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
 
 /**
- * Run a job now: enqueue, start executing, and return IMMEDIATELY with the queued
- * run. The client polls the job's run list for the result.
+ * Run a job now: enqueue it and return `202` with the queued run. That is all.
  *
- * This replaces awaiting the investigation inside the request (the original
- * behaviour, and the pattern /api/chat still uses). A deep run is one full
- * investigation per workload with a 20-minute allowance each, so it routinely
- * outlives any HTTP request budget — awaiting it meant the browser saw a network
- * error while the run was still healthy and, worse, invited a client-side retry
- * against work that was already being paid for.
- *
- * The floating promise is deliberate and is not a new failure mode: `executeRunNow`
- * already guards every throw into `failRun`, and a process that dies mid-run leaves
- * the row `running` for the reaper — exactly what happened before when the browser
- * walked away.
+ * The investigation is executed by the monitoring worker (lib/monitoring/worker.ts),
+ * never by this request or this process — a deep run outlives any request budget,
+ * and running it in the web server meant a UI deploy killed it. The page learns
+ * about progress by polling the run, not by waiting here.
  */
 export async function POST(_request: Request, context: Context) {
   const actor = await getAdminActor();
@@ -43,11 +29,8 @@ export async function POST(_request: Request, context: Context) {
       { error: "This job has no target workloads yet" },
       { status: 422 },
     );
-  // Clear abandoned runs before the "already running" check. A browser that
-  // walked away mid-run leaves the row `running`, and without this that job
-  // could never be run again — the scheduler tick normally reaps, but it is not
-  // deployed in v1.
-  await reapStaleRuns(STALE_RUN_MS);
+  // A run whose worker died is closed by the worker's reaper within a couple of
+  // minutes (it watches heartbeats), so this refusal is never a long lockout.
   if (await hasActiveRun(id))
     return Response.json(
       { error: "A run for this job is already queued or in progress" },
@@ -64,11 +47,6 @@ export async function POST(_request: Request, context: Context) {
     action: "monitoring.run.triggered",
     metadata: { jobId: id, runId: queued.id, name: job.name },
   });
-
-  // Not awaited: see the note above. `.catch` only guards against an unforeseen
-  // throw escaping the runner's own guard — it must never reject unhandled here,
-  // because there is no request left to attribute the error to.
-  void executeRunNow(queued.id).catch(() => null);
 
   return Response.json({ run: queued }, { status: 202 });
 }

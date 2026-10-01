@@ -21,6 +21,28 @@ import { buildAssessmentPrompt, type AssessmentOutcome } from "./assess";
  * exercises parsing and rejection too, not just the happy shape.
  */
 
+/**
+ * How long one fixture "investigation" takes. A real one takes minutes; an instant
+ * fixture made the progress banner, Cancel and the worker's shutdown path
+ * impossible to see. `HOLMES_FIXTURE_DELAY_MS=0` restores the instant answer.
+ */
+function fixtureDelay(signal?: AbortSignal): Promise<void> {
+  const ms = Number(process.env.HOLMES_FIXTURE_DELAY_MS ?? 8_000);
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
 interface FixtureFinding {
   check_id: string;
   /** Optional override; normally the generator assigns one of the job's targets. */
@@ -97,9 +119,11 @@ export async function fixtureAssessment(input: {
   checks: readonly MonitorCheck[];
   /** Present on a deep run: makes the fixture return measurements too. */
   playbook?: Playbook;
+  signal?: AbortSignal;
 }): Promise<AssessmentOutcome> {
-  const { category, model, targets, checks, playbook } = input;
+  const { category, model, targets, checks, playbook, signal } = input;
   if (targets.length === 0) throw new Error("The job has no target workloads");
+  await fixtureDelay(signal);
 
   const file = path.join(
     process.cwd(),

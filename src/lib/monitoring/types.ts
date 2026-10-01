@@ -128,8 +128,25 @@ export const RUN_STATUSES = [
   "running",
   "completed",
   "failed",
+  "cancelled",
 ] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
+
+/** A run the worker still owns — the only statuses a cancel or a heartbeat can touch. */
+export const ACTIVE_RUN_STATUSES = ["queued", "running"] as const satisfies readonly RunStatus[];
+
+/**
+ * One investigation inside a run: a workload of a deep run, or the single call of a
+ * posture run. `skipped` is a target that had no applicable check, so no call was made.
+ */
+export const RUN_TARGET_STATUSES = [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "skipped",
+] as const;
+export type RunTargetStatus = (typeof RUN_TARGET_STATUSES)[number];
 
 export const RUN_TRIGGERS = ["manual", "schedule"] as const;
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];

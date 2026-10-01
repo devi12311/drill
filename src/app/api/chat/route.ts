@@ -215,6 +215,18 @@ export async function POST(request: Request) {
         }
       };
       send({ type: "meta", conversation_id: convId });
+      // Holmes is silent while one LLM turn runs (a minute or more for a long
+      // answer), and an ingress in front of Drill drops a connection idle for its
+      // read timeout — 60s by default. An SSE comment every 15s keeps the browser's
+      // stream alive; the client parser only reads `data:` lines, so it is inert.
+      const heartbeat = setInterval(() => {
+        if (clientGone) return;
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          clientGone = true;
+        }
+      }, 15_000);
       const outcome: StreamOutcome = { response: null! };
       try {
         for await (const event of streamHolmes(holmesReq, outcome, target)) {
@@ -234,6 +246,7 @@ export async function POST(request: Request) {
           message: err instanceof Error ? err.message : "Unknown error",
         });
       } finally {
+        clearInterval(heartbeat);
         if (!clientGone) {
           try {
             controller.close();

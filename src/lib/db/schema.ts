@@ -18,15 +18,26 @@ import type {
   ExpectedObservations,
   ObservationSpec,
 } from "@/lib/monitoring/playbook";
-import { TARGET_KINDS } from "@/lib/monitoring/types";
+import {
+  RUN_STATUSES,
+  RUN_TARGET_STATUSES,
+  TARGET_KINDS,
+} from "@/lib/monitoring/types";
+import type { EffectiveCheck } from "@/lib/monitoring/checks";
+import type {
+  AssessmentOutcome,
+  AssessmentRunMeta,
+} from "@/lib/monitoring/assess";
 import type {
   ConcernStatus,
   MonitorCategory,
   MonitorDepth,
   MonitorEvidence,
   ObservationSource,
+  ResolvedTarget,
   RunCoverage,
   RunStatus,
+  RunTargetStatus,
   RunTrigger,
   Severity,
   TargetKind,
@@ -438,9 +449,7 @@ export const monitoringRuns = pgTable(
     jobId: uuid("job_id")
       .notNull()
       .references(() => monitoringJobs.id, { onDelete: "cascade" }),
-    status: text("status", {
-      enum: ["queued", "running", "completed", "failed"],
-    })
+    status: text("status", { enum: RUN_STATUSES })
       .$type<RunStatus>()
       .notNull()
       .default("queued"),
@@ -451,6 +460,17 @@ export const monitoringRuns = pgTable(
       onDelete: "set null",
     }),
     claimedAt: timestamp("claimed_at"),
+    /**
+     * Written by the worker every few seconds while it holds the run. The reaper
+     * judges a run dead by THIS going quiet, not by how long the run has taken: a
+     * deep run is legitimately hours long, a dead one is dead within a minute.
+     */
+    heartbeatAt: timestamp("heartbeat_at"),
+    /** Set by Cancel; the worker notices on its next heartbeat and stops. */
+    cancelRequestedAt: timestamp("cancel_requested_at"),
+    cancelledBy: uuid("cancelled_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
     startedAt: timestamp("started_at"),
     finishedAt: timestamp("finished_at"),
     attempt: integer("attempt").notNull().default(0),
@@ -484,6 +504,12 @@ export const monitoringRuns = pgTable(
       ExpectedObservations[]
     >(),
     /**
+     * The effective checks this run was asked, snapshotted when it starts — so
+     * whoever finalizes it (the worker, or the reaper after a crash) reconciles
+     * against the rubric the run actually used, not one edited since.
+     */
+    rubricSnapshot: jsonb("rubric_snapshot").$type<EffectiveCheck[]>(),
+    /**
      * The exact prompt sent, per workload — what the agent was ACTUALLY told.
      *
      * Stored rather than re-rendered on demand, because a playbook edit or a check
@@ -507,6 +533,40 @@ export const monitoringRuns = pgTable(
     // Run history for a job, newest first.
     index("monitoring_runs_job_idx").on(t.jobId, t.createdAt),
   ],
+);
+
+/**
+ * One investigation inside a run, saved the moment it finishes.
+ *
+ * A deep run is one Holmes call per workload over hours; keeping each result only
+ * in the worker's memory meant a restart at workload eight threw away seven paid
+ * assessments. Rows are inserted `pending` when the run starts, so they are also
+ * the run's progress (`done / total`) — there is no separate counter to drift.
+ */
+export const monitoringRunTargets = pgTable(
+  "monitoring_run_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => monitoringRuns.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    /** What the progress line shows, e.g. "sts/rabbitmq" or "12 workloads". */
+    label: text("label").notNull(),
+    /** The targets this call covers: one for a deep run, all of them for posture. */
+    targets: jsonb("targets").$type<ResolvedTarget[]>().notNull(),
+    status: text("status", { enum: RUN_TARGET_STATUSES })
+      .$type<RunTargetStatus>()
+      .notNull()
+      .default("pending"),
+    outcome: jsonb("outcome").$type<AssessmentOutcome>(),
+    /** What a FAILED call still cost and did, so it is counted in the run's totals. */
+    failedMeta: jsonb("failed_meta").$type<AssessmentRunMeta>(),
+    error: text("error"),
+    startedAt: timestamp("started_at"),
+    finishedAt: timestamp("finished_at"),
+  },
+  (t) => [unique().on(t.runId, t.position)],
 );
 
 /**

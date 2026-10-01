@@ -2,28 +2,20 @@ import {
   dueJobs,
   enqueueRun,
   hasActiveRun,
-  reapStaleRuns,
   setNextRunAt,
   unmuteExpired,
 } from "@/lib/db/monitoring-queries";
 import { nextRunAfter } from "@/lib/monitoring/schedule";
+import { reapStaleRuns } from "@/lib/monitoring/runner";
 import { checkSchedulerAuth } from "@/lib/monitoring/scheduler-auth";
-import {
-  STALE_RUN_MS,
-  TICK_CONCURRENCY,
-  drainQueue,
-} from "@/lib/monitoring/runner";
-
-// A tick may execute investigations inline; same budget as /api/chat.
-export const maxDuration = 900;
 
 /**
  * The scheduler entry point, called by a Kubernetes CronJob every minute.
  *
  * Kubernetes owns the timing, Postgres owns the queue: due jobs become `queued`
- * rows, and work is claimed with `FOR UPDATE SKIP LOCKED`, so two overlapping
- * ticks cannot run the same job twice. Scaling out later means pointing a worker
- * Deployment at the same table — this contract does not change.
+ * rows and the monitoring worker executes them. This request never runs an
+ * investigation itself — it used to drain the queue inline, which put an hours-long
+ * deep run inside a CronJob's HTTP call.
  *
  * NOTE (v1): the CronJob is deliberately NOT shipped in the Helm chart yet.
  * This endpoint exists, is authenticated and is safe to curl by hand while
@@ -35,8 +27,9 @@ export async function POST(request: Request) {
 
   const now = new Date();
 
-  // 1. Crash recovery: a pod that died mid-run left the row `running`.
-  const reaped = await reapStaleRuns(STALE_RUN_MS);
+  // 1. Crash recovery: a worker that died mid-run left the row `running`. The
+  // worker reaps too; doing it here as well costs nothing and is race-safe.
+  const reaped = await reapStaleRuns();
 
   // 2. Mute windows that have elapsed become visible again.
   const unmuted = await unmuteExpired();
@@ -58,9 +51,6 @@ export async function POST(request: Request) {
     enqueued++;
   }
 
-  // 4. Execute a bounded slice; whatever is left waits for the next tick.
-  const drained = await drainQueue(TICK_CONCURRENCY);
-
   return Response.json({
     at: now.toISOString(),
     reaped,
@@ -68,7 +58,5 @@ export async function POST(request: Request) {
     due: due.length,
     enqueued,
     skipped,
-    executed: drained.executed,
-    failed: drained.failed,
   });
 }

@@ -6,12 +6,15 @@ import { DataTable, type Column } from "@/components/admin/data-table";
 import { AutoResolvedNotice } from "@/components/monitoring/auto-resolved-notice";
 import { ConcernList } from "@/components/monitoring/concern-list";
 import { JobActions } from "@/components/monitoring/job-actions";
+import { RunProgress } from "@/components/monitoring/run-progress";
 import type { ConcernCheckInfo } from "@/components/monitoring/concern-card";
 import { formatDuration, formatRelative, formatUsd } from "@/lib/admin/format";
 import {
+  activeRun,
   getJob,
   listConcerns,
   listRuns,
+  runProgress,
   type RunRow,
 } from "@/lib/db/monitoring-queries";
 import { checkSummaries } from "@/lib/monitoring/checks";
@@ -40,13 +43,17 @@ export default async function JobPage({
   if (!isUuid(clusterId) || !isUuid(jobId)) notFound();
   const showAll = (await searchParams).status === "all";
 
-  const [job, concerns, runs, catalogue] = await Promise.all([
+  const [job, concerns, runs, catalogue, activeRunId] = await Promise.all([
     getJob(jobId),
     listConcerns(jobId, showAll ? {} : { statuses: ["open"] }),
     listRuns(jobId, 20),
     checkSummaries(),
+    activeRun(jobId),
   ]);
   if (!job) notFound();
+  // Read here rather than in the banner so it renders on arrival — a reload or a
+  // return visit shows the run, not an idle job.
+  const progress = activeRunId ? await runProgress(activeRunId) : null;
 
   /**
    * Only the checks these concerns cite. The whole catalogue used to travel with
@@ -93,7 +100,7 @@ export default async function JobPage({
       key: "status",
       header: "Status",
       render: (r) => (
-        <span className={RUN_STATUS_CLASS[r.status] ?? "text-bone-gray"}>
+        <span className={RUN_STATUS_CLASS[r.status]}>
           {r.status}
         </span>
       ),
@@ -102,9 +109,11 @@ export default async function JobPage({
       key: "findings",
       header: "New / resolved / open",
       align: "right",
+      // Present on any run that reconciled — including one cancelled or cut short
+      // after some workloads finished, whose findings are just as real.
       render: (r) =>
-        r.status === "completed"
-          ? `${r.findingsNew ?? 0} / ${r.findingsResolved ?? 0} / ${r.findingsOpen ?? 0}`
+        r.findingsNew !== null
+          ? `${r.findingsNew} / ${r.findingsResolved ?? 0} / ${r.findingsOpen ?? 0}`
           : "—",
     },
     {
@@ -148,9 +157,20 @@ export default async function JobPage({
         <JobActions
           clusterId={clusterId}
           jobId={jobId}
-          scopeNote={scopeNote}
+          active={activeRunId !== null}
         />
       </AdminPageHeader>
+
+      {activeRunId && progress && (
+        <RunProgress
+          // Remounts for the next run instead of carrying the last one's state.
+          key={activeRunId}
+          runId={activeRunId}
+          initial={progress}
+          runHref={`/admin/monitoring/${clusterId}/jobs/${jobId}/runs/${activeRunId}`}
+          note={scopeNote}
+        />
+      )}
 
       <AutoResolvedNotice />
 

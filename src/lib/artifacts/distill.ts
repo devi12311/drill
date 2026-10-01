@@ -1,5 +1,5 @@
 import "server-only";
-import type { AgentTarget } from "@/lib/holmes/stream";
+import { completeHolmesChat, type AgentTarget } from "@/lib/holmes/sse";
 import { parseArtifactDraft, type ArtifactDraft } from "./types";
 
 const DISTILL_TIMEOUT_MS = 120_000;
@@ -186,30 +186,12 @@ async function askHolmes(
   model: string,
   ask: string,
 ): Promise<string> {
-  const base = agent.url.replace(/\/$/, "");
-  const res = await fetch(`${base}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${agent.apiKey}`,
-    },
-    body: JSON.stringify({
-      ask,
-      model,
-      stream: false,
-      response_format: ARTIFACT_RESPONSE_FORMAT,
-    }),
-    signal: AbortSignal.timeout(DISTILL_TIMEOUT_MS),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Holmes API ${res.status}: ${body.slice(0, 300)}`);
-  }
-  const data = (await res.json()) as { analysis?: unknown };
-  if (typeof data.analysis !== "string")
-    throw new Error("Holmes response has no analysis");
-  return data.analysis;
+  const response = await completeHolmesChat(
+    agent,
+    { ask, model, response_format: ARTIFACT_RESPONSE_FORMAT },
+    DISTILL_TIMEOUT_MS,
+  );
+  return response.analysis;
 }
 
 /**

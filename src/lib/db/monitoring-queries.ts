@@ -10,7 +10,9 @@ import {
   isNull,
   lt,
   lte,
+  or,
   sql,
+  TransactionRollbackError,
 } from "drizzle-orm";
 import { db } from "./index";
 import {
@@ -23,11 +25,13 @@ import {
   monitoringObservations,
   monitoringPlaybooks,
   monitoringRunFindings,
+  monitoringRunTargets,
   monitoringRuns,
   monitoringWorkloads,
 } from "./schema";
 import { PROFILED_TECHNOLOGIES } from "@/lib/monitoring/profiles";
 import {
+  ACTIVE_RUN_STATUSES,
   CLUSTER_TECHNOLOGY,
   DISMISSED_STATUSES,
   isClusterTarget,
@@ -36,6 +40,11 @@ import type {
   ExpectedObservations,
   ObservationSpec,
 } from "@/lib/monitoring/playbook";
+import type { EffectiveCheck } from "@/lib/monitoring/checks";
+import type {
+  AssessmentOutcome,
+  AssessmentRunMeta,
+} from "@/lib/monitoring/assess";
 import type {
   AssessmentObservation,
   AssessmentTarget,
@@ -44,6 +53,7 @@ import type {
   MonitorDepth,
   ResolvedTarget,
   RunCoverage,
+  RunStatus,
   RunTrigger,
   Severity,
   TargetKind,
@@ -904,7 +914,7 @@ export async function getJobExecutionContext(jobId: string) {
 export interface RunRow {
   id: string;
   jobId: string;
-  status: string;
+  status: RunStatus;
   trigger: RunTrigger;
   startedAt: Date | null;
   finishedAt: Date | null;
@@ -954,9 +964,16 @@ export async function enqueueRun(input: {
 }
 
 /**
+ * Stamped at claim time so a run that fails before Holmes answers still says which
+ * model it asked for; completion overwrites it with the model that actually ran.
+ */
+const JOB_MODEL = sql`(select ${monitoringJobs.model} from ${monitoringJobs} where ${monitoringJobs.id} = ${monitoringRuns.jobId})`;
+
+/**
  * Atomically claim up to `limit` queued runs. `FOR UPDATE SKIP LOCKED` is what
- * makes overlapping scheduler ticks (and, later, multiple worker replicas)
- * safe: a row can only be claimed once.
+ * makes several worker replicas safe: a row can only be claimed once. The first
+ * heartbeat is stamped with the claim, so a worker that dies before its heartbeat
+ * timer ever fires is still reapable.
  */
 export async function claimQueuedRuns(
   limit: number,
@@ -966,7 +983,9 @@ export async function claimQueuedRuns(
       status = 'running',
       claimed_at = now(),
       started_at = now(),
-      attempt = ${monitoringRuns.attempt} + 1
+      heartbeat_at = now(),
+      attempt = ${monitoringRuns.attempt} + 1,
+      model = ${JOB_MODEL}
     where id in (
       select id from ${monitoringRuns}
       where status = 'queued'
@@ -983,26 +1002,9 @@ export async function claimQueuedRuns(
 }
 
 /**
- * Claim ONE specific run — what the "Run now" button needs, since the generic
- * queue drain would happily pick up somebody else's older queued run instead.
- * Returns null when the run is already claimed or no longer queued.
+ * End a run without findings. Guarded on `running` so it can never overwrite a run
+ * that another finalizer (the reaper, a cancel) already closed.
  */
-export async function claimRun(
-  runId: string,
-): Promise<{ id: string; jobId: string } | null> {
-  const rows = await db.execute(sql`
-    update ${monitoringRuns} set
-      status = 'running',
-      claimed_at = now(),
-      started_at = now(),
-      attempt = ${monitoringRuns.attempt} + 1
-    where id = ${runId} and status = 'queued'
-    returning id, job_id
-  `);
-  const claimed = (rows as unknown as { id: string; job_id: string }[])[0];
-  return claimed ? { id: claimed.id, jobId: claimed.job_id } : null;
-}
-
 export async function failRun(
   id: string,
   error: string,
@@ -1014,103 +1016,269 @@ export async function failRun(
     rawResponse: unknown;
     toolCallsTotal: number;
     toolCallsFailed: number;
+    prompts: { target: string; prompt: string }[];
   }> = {},
+  status: "failed" | "cancelled" = "failed",
 ) {
   await db
     .update(monitoringRuns)
     .set({
-      status: "failed",
+      status,
       error: error.slice(0, 4000),
       finishedAt: new Date(),
       ...extra,
     })
-    .where(eq(monitoringRuns.id, id));
+    .where(
+      and(eq(monitoringRuns.id, id), eq(monitoringRuns.status, "running")),
+    );
 }
 
 /**
- * Crash recovery: a pod that dies mid-run leaves the row `running` forever.
- * Called at the top of every scheduler tick.
+ * Runs whose worker has gone quiet: `running`, and no heartbeat for `quietMs`.
  *
- * The threshold is per depth, because the two depths have honestly different
- * plausible durations: a posture run is one Holmes call, while a deep run is one
- * call per workload and legitimately takes far longer. Using the posture threshold
- * for both would reap healthy deep runs mid-flight and then re-enqueue them, which
- * is a way to spend money on assessments that are thrown away.
+ * Judged by the heartbeat rather than by age, because age cannot tell a healthy
+ * five-hour deep run from a dead one — the old per-depth thresholds had to wait
+ * six hours to be sure. `claimed_at` covers rows claimed before heartbeats existed.
  */
-export async function reapStaleRuns(thresholds: {
-  postureMs: number;
-  deepMs: number;
-}): Promise<number> {
-  const now = Date.now();
-  const counts = await Promise.all(
-    (
-      [
-        ["posture", thresholds.postureMs],
-        ["deep", thresholds.deepMs],
-      ] as const
-    ).map(([depth, ms]) => reapRunsForDepth(depth, new Date(now - ms))),
-  );
-  return counts.reduce((total, n) => total + n, 0);
-}
-
-/**
- * Deliberately two statements with `lt()` and a subquery rather than one with a
- * raw `case` expression: a JS `Date` interpolated into a raw `sql` template does
- * NOT get the column's type mapper applied and reaches Postgres as
- * "Mon Aug 10 2026 …" (docs/DECISIONS.md 53 — this exact bug broke the original
- * reaper).
- */
-async function reapRunsForDepth(
-  depth: MonitorDepth,
-  cutoff: Date,
-): Promise<number> {
+export async function staleRunIds(quietMs: number): Promise<string[]> {
+  const cutoff = new Date(Date.now() - quietMs);
   const rows = await db
-    .update(monitoringRuns)
-    .set({
-      status: "failed",
-      error: "Run abandoned — the executing process disappeared",
-      finishedAt: new Date(),
-    })
+    .select({ id: monitoringRuns.id })
+    .from(monitoringRuns)
     .where(
       and(
         eq(monitoringRuns.status, "running"),
-        lt(monitoringRuns.startedAt, cutoff),
-        inArray(
-          monitoringRuns.jobId,
-          db
-            .select({ id: monitoringJobs.id })
-            .from(monitoringJobs)
-            .where(eq(monitoringJobs.depth, depth)),
+        // Two column comparisons rather than `lt(sql\`coalesce(…)\`, cutoff)`: a
+        // Date compared to a raw expression skips the column's type mapper and
+        // fails to serialize (docs/DECISIONS.md 53).
+        or(
+          lt(monitoringRuns.heartbeatAt, cutoff),
+          and(
+            isNull(monitoringRuns.heartbeatAt),
+            lt(monitoringRuns.claimedAt, cutoff),
+          ),
         ),
       ),
-    )
-    .returning({ id: monitoringRuns.id });
-  return rows.length;
+    );
+  return rows.map((r) => r.id);
 }
 
 /**
- * The state of a job's most recent run, and nothing else — what "Run now" polls.
- *
- * Covered by `monitoring_runs_job_idx`; see the route for what this replaced.
+ * The worker's liveness write, which doubles as its cancel check. Null when the
+ * run is no longer `running` — someone else finalized it, and the worker must stop
+ * without writing anything more.
  */
-export async function latestRunStatus(
-  jobId: string,
-): Promise<{ active: boolean; status: string | null; error: string | null }> {
+export async function heartbeatRun(
+  runId: string,
+): Promise<{ cancelRequested: boolean } | null> {
   const [row] = await db
-    .select({
-      status: monitoringRuns.status,
-      error: monitoringRuns.error,
+    .update(monitoringRuns)
+    .set({ heartbeatAt: new Date() })
+    .where(
+      and(eq(monitoringRuns.id, runId), eq(monitoringRuns.status, "running")),
+    )
+    .returning({ cancelRequestedAt: monitoringRuns.cancelRequestedAt });
+  return row ? { cancelRequested: row.cancelRequestedAt !== null } : null;
+}
+
+/**
+ * Cancel a run. A queued run has cost nothing yet and is closed on the spot; a
+ * running one is only FLAGGED, because the worker holding its Holmes stream is the
+ * one that has to abort it and reconcile what already finished.
+ */
+export async function requestCancel(
+  runId: string,
+  actorId: string,
+): Promise<"cancelled" | "requested" | "inactive"> {
+  const now = new Date();
+  const [queued] = await db
+    .update(monitoringRuns)
+    .set({
+      status: "cancelled",
+      cancelRequestedAt: now,
+      cancelledBy: actorId,
+      finishedAt: now,
+      error: "Cancelled before it started",
     })
+    .where(
+      and(eq(monitoringRuns.id, runId), eq(monitoringRuns.status, "queued")),
+    )
+    .returning({ id: monitoringRuns.id });
+  if (queued) return "cancelled";
+  // Idempotent: pressing Cancel again while the worker is still stopping is the
+  // same request, and the first person to press it stays on record.
+  const [running] = await db
+    .update(monitoringRuns)
+    .set({
+      cancelRequestedAt: sql`coalesce(${monitoringRuns.cancelRequestedAt}, now())`,
+      cancelledBy: sql`coalesce(${monitoringRuns.cancelledBy}, ${actorId}::uuid)`,
+    })
+    .where(
+      and(eq(monitoringRuns.id, runId), eq(monitoringRuns.status, "running")),
+    )
+    .returning({ id: monitoringRuns.id });
+  return running ? "requested" : "inactive";
+}
+
+/** A job's queued or running run, if any — what the job page renders a banner for. */
+export async function activeRun(jobId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ id: monitoringRuns.id })
     .from(monitoringRuns)
-    .where(eq(monitoringRuns.jobId, jobId))
+    .where(
+      and(
+        eq(monitoringRuns.jobId, jobId),
+        inArray(monitoringRuns.status, ACTIVE_RUN_STATUSES),
+      ),
+    )
     .orderBy(desc(monitoringRuns.createdAt))
     .limit(1);
-  if (!row) return { active: false, status: null, error: null };
+  return row?.id ?? null;
+}
+
+export interface RunProgress {
+  status: RunStatus;
+  done: number;
+  total: number;
+  /** Label of the investigation in flight, when there is one. */
+  current: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  cancelRequested: boolean;
+  error: string | null;
+  /** When this reading was taken — the clock a client-side elapsed timer starts from. */
+  asOf: string;
+}
+
+/**
+ * What the progress banner polls. Counts come from the saved per-target rows, so
+ * the banner and the reconciliation read the same truth.
+ */
+export async function runProgress(runId: string): Promise<RunProgress | null> {
+  const [[run], targets] = await Promise.all([
+    db
+      .select({
+        status: monitoringRuns.status,
+        createdAt: monitoringRuns.createdAt,
+        startedAt: monitoringRuns.startedAt,
+        heartbeatAt: monitoringRuns.heartbeatAt,
+        cancelRequestedAt: monitoringRuns.cancelRequestedAt,
+        error: monitoringRuns.error,
+      })
+      .from(monitoringRuns)
+      .where(eq(monitoringRuns.id, runId))
+      .limit(1),
+    db
+      .select({
+        status: monitoringRunTargets.status,
+        label: monitoringRunTargets.label,
+      })
+      .from(monitoringRunTargets)
+      .where(eq(monitoringRunTargets.runId, runId))
+      .orderBy(asc(monitoringRunTargets.position)),
+  ]);
+  if (!run) return null;
   return {
-    active: row.status === "queued" || row.status === "running",
-    status: row.status,
-    error: row.error,
+    status: run.status,
+    done: targets.filter((t) => t.status !== "pending" && t.status !== "running")
+      .length,
+    total: targets.length,
+    current: targets.find((t) => t.status === "running")?.label ?? null,
+    createdAt: run.createdAt.toISOString(),
+    startedAt: run.startedAt?.toISOString() ?? null,
+    heartbeatAt: run.heartbeatAt?.toISOString() ?? null,
+    cancelRequested: run.cancelRequestedAt !== null,
+    error: run.error,
+    asOf: new Date().toISOString(),
   };
+}
+
+// ---- Run targets (per-investigation results, saved as they finish) ----
+
+/**
+ * Snapshot what the run will be graded against and lay out its investigations,
+ * in one transaction, before the first Holmes call.
+ */
+export async function prepareRun(
+  runId: string,
+  input: {
+    rubricSnapshot: EffectiveCheck[];
+    expectedObservations: ExpectedObservations[] | null;
+    targets: { label: string; targets: ResolvedTarget[] }[];
+  },
+): Promise<{ id: string; position: number }[]> {
+  return db.transaction(async (tx) => {
+    await tx
+      .update(monitoringRuns)
+      .set({
+        rubricSnapshot: input.rubricSnapshot,
+        expectedObservations: input.expectedObservations,
+      })
+      .where(eq(monitoringRuns.id, runId));
+    return tx
+      .insert(monitoringRunTargets)
+      .values(
+        input.targets.map((t, position) => ({ runId, position, ...t })),
+      )
+      .returning({
+        id: monitoringRunTargets.id,
+        position: monitoringRunTargets.position,
+      });
+  });
+}
+
+export async function startRunTarget(id: string): Promise<void> {
+  await db
+    .update(monitoringRunTargets)
+    .set({ status: "running", startedAt: new Date() })
+    .where(eq(monitoringRunTargets.id, id));
+}
+
+export async function finishRunTarget(
+  id: string,
+  result:
+    | { status: "completed"; outcome: AssessmentOutcome }
+    | { status: "failed" | "skipped"; error: string; failedMeta?: AssessmentRunMeta },
+): Promise<void> {
+  await db
+    .update(monitoringRunTargets)
+    .set({
+      ...result,
+      ...("error" in result ? { error: result.error.slice(0, 4000) } : {}),
+      finishedAt: new Date(),
+    })
+    .where(eq(monitoringRunTargets.id, id));
+}
+
+/** Everything a finalizer needs, read back from the database rather than memory. */
+export async function runForFinalize(runId: string) {
+  const [[run], targets] = await Promise.all([
+    db
+      .select({
+        jobId: monitoringRuns.jobId,
+        clusterId: monitoringJobs.clusterId,
+        category: monitoringJobs.type,
+        status: monitoringRuns.status,
+        rubricSnapshot: monitoringRuns.rubricSnapshot,
+      })
+      .from(monitoringRuns)
+      .innerJoin(monitoringJobs, eq(monitoringJobs.id, monitoringRuns.jobId))
+      .where(eq(monitoringRuns.id, runId))
+      .limit(1),
+    db
+      .select({
+        label: monitoringRunTargets.label,
+        status: monitoringRunTargets.status,
+        outcome: monitoringRunTargets.outcome,
+        failedMeta: monitoringRunTargets.failedMeta,
+        error: monitoringRunTargets.error,
+      })
+      .from(monitoringRunTargets)
+      .where(eq(monitoringRunTargets.runId, runId))
+      .orderBy(asc(monitoringRunTargets.position)),
+  ]);
+  return run ? { ...run, targets } : null;
 }
 
 export async function listRuns(jobId: string, limit = 50): Promise<RunRow[]> {
@@ -1264,16 +1432,7 @@ export async function setNextRunAt(jobId: string, nextRunAt: Date | null) {
  * investigation must never stack up behind itself.
  */
 export async function hasActiveRun(jobId: string): Promise<boolean> {
-  const [row] = await db
-    .select({ n: count() })
-    .from(monitoringRuns)
-    .where(
-      and(
-        eq(monitoringRuns.jobId, jobId),
-        inArray(monitoringRuns.status, ["queued", "running"]),
-      ),
-    );
-  return (row?.n ?? 0) > 0;
+  return (await activeRun(jobId)) !== null;
 }
 
 // ---- Concerns ----
@@ -1497,6 +1656,14 @@ export interface ReconcileResult {
  * Apply a reconciliation plan and finish the run, in ONE transaction — a crash
  * mid-way leaves the run `running` for the reaper rather than a half-updated
  * concern history.
+ *
+ * `final` closes an INTERRUPTED run (cancelled, worker shut down, worker died)
+ * that still has finished investigations to keep: its concerns are reconciled
+ * from what completed, and the run records why it stopped short.
+ *
+ * The closing update only matches a `running` row, and anything else rolls the
+ * whole transaction back — so when the worker and the reaper race to finalize the
+ * same run, the loser changes nothing.
  */
 export async function applyReconcilePlan(
   runId: string,
@@ -1508,8 +1675,6 @@ export async function applyReconcilePlan(
     observations: readonly AssessmentObservation[];
     rejected: string[];
     rawResponse: unknown;
-    /** What the run was told to measure — snapshotted, see the column's comment. */
-    expectedObservations: ExpectedObservations[] | null;
     prompts: { target: string; prompt: string }[];
     model: string;
     costUsd: number | null;
@@ -1518,166 +1683,178 @@ export async function applyReconcilePlan(
     toolCallsTotal: number;
     toolCallsFailed: number;
   },
-): Promise<ReconcileResult> {
+  final?: { status: "failed" | "cancelled"; error: string },
+): Promise<ReconcileResult | null> {
   const { observations, ...runColumns } = runFields;
-  return db.transaction(async (tx) => {
-    const now = new Date();
-    let newCount = 0;
+  try {
+    return await db.transaction(async (tx) => {
+      const now = new Date();
+      let newCount = 0;
 
-    for (const c of plan.present) {
-      const [existing] = await tx
-        .select({
-          id: monitoringConcerns.id,
-          status: monitoringConcerns.status,
-          firstSeenAt: monitoringConcerns.firstSeenAt,
-        })
+      for (const c of plan.present) {
+        const [existing] = await tx
+          .select({
+            id: monitoringConcerns.id,
+            status: monitoringConcerns.status,
+            firstSeenAt: monitoringConcerns.firstSeenAt,
+          })
+          .from(monitoringConcerns)
+          .where(
+            and(
+              eq(monitoringConcerns.jobId, jobId),
+              eq(monitoringConcerns.fingerprint, c.fingerprint),
+            ),
+          )
+          .limit(1);
+
+        const severityMoved = plan.severityChanged.has(c.fingerprint);
+
+        if (!existing) {
+          const [row] = await tx
+            .insert(monitoringConcerns)
+            .values({
+              jobId,
+              ...c,
+              status: "open",
+              firstSeenAt: now,
+              lastSeenAt: now,
+              occurrenceCount: 1,
+              firstSeenRunId: runId,
+              lastSeenRunId: runId,
+            })
+            .returning({ id: monitoringConcerns.id });
+          await tx.insert(monitoringRunFindings).values({
+            runId,
+            concernId: row.id,
+            severity: c.effectiveSeverity,
+            isNew: true,
+          });
+          newCount++;
+          continue;
+        }
+
+        // A human decision (muted / accepted_risk / false_positive) survives:
+        // the concern is still recorded as seen, but never silently reopened.
+        const humanDismissed = DISMISSED_STATUSES.includes(existing.status);
+        await tx
+          .update(monitoringConcerns)
+          .set({
+            effectiveSeverity: c.effectiveSeverity,
+            severityRationale: c.severityRationale,
+            title: c.title,
+            rationale: c.rationale,
+            remediation: c.remediation,
+            evidence: c.evidence,
+            contentHash: c.contentHash,
+            baseSeverity: c.baseSeverity,
+            checkVersion: c.checkVersion,
+            lastSeenAt: now,
+            lastSeenRunId: runId,
+            occurrenceCount: sql`${monitoringConcerns.occurrenceCount} + 1`,
+            consecutiveRunsAbsent: 0,
+            ...(severityMoved ? { severityChangedAt: now } : {}),
+            ...(humanDismissed ? {} : { status: "open" as const }),
+            updatedAt: now,
+          })
+          .where(eq(monitoringConcerns.id, existing.id));
+        await tx
+          .insert(monitoringRunFindings)
+          .values({
+            runId,
+            concernId: existing.id,
+            severity: c.effectiveSeverity,
+            isNew: false,
+          })
+          .onConflictDoNothing();
+      }
+
+      if (plan.absentIds.length > 0) {
+        await tx
+          .update(monitoringConcerns)
+          .set({
+            consecutiveRunsAbsent: sql`${monitoringConcerns.consecutiveRunsAbsent} + 1`,
+            updatedAt: now,
+          })
+          .where(inArray(monitoringConcerns.id, plan.absentIds));
+      }
+
+      if (plan.autoResolveIds.length > 0) {
+        await tx
+          .update(monitoringConcerns)
+          .set({ status: "auto_resolved", lastResolvedAt: now, updatedAt: now })
+          .where(
+            and(
+              inArray(monitoringConcerns.id, plan.autoResolveIds),
+              eq(monitoringConcerns.status, "open"),
+            ),
+          );
+      }
+
+      const [openRow] = await tx
+        .select({ n: count() })
         .from(monitoringConcerns)
         .where(
           and(
             eq(monitoringConcerns.jobId, jobId),
-            eq(monitoringConcerns.fingerprint, c.fingerprint),
-          ),
-        )
-        .limit(1);
-
-      const severityMoved = plan.severityChanged.has(c.fingerprint);
-
-      if (!existing) {
-        const [row] = await tx
-          .insert(monitoringConcerns)
-          .values({
-            jobId,
-            ...c,
-            status: "open",
-            firstSeenAt: now,
-            lastSeenAt: now,
-            occurrenceCount: 1,
-            firstSeenRunId: runId,
-            lastSeenRunId: runId,
-          })
-          .returning({ id: monitoringConcerns.id });
-        await tx.insert(monitoringRunFindings).values({
-          runId,
-          concernId: row.id,
-          severity: c.effectiveSeverity,
-          isNew: true,
-        });
-        newCount++;
-        continue;
-      }
-
-      // A human decision (muted / accepted_risk / false_positive) survives:
-      // the concern is still recorded as seen, but never silently reopened.
-      const humanDismissed = DISMISSED_STATUSES.includes(existing.status);
-      await tx
-        .update(monitoringConcerns)
-        .set({
-          effectiveSeverity: c.effectiveSeverity,
-          severityRationale: c.severityRationale,
-          title: c.title,
-          rationale: c.rationale,
-          remediation: c.remediation,
-          evidence: c.evidence,
-          contentHash: c.contentHash,
-          baseSeverity: c.baseSeverity,
-          checkVersion: c.checkVersion,
-          lastSeenAt: now,
-          lastSeenRunId: runId,
-          occurrenceCount: sql`${monitoringConcerns.occurrenceCount} + 1`,
-          consecutiveRunsAbsent: 0,
-          ...(severityMoved ? { severityChangedAt: now } : {}),
-          ...(humanDismissed ? {} : { status: "open" as const }),
-          updatedAt: now,
-        })
-        .where(eq(monitoringConcerns.id, existing.id));
-      await tx
-        .insert(monitoringRunFindings)
-        .values({
-          runId,
-          concernId: existing.id,
-          severity: c.effectiveSeverity,
-          isNew: false,
-        })
-        .onConflictDoNothing();
-    }
-
-    if (plan.absentIds.length > 0) {
-      await tx
-        .update(monitoringConcerns)
-        .set({
-          consecutiveRunsAbsent: sql`${monitoringConcerns.consecutiveRunsAbsent} + 1`,
-          updatedAt: now,
-        })
-        .where(inArray(monitoringConcerns.id, plan.absentIds));
-    }
-
-    if (plan.autoResolveIds.length > 0) {
-      await tx
-        .update(monitoringConcerns)
-        .set({ status: "auto_resolved", lastResolvedAt: now, updatedAt: now })
-        .where(
-          and(
-            inArray(monitoringConcerns.id, plan.autoResolveIds),
             eq(monitoringConcerns.status, "open"),
           ),
         );
-    }
+      const openCount = openRow?.n ?? 0;
 
-    const [openRow] = await tx
-      .select({ n: count() })
-      .from(monitoringConcerns)
-      .where(
-        and(
-          eq(monitoringConcerns.jobId, jobId),
-          eq(monitoringConcerns.status, "open"),
-        ),
-      );
-    const openCount = openRow?.n ?? 0;
-
-    if (observations.length > 0) {
-      // Chunked for the same reason as workload discovery: a deep run over many
-      // workloads produces enough rows to pass Postgres's bind-parameter limit.
-      // `onConflictDoNothing` on (run, target, key) drops a key the model restated
-      // rather than failing the whole transaction over it.
-      const CHUNK = 500;
-      for (let i = 0; i < observations.length; i += CHUNK) {
-        await tx
-          .insert(monitoringObservations)
-          .values(
-            observations.slice(i, i + CHUNK).map((o) => ({
-              runId,
-              jobId,
-              targetKind: o.target.kind,
-              targetNamespace: o.target.namespace,
-              targetName: o.target.name,
-              key: o.key,
-              value: o.value,
-              numeric: o.numeric,
-              unit: o.unit,
-              source: o.source,
-              createdAt: now,
-            })),
-          )
-          .onConflictDoNothing();
+      if (observations.length > 0) {
+        // Chunked for the same reason as workload discovery: a deep run over many
+        // workloads produces enough rows to pass Postgres's bind-parameter limit.
+        // `onConflictDoNothing` on (run, target, key) drops a key the model restated
+        // rather than failing the whole transaction over it.
+        const CHUNK = 500;
+        for (let i = 0; i < observations.length; i += CHUNK) {
+          await tx
+            .insert(monitoringObservations)
+            .values(
+              observations.slice(i, i + CHUNK).map((o) => ({
+                runId,
+                jobId,
+                targetKind: o.target.kind,
+                targetNamespace: o.target.namespace,
+                targetName: o.target.name,
+                key: o.key,
+                value: o.value,
+                numeric: o.numeric,
+                unit: o.unit,
+                source: o.source,
+                createdAt: now,
+              })),
+            )
+            .onConflictDoNothing();
+        }
       }
-    }
 
-    await tx
-      .update(monitoringRuns)
-      .set({
-        status: "completed",
-        finishedAt: now,
-        findingsNew: newCount,
-        findingsResolved: plan.autoResolveIds.length,
-        findingsOpen: openCount,
-        ...runColumns,
-      })
-      .where(eq(monitoringRuns.id, runId));
+      const closed = await tx
+        .update(monitoringRuns)
+        .set({
+          status: final?.status ?? "completed",
+          error: final?.error.slice(0, 4000) ?? null,
+          finishedAt: now,
+          findingsNew: newCount,
+          findingsResolved: plan.autoResolveIds.length,
+          findingsOpen: openCount,
+          ...runColumns,
+        })
+        .where(
+          and(eq(monitoringRuns.id, runId), eq(monitoringRuns.status, "running")),
+        )
+        .returning({ id: monitoringRuns.id });
+      // Throws, which is what rolls the concern updates back.
+      if (closed.length === 0) tx.rollback();
 
-    return {
-      newCount,
-      resolvedCount: plan.autoResolveIds.length,
-      openCount,
-    };
-  });
+      return {
+        newCount,
+        resolvedCount: plan.autoResolveIds.length,
+        openCount,
+      };
+    });
+  } catch (err) {
+    if (err instanceof TransactionRollbackError) return null;
+    throw err;
+  }
 }

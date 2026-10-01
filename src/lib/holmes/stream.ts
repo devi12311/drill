@@ -11,6 +11,12 @@ import type {
   PendingToolApproval,
   ToolCall,
 } from "./types";
+import {
+  answerFromPayload,
+  connectionLost,
+  openHolmesStream,
+  type AgentTarget,
+} from "./sse";
 
 const INVESTIGATION_TIMEOUT_MS = 15 * 60 * 1000;
 /** Backstop against Holmes calling the knowledge tool in a loop. */
@@ -35,12 +41,6 @@ export type DrillEvent =
 /** Full response including history — for persistence, never sent to the client. */
 export interface StreamOutcome {
   response: HolmesChatResponse;
-}
-
-/** Connection details from the user's holmes_agents row. */
-export interface AgentTarget {
-  url: string;
-  apiKey: string;
 }
 
 export function fixtureMode(): boolean {
@@ -75,38 +75,6 @@ async function* fixtureStream(): AsyncGenerator<DrillEvent> {
 }
 
 /**
- * Minimal SSE parser: yields {event, data} per frame.
- *
- * Exported because the monitoring assessment path needs it too: a non-streaming POST
- * leaves the socket silent for the whole investigation, and Node's HTTP client gives
- * up on a silent connection after 5 minutes.
- */
-export async function* parseSse(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<{ event: string; data: string }> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf("\n\n")) !== -1) {
-      const frame = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      let event = "message";
-      const dataLines: string[] = [];
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-      }
-      if (dataLines.length) yield { event, data: dataLines.join("\n") };
-    }
-  }
-}
-
-/**
  * Live Holmes SSE → DrillEvents. Event payloads per
  * https://holmesgpt.dev/latest/reference/http-api/ — tool calls are
  * accumulated so the persisted response carries the full tool_calls array
@@ -128,82 +96,36 @@ async function* liveStream(
   outcome: StreamOutcome,
   agent: AgentTarget,
 ): AsyncGenerator<DrillEvent> {
-  const base = agent.url.replace(/\/$/, "");
   const started = Date.now();
   const toolCalls: ToolCall[] = [];
-  let body: HolmesChatRequest = { ...req, stream: true };
+  let body: HolmesChatRequest = req;
 
   for (let round = 0; round <= MAX_FRONTEND_TOOL_ROUNDS; round++) {
-    const res = await fetch(`${base}/api/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        Authorization: `Bearer ${agent.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(INVESTIGATION_TIMEOUT_MS),
-      cache: "no-store",
-    });
-    if (!res.ok || !res.body) {
-      const errBody = await res.text().catch(() => "");
-      throw new Error(`Holmes API ${res.status}: ${errBody.slice(0, 500)}`);
-    }
+    const { events, progress } = await openHolmesStream(
+      agent,
+      body,
+      INVESTIGATION_TIMEOUT_MS,
+    );
 
     let resume: {
       history: ConversationMessage[];
       results: FrontendToolResult[];
     } | null = null;
 
-    for await (const { event, data } of parseSse(res.body)) {
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      switch (event) {
-        case "start_tool_calling": {
-          yield {
-            type: "tool_start",
-            id: String(payload.id ?? ""),
-            tool_name: String(payload.tool_name ?? "tool"),
-          };
+    for await (const ev of events) {
+      switch (ev.event) {
+        case "start_tool_calling":
+          yield { type: "tool_start", id: ev.id, tool_name: ev.toolName };
           break;
-        }
-        case "tool_calling_result": {
-          const toolCall: ToolCall = {
-            tool_call_id: String(payload.tool_call_id ?? ""),
-            tool_name: String(payload.name ?? payload.tool_name ?? "tool"),
-            description: String(payload.description ?? ""),
-            result: (payload.result ?? {
-              status: "success",
-              error: null,
-              data: null,
-            }) as ToolCall["result"],
-          };
-          toolCalls.push(toolCall);
-          yield { type: "tool_result", toolCall };
+        case "tool_calling_result":
+          toolCalls.push(ev.toolCall);
+          yield { type: "tool_result", toolCall: ev.toolCall };
           break;
-        }
-        case "ai_message": {
-          const content = payload.content;
-          if (typeof content === "string" && content.trim())
-            yield { type: "ai_message", content };
+        case "ai_message":
+          yield { type: "ai_message", content: ev.content };
           break;
-        }
         case "ai_answer_end": {
-          const response: HolmesChatResponse = {
-            analysis: String(payload.analysis ?? ""),
-            conversation_history: (payload.conversation_history ??
-              []) as HolmesChatResponse["conversation_history"],
-            tool_calls: toolCalls,
-            follow_up_actions: (payload.follow_up_actions ??
-              null) as HolmesChatResponse["follow_up_actions"],
-            pending_approvals: (payload.pending_approvals ??
-              null) as HolmesChatResponse["pending_approvals"],
-            metadata: payload.metadata as HolmesChatResponse["metadata"],
-          };
+          const response = answerFromPayload(ev.payload, toolCalls);
           outcome.response = response;
           const { conversation_history: _history, ...clientResponse } =
             response;
@@ -215,6 +137,7 @@ async function* liveStream(
           return;
         }
         case "approval_required": {
+          const payload = ev.payload;
           const pending = (payload.pending_frontend_tool_calls ??
             []) as PendingFrontendToolCall[];
           const approvals = (payload.pending_approvals ??
@@ -276,23 +199,16 @@ async function* liveStream(
           };
           break;
         }
-        case "error": {
-          const message = String(
-            payload.description ?? payload.msg ?? "Holmes stream error",
-          );
-          throw new Error(message);
-        }
-        // token_count, compaction events: not surfaced yet
       }
       // Holmes ends the stream after approval_required — stop reading now.
       if (resume) break;
     }
 
-    if (!resume) throw new Error("Holmes stream ended without ai_answer_end");
+    if (!resume)
+      throw connectionLost(progress, "stream closed without a final answer");
     body = {
       ...req, // keeps ask, model, frontend_tools, additional_system_prompt
       tool_decisions: undefined, // already redeemed in the previous round
-      stream: true,
       conversation_history: resume.history, // Holmes's own paused state
       frontend_tool_results: resume.results,
     };

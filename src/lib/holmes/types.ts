@@ -123,6 +123,8 @@ export interface HolmesChatRequest {
   enable_tool_approval?: boolean;
   /** Resumes a stream paused for approval. */
   tool_decisions?: ToolApprovalDecision[];
+  /** Enable/disable individual system-prompt sections (upstream "fast mode"). */
+  behavior_controls?: Record<string, boolean>;
 }
 
 /** Todo item embedded in TodoWrite tool-call params. */

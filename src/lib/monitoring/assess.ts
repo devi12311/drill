@@ -1,5 +1,5 @@
 import "server-only";
-import { parseSse } from "@/lib/holmes/stream";
+import { completeHolmesChat } from "@/lib/holmes/sse";
 import type { HolmesChatResponse, ToolCall } from "@/lib/holmes/types";
 import type { MonitorCheck } from "./catalogue";
 import { REQUIREMENT_LABEL } from "./ui";
@@ -41,9 +41,8 @@ import {
  *    ("if gaps remain, keep investigating instead of answering"). Sound economy for
  *    a config lint; wrong for a forty-question investigation across four sources.
  *
- * Modelled on askHolmes() in lib/artifacts/distill.ts: `stream: false` +
- * `response_format`, and the structured result arrives as a JSON STRING inside
- * `analysis`.
+ * Every call streams (lib/holmes/sse.ts), and the structured result arrives as a
+ * JSON STRING inside `analysis`. How the schema is applied is in runAssessment.
  */
 
 /**
@@ -59,9 +58,8 @@ import {
  * finished in 187s over 30 tool calls, and the same target WITH its playbook ran
  * past 300s — the method made the agent do the work, which is the point.
  *
- * Deep gets 20 minutes PER WORKLOAD, which with the 10-target cap and the single
- * malformed-output retry is what sets `STALE_RUN_MS.deepMs` in runner.ts — keep the
- * two in step.
+ * Deep gets 20 minutes PER WORKLOAD. Nothing else has to be kept in step with it:
+ * the reaper judges a run by its worker's heartbeat, not by how long it has taken.
  */
 const ASSESS_TIMEOUT_MS: Record<MonitorDepth, number> = {
   posture: 300_000,
@@ -75,8 +73,8 @@ const ASSESS_TIMEOUT_MS: Record<MonitorDepth, number> = {
  * control plane, every node, scheduling, DNS, the CNI dataplane, storage and a
  * clusterwide workload rollup, with ~50 measurements to bring back. At the 20
  * minutes a workload gets, the failure mode is a timeout mid-investigation, which
- * costs the whole run and teaches nothing. Still well inside `STALE_RUN_MS.deepMs`
- * (6 hours), so a hung run is still reaped.
+ * costs the whole run and teaches nothing. A hung call is still bounded by this
+ * deadline, and a dead worker by its heartbeat.
  */
 const CLUSTER_ASSESS_TIMEOUT_MS = 2_700_000;
 
@@ -395,129 +393,124 @@ ${
   }${deepRules}`;
 }
 
-function countToolCalls(response: HolmesChatResponse) {
-  const calls = Array.isArray(response.tool_calls) ? response.tool_calls : [];
+/**
+ * Posture runs use upstream's "fast mode": skipping the TodoWrite planning phase is
+ * pure overhead for a single-shot config lint. Deep runs must NOT, because that
+ * same prompt section is the loop that makes the agent keep going when its own
+ * investigation is still incomplete — omitting behavior_controls leaves every
+ * prompt component enabled, which is the default. The format phase never plans.
+ */
+const FAST_MODE = {
+  behavior_controls: {
+    todowrite_instructions: false,
+    todowrite_reminder: false,
+  },
+} as const;
+
+/**
+ * The format phase is one LLM turn over evidence already gathered, so it is short.
+ */
+const FORMAT_TIMEOUT_MS = 5 * 60 * 1000;
+const FORMAT_ATTEMPTS = 2;
+
+const FORMAT_ASK = `Your investigation above is complete. Do not call any more tools.
+
+Return the final assessment now, as the JSON object the response schema requires, built ONLY from the evidence already gathered above. Every rule from the original instructions still applies: the exact check IDs, one coverage entry per target, "skipped" only for checks you could not judge, and measurements only where you actually measured them.`;
+
+/**
+ * Appended to the investigation prompt: the schema as text, so the agent knows the
+ * exact shape it is working towards without the schema being ENFORCED on every turn
+ * (see runAssessment for why enforcement is deferred).
+ */
+function outputContract(responseFormat: ReturnType<typeof buildResponseFormat>) {
+  return `
+
+OUTPUT
+When your investigation is complete, reply with ONLY one JSON object matching this JSON Schema — no prose, no code fences:
+${JSON.stringify(responseFormat.json_schema.schema)}`;
+}
+
+function stored(response: HolmesChatResponse): StoredHolmesResponse {
+  // Built field by field rather than spread-minus-history: this is what lands in
+  // `monitoring_runs.raw_response`, and conversation_history is both enormous and
+  // server-only.
   return {
-    toolCallsTotal: calls.length,
-    // Holmes hands the model an empty result for a failed tool and carries on,
-    // so a clean-looking assessment can rest on missing data. Surfaced per run.
-    toolCallsFailed: calls.filter((c) => c.result?.status === "error").length,
+    analysis: response.analysis,
+    tool_calls: response.tool_calls,
+    follow_up_actions: response.follow_up_actions,
+    pending_approvals: response.pending_approvals,
+    metadata: response.metadata,
   };
 }
 
 /**
- * Ask Holmes, over SSE.
- *
- * **Streaming is not for progress here — it is what makes a long investigation
- * possible at all.** With `stream: false` Holmes holds the socket completely silent
- * for the entire investigation: no headers, no bytes, until it is finished. Node's
- * HTTP client (undici) gives up on a connection that has sent no response headers
- * after 300s, so every deep run died at almost exactly five minutes with an opaque
- * `fetch failed` while Holmes was still working perfectly — and raising our own
- * AbortSignal did nothing, because that 300s belongs to the transport, not to us.
- * Any proxy between here and Holmes would impose its own idle timeout too.
- *
- * Streaming keeps the connection continuously active, which removes the whole class
- * of problem rather than raising one number. It is also how the chat path has always
- * talked to Holmes, which is why that path never hit this.
- *
- * `tool_calls` is accumulated from the stream because `ai_answer_end` does not carry
- * it — the same reason `liveStream` accumulates it in lib/holmes/stream.ts.
+ * What one assessment spent and did, from every call that RETURNED plus every tool
+ * call seen on the wire — including those of a call that then dropped, which is
+ * exactly the case a failed run needs explained.
  */
-async function askHolmes(
-  target: { url: string; apiKey: string },
-  model: string,
-  ask: string,
-  responseFormat: unknown,
-  depth: MonitorDepth,
-  timeoutMs: number,
-): Promise<HolmesChatResponse> {
-  const base = target.url.replace(/\/$/, "");
-  const res = await fetch(`${base}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      Authorization: `Bearer ${target.apiKey}`,
-    },
-    body: JSON.stringify({
-      ask,
-      model,
-      stream: true,
-      response_format: responseFormat,
-      // Posture runs use upstream's "fast mode": skipping the TodoWrite planning
-      // phase is pure overhead for a single-shot config lint. Deep runs must NOT,
-      // because that same prompt section is the loop that makes the agent keep
-      // going when its own investigation is still incomplete — omitting
-      // behavior_controls leaves every prompt component enabled, which is the
-      // default.
-      ...(depth === "posture"
-        ? {
-            behavior_controls: {
-              todowrite_instructions: false,
-              todowrite_reminder: false,
-            },
-          }
-        : {}),
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-    cache: "no-store",
+function runMeta(input: {
+  model: string;
+  startedAt: number;
+  prompts: AssessmentRunMeta["prompts"];
+  responses: readonly HolmesChatResponse[];
+  toolCalls: readonly ToolCall[];
+}): AssessmentRunMeta {
+  const { responses, toolCalls } = input;
+  const costs = responses.flatMap((r) => {
+    const cost = r.metadata?.costs?.total_cost;
+    return typeof cost === "number" ? [cost] : [];
   });
-  if (!res.ok || !res.body) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Holmes API ${res.status}: ${body.slice(0, 300)}`);
-  }
-
-  const toolCalls: ToolCall[] = [];
-  for await (const { event, data } of parseSse(res.body)) {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(data);
-    } catch {
-      continue;
-    }
-    if (event === "tool_calling_result") {
-      toolCalls.push({
-        tool_call_id: String(payload.tool_call_id ?? ""),
-        tool_name: String(payload.name ?? payload.tool_name ?? "tool"),
-        description: String(payload.description ?? ""),
-        result: (payload.result ?? {
-          status: "success",
-          error: null,
-          data: null,
-        }) as ToolCall["result"],
-      });
-    } else if (event === "error") {
-      throw new Error(
-        `Holmes stream error: ${String(payload.message ?? payload.error ?? "unknown")}`,
-      );
-    } else if (event === "ai_answer_end") {
-      const analysis = payload.analysis;
-      if (typeof analysis !== "string")
-        throw new Error("Holmes response has no analysis");
-      return {
-        analysis,
-        conversation_history: [],
-        tool_calls: toolCalls,
-        follow_up_actions:
-          (payload.follow_up_actions as HolmesChatResponse["follow_up_actions"]) ??
-          null,
-        pending_approvals: (payload.pending_approvals ??
-              null) as HolmesChatResponse["pending_approvals"],
-        metadata: payload.metadata as HolmesChatResponse["metadata"],
-      };
-    }
-  }
-  // Reaching here means the stream closed without a terminal event — a dropped
-  // connection rather than a refusal, and worth naming as such.
-  throw new Error(
-    `Holmes stream ended after ${toolCalls.length} tool calls without a final answer`,
-  );
+  const tokens = responses.flatMap((r) => {
+    const total =
+      r.metadata?.usage?.total_tokens ?? r.metadata?.costs?.total_tokens;
+    return typeof total === "number" ? [total] : [];
+  });
+  const add = (a: number, b: number) => a + b;
+  return {
+    model: input.model,
+    costUsd: costs.length ? costs.reduce(add, 0) : null,
+    totalTokens: tokens.length ? tokens.reduce(add, 0) : null,
+    durationMs: Date.now() - input.startedAt,
+    prompts: input.prompts,
+    toolCallsTotal: toolCalls.length,
+    // Holmes hands the model an empty result for a failed tool and carries on,
+    // so a clean-looking assessment can rest on missing data. Surfaced per run.
+    toolCallsFailed: toolCalls.filter((c) => c.result?.status === "error").length,
+    raw: responses.map(stored),
+  };
 }
 
 /**
- * Assess one job's workloads. One retry when the structured output comes back
- * malformed (same convention as distillArtifact).
+ * An assessment that failed, carrying what it still cost and did. The runner stores
+ * that on the failed run: a failure with no model, no duration and no tool count is
+ * a failure nobody can diagnose, and one with no cost looks free when it was not.
+ */
+export class AssessmentError extends Error {
+  constructor(
+    message: string,
+    readonly meta: AssessmentRunMeta,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Assess one job's workloads, in two phases.
+ *
+ * **Investigate** without `response_format`. Holmes passes the schema on EVERY turn
+ * of its tool loop (holmes/core/tool_calling_llm.py), and the loop ends at the first
+ * reply without tool calls. A provider that enforces the schema by constrained
+ * decoding — the open-weight hosts that serve DeepSeek on OpenRouter — therefore
+ * emits the JSON on turn one and never investigates. Gemini tolerates tools + schema,
+ * but its schema-forced final turn over ~100 tool results is a long silent call.
+ * The schema still travels as text (`outputContract`), so a model that follows it
+ * finishes in this one call.
+ *
+ * **Format** only when that answer is not a clean assessment: a second call carrying
+ * the investigation's own conversation history, the schema enforced, and an ask
+ * that forbids further tools. Here schema-forcing on the first turn is precisely the
+ * behaviour wanted. It is also the retry: a malformed or dropped answer costs one
+ * short turn over existing evidence instead of a whole new investigation.
  */
 export async function runAssessment(input: {
   cluster: { name: string; holmesUrl: string; holmesApiKey: string };
@@ -529,8 +522,10 @@ export async function runAssessment(input: {
   depth?: MonitorDepth;
   /** Deep runs over a profiled technology: that technology's method. */
   playbook?: Playbook;
+  /** Stops the investigation early — a cancelled run or a worker shutting down. */
+  signal?: AbortSignal;
 }): Promise<AssessmentOutcome> {
-  const { cluster, category, model, targets, checks, playbook } = input;
+  const { cluster, category, model, targets, checks, playbook, signal } = input;
   const depth = input.depth ?? "posture";
   if (targets.length === 0) throw new Error("The job has no target workloads");
   if (checks.length === 0)
@@ -546,13 +541,14 @@ export async function runAssessment(input: {
       ? playbook.observations.map((o) => o.key)
       : [];
   const responseFormat = buildResponseFormat(checks, observationKeys);
-  const ask = buildAssessmentPrompt({
-    category,
-    clusterName: cluster.name,
-    targets,
-    checks,
-    playbook: depth === "deep" ? playbook : undefined,
-  });
+  const ask =
+    buildAssessmentPrompt({
+      category,
+      clusterName: cluster.name,
+      targets,
+      checks,
+      playbook: depth === "deep" ? playbook : undefined,
+    }) + outputContract(responseFormat);
   const agent = { url: cluster.holmesUrl, apiKey: cluster.holmesApiKey };
 
   // The cluster investigation is wider than any workload's, so it is allowed
@@ -563,53 +559,83 @@ export async function runAssessment(input: {
       : ASSESS_TIMEOUT_MS[depth];
 
   const startedAt = Date.now();
-  let response = await askHolmes(
-    agent,
-    model,
-    ask,
-    responseFormat,
-    depth,
-    timeoutMs,
-  );
-  let assessment: Assessment;
-  try {
-    assessment = parseAssessment(response.analysis, allowedChecks, targets);
-  } catch {
-    response = await askHolmes(
-      agent,
+  const responses: HolmesChatResponse[] = [];
+  const toolCalls: ToolCall[] = [];
+  const meta = () =>
+    runMeta({
       model,
-      `${ask}\n\nIMPORTANT: Return ONLY the JSON object matching the schema — no prose, no code fences.`,
-      responseFormat,
-      depth,
-      timeoutMs,
-    );
-    assessment = parseAssessment(response.analysis, allowedChecks, targets);
-  }
-
-  return {
-    assessment,
-    meta: {
-      model,
-      costUsd: response.metadata?.costs?.total_cost ?? null,
-      totalTokens:
-        response.metadata?.usage?.total_tokens ??
-        response.metadata?.costs?.total_tokens ??
-        null,
-      durationMs: Date.now() - startedAt,
+      startedAt,
       prompts: [{ target: describeTargets(targets), prompt: ask }],
-      ...countToolCalls(response),
-      // Built field by field rather than spread-minus-history: this is what
-      // lands in `monitoring_runs.raw_response`, and conversation_history is
-      // both enormous and server-only.
-      raw: {
-        analysis: response.analysis,
-        tool_calls: response.tool_calls,
-        follow_up_actions: response.follow_up_actions,
-        pending_approvals: response.pending_approvals,
-        metadata: response.metadata,
-      },
-    },
-  };
+      responses,
+      toolCalls,
+    });
+
+  try {
+    const investigation = await completeHolmesChat(
+      agent,
+      { ask, model, ...(depth === "posture" ? FAST_MODE : {}) },
+      timeoutMs,
+      toolCalls,
+      signal,
+    );
+    responses.push(investigation);
+
+    // Accepted as-is only when nothing had to be dropped in validation; anything
+    // the validator rejected is worth one enforced-schema pass to recover. A usable
+    // but imperfect answer is still kept as the fallback, so a failing format phase
+    // can never turn a paid-for assessment into nothing.
+    let fallback: Assessment | null = null;
+    try {
+      fallback = parseAssessment(investigation.analysis, allowedChecks, targets);
+      if (fallback.rejected.length === 0)
+        return { assessment: fallback, meta: meta() };
+    } catch {
+      // not an assessment at all — format it below
+    }
+
+    if (investigation.conversation_history.length === 0) {
+      if (fallback) return { assessment: fallback, meta: meta() };
+      throw new Error(
+        "Holmes returned no conversation history, so its answer cannot be formatted",
+      );
+    }
+    let lastError: unknown;
+    for (let attempt = 0; attempt < FORMAT_ATTEMPTS; attempt++) {
+      // An interrupted run keeps whatever the investigation already produced
+      // rather than spending a format call nobody will wait for.
+      if (signal?.aborted) break;
+      try {
+        const formatted = await completeHolmesChat(
+          agent,
+          {
+            ask: FORMAT_ASK,
+            model,
+            conversation_history: investigation.conversation_history,
+            response_format: responseFormat,
+            ...FAST_MODE,
+          },
+          FORMAT_TIMEOUT_MS,
+          toolCalls,
+          signal,
+        );
+        responses.push(formatted);
+        return {
+          assessment: parseAssessment(formatted.analysis, allowedChecks, targets),
+          meta: meta(),
+        };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (fallback) return { assessment: fallback, meta: meta() };
+    throw lastError ?? signal?.reason;
+  } catch (err) {
+    const phase = responses.length === 0 ? "investigation" : "formatting";
+    throw new AssessmentError(
+      `${phase} failed: ${err instanceof Error ? err.message : String(err)}`,
+      meta(),
+    );
+  }
 }
 
 /** Human-readable target list for logs and run summaries. */
@@ -625,22 +651,12 @@ export function describeTargets(targets: readonly AssessmentTarget[]): string {
  * union of everything this run evaluated in order to decide what is absent, and it
  * must commit once, in one transaction, with the run's status. Reconciling N times
  * would leave a half-updated history if the fifth workload's call failed.
- *
- * Costs sum because they were all really spent. `durationMs` also sums, because the
- * calls run sequentially — LLM rate limits, same reason the queue drains serially.
  */
 export function mergeOutcomes(
   outcomes: readonly AssessmentOutcome[],
 ): AssessmentOutcome {
   if (outcomes.length === 0)
     throw new Error("No assessment outcomes to merge");
-
-  const sum = (pick: (m: AssessmentRunMeta) => number | null) =>
-    outcomes.reduce((total, o) => total + (pick(o.meta) ?? 0), 0);
-  // Distinguish "nothing was reported" from "the total was zero": if no call
-  // returned a cost, the run's cost is unknown rather than free.
-  const sumOrNull = (pick: (m: AssessmentRunMeta) => number | null) =>
-    outcomes.some((o) => pick(o.meta) !== null) ? sum(pick) : null;
 
   return {
     assessment: {
@@ -655,18 +671,37 @@ export function mergeOutcomes(
       },
       rejected: outcomes.flatMap((o) => o.assessment.rejected),
     },
-    meta: {
-      model: outcomes[0].meta.model,
-      costUsd: sumOrNull((m) => m.costUsd),
-      totalTokens: sumOrNull((m) => m.totalTokens),
-      durationMs: sum((m) => m.durationMs),
-      toolCallsTotal: sum((m) => m.toolCallsTotal),
-      toolCallsFailed: sum((m) => m.toolCallsFailed),
-      // One entry per call. The run page renders a list, and keeping every
-      // response is what makes a per-workload run auditable after the fact.
-      // flatMap, so merging an already-merged outcome stays flat.
-      raw: outcomes.flatMap((o) => o.meta.raw),
-      prompts: outcomes.flatMap((o) => o.meta.prompts),
-    },
+    meta: mergeRunMeta(outcomes.map((o) => o.meta)),
+  };
+}
+
+/**
+ * Sum several calls' metadata. Also how a deep run's FAILED workloads are counted:
+ * their calls were really paid for, so they belong in the run's totals.
+ *
+ * Costs sum because they were all really spent. `durationMs` also sums, because the
+ * calls run sequentially — LLM rate limits, same reason the queue drains serially.
+ */
+export function mergeRunMeta(
+  metas: readonly AssessmentRunMeta[],
+): AssessmentRunMeta {
+  if (metas.length === 0) throw new Error("No run metadata to merge");
+  const sum = (pick: (m: AssessmentRunMeta) => number | null) =>
+    metas.reduce((total, m) => total + (pick(m) ?? 0), 0);
+  // Distinguish "nothing was reported" from "the total was zero": if no call
+  // returned a cost, the run's cost is unknown rather than free.
+  const sumOrNull = (pick: (m: AssessmentRunMeta) => number | null) =>
+    metas.some((m) => pick(m) !== null) ? sum(pick) : null;
+  return {
+    model: metas[0].model,
+    costUsd: sumOrNull((m) => m.costUsd),
+    totalTokens: sumOrNull((m) => m.totalTokens),
+    durationMs: sum((m) => m.durationMs),
+    toolCallsTotal: sum((m) => m.toolCallsTotal),
+    toolCallsFailed: sum((m) => m.toolCallsFailed),
+    // One entry per call. Keeping every response is what makes a per-workload run
+    // auditable after the fact. flatMap, so merging merged metadata stays flat.
+    raw: metas.flatMap((m) => m.raw),
+    prompts: metas.flatMap((m) => m.prompts),
   };
 }
