@@ -1,14 +1,16 @@
 import "server-only";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { db } from "./index";
+import { db, type DbExecutor } from "./index";
 import {
+  chatTurns,
   conversations,
   holmesAgents,
   messages,
   resolutionArtifacts,
   users,
 } from "./schema";
+import type { ConversationActivity } from "@/lib/chat/types";
 import type {
   ConversationMessage,
   HolmesChatResponse,
@@ -106,8 +108,34 @@ export async function deleteAgent(userId: string, agentId: string) {
 
 // ---- Conversations (all user-scoped) ----
 
-export async function listConversations(userId: string, agentId: string) {
-  return db
+/** True when a stored raw response is a pause awaiting tool approval. */
+function isPaused(raw: SQL | typeof messages.rawResponse): SQL<boolean> {
+  return sql<boolean>`(jsonb_typeof(${raw}->'pending_approvals') = 'array'
+    and jsonb_array_length(${raw}->'pending_approvals') > 0)`;
+}
+
+/**
+ * The sidebar list. `activity` is what the row's dot shows: the open turn's
+ * status, else whether the latest answer is a pause still waiting on the user.
+ */
+export async function listConversations(
+  userId: string,
+  agentId: string,
+): Promise<
+  {
+    id: string;
+    title: string;
+    model: string;
+    status: "open" | "resolved";
+    artifactId: string | null;
+    updatedAt: Date;
+    activity: ConversationActivity;
+  }[]
+> {
+  const latestRaw = sql`(select m.raw_response from ${messages} m
+    where m.conversation_id = ${conversations.id} and m.role = 'assistant'
+    order by m.created_at desc limit 1)`;
+  const rows = await db
     .select({
       id: conversations.id,
       title: conversations.title,
@@ -115,16 +143,23 @@ export async function listConversations(userId: string, agentId: string) {
       status: conversations.status,
       artifactId: resolutionArtifacts.id,
       updatedAt: conversations.updatedAt,
+      turnStatus: chatTurns.status,
+      awaitingApproval: sql<boolean>`coalesce(${isPaused(latestRaw)}, false)`,
     })
     .from(conversations)
     .leftJoin(
       resolutionArtifacts,
       eq(resolutionArtifacts.conversationId, conversations.id),
     )
+    .leftJoin(chatTurns, eq(chatTurns.conversationId, conversations.id))
     .where(
       and(eq(conversations.userId, userId), eq(conversations.agentId, agentId)),
     )
     .orderBy(desc(conversations.updatedAt));
+  return rows.map(({ turnStatus, awaitingApproval, ...row }) => ({
+    ...row,
+    activity: turnStatus ?? (awaitingApproval ? "awaiting_approval" : null),
+  }));
 }
 
 export async function createConversation(opts: {
@@ -191,6 +226,62 @@ export async function getReplayHistory(
 }
 
 /**
+ * What an interrupted turn resumes from (lib/chat/resume.ts): the last COMPLETE
+ * history — skipping paused ones, which end in a tool call still awaiting its
+ * result, after which a new user turn is invalid — plus the tool calls those
+ * skipped pauses had already made, so their evidence is not lost with them.
+ *
+ * Reads flags first and fetches only the two payloads it needs: a stored raw
+ * response can be hundreds of kilobytes.
+ */
+export async function resumeContext(conversationId: string): Promise<{
+  history: ConversationMessage[] | undefined;
+  priorToolCalls: HolmesChatResponse["tool_calls"];
+}> {
+  const rows = await db
+    .select({
+      id: messages.id,
+      paused: isPaused(messages.rawResponse),
+      hasHistory: sql<boolean>`jsonb_typeof(${messages.rawResponse}->'conversation_history') = 'array'
+        and jsonb_array_length(${messages.rawResponse}->'conversation_history') > 0`,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        eq(messages.role, "assistant"),
+      ),
+    )
+    .orderBy(desc(messages.createdAt));
+
+  const pausedIds: string[] = [];
+  let anchorId: string | null = null;
+  for (const row of rows) {
+    if (row.paused) pausedIds.push(row.id);
+    else if (row.hasHistory) {
+      anchorId = row.id;
+      break;
+    }
+  }
+  const payload = async (id: string) => {
+    const [row] = await db
+      .select({ raw: messages.rawResponse })
+      .from(messages)
+      .where(eq(messages.id, id));
+    return row?.raw as HolmesChatResponse | undefined;
+  };
+  const history = anchorId
+    ? (await payload(anchorId))?.conversation_history
+    : undefined;
+  // Oldest pause first, so the evidence reads in the order it was gathered.
+  const priorToolCalls: HolmesChatResponse["tool_calls"] = [];
+  for (const id of pausedIds.reverse()) {
+    priorToolCalls.push(...((await payload(id))?.tool_calls ?? []));
+  }
+  return { history, priorToolCalls };
+}
+
+/**
  * The paused Holmes state awaiting a tool approval, or null when the latest
  * assistant message is not a pause (answered, errored, or already decided).
  */
@@ -214,20 +305,27 @@ export async function getPendingApproval(
     : null;
 }
 
-export async function addUserMessage(conversationId: string, ask: string) {
-  await db
+export async function addUserMessage(
+  conversationId: string,
+  ask: string,
+  tx: DbExecutor = db,
+) {
+  await tx
     .insert(messages)
     .values({ conversationId, role: "user", content: ask });
 }
 
-export async function addAssistantMessage(opts: {
-  conversationId: string;
-  response: HolmesChatResponse;
-  model: string;
-  durationMs: number;
-}) {
+export async function addAssistantMessage(
+  opts: {
+    conversationId: string;
+    response: HolmesChatResponse;
+    model: string;
+    durationMs: number;
+  },
+  tx: DbExecutor = db,
+) {
   const { conversationId, response, model, durationMs } = opts;
-  await db.insert(messages).values({
+  await tx.insert(messages).values({
     conversationId,
     role: "assistant",
     content: response.analysis ?? "",
@@ -237,7 +335,7 @@ export async function addAssistantMessage(opts: {
     totalTokens: response.metadata?.usage?.total_tokens ?? null,
     durationMs,
   });
-  await db
+  await tx
     .update(conversations)
     .set({ updatedAt: new Date() })
     .where(eq(conversations.id, conversationId));

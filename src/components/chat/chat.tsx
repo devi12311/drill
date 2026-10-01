@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -11,33 +11,22 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Composer } from "./composer";
+import { loadConversation } from "./conversation-api";
 import {
   AssistantMessage,
   UserMessage,
   type ChatEntry,
 } from "./messages";
-import { LiveTimeline, type LiveToolCall } from "./tool-timeline";
+import { TurnCard } from "./turn-card";
+import { useTurnStream } from "./use-turn-stream";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSession } from "@/components/session/session-provider";
+import { isActiveTurn, type TurnSnapshot } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
 import type {
   FollowUpAction,
   ToolApprovalDecision,
-  ToolCall,
 } from "@/lib/holmes/types";
-
-/** Events emitted by /api/chat (SSE data payloads). */
-type StreamEvent =
-  | { type: "meta"; conversation_id: string }
-  | { type: "tool_start"; id: string; tool_name: string }
-  | { type: "tool_result"; toolCall: ToolCall }
-  | { type: "ai_message"; content: string }
-  | {
-      type: "done";
-      response: NonNullable<ChatEntry["response"]>;
-      drill_duration_ms: number;
-    }
-  | { type: "error"; message: string };
 
 const EXAMPLE_ASKS = [
   "What is wrong with trace id …? Suggest a fix in the code.",
@@ -45,18 +34,8 @@ const EXAMPLE_ASKS = [
   "Why is deployment X crash-looping in namespace Y?",
 ];
 
-function ElapsedTimer() {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return (
-    <span className="font-mono text-[12px] tabular-nums">
-      {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
-    </span>
-  );
-}
+/** Within this many px of the bottom, new progress keeps the view pinned there. */
+const STICK_PX = 120;
 
 /** The agent's served models, in its order; null while loading, [] on failure. */
 function useModels(agentId: string): string[] | null {
@@ -74,16 +53,34 @@ function useModels(agentId: string): string[] | null {
   return entry?.agentId === agentId ? entry.models : null;
 }
 
-interface LiveState {
-  calls: LiveToolCall[];
-  aiNote?: string;
-  notice?: string;
+/** What a just-queued turn looks like until its stream sends the real row. */
+function queuedTurn(id: string): TurnSnapshot {
+  return {
+    id,
+    status: "queued",
+    attempt: 0,
+    error: null,
+    resumable: true,
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+  };
+}
+
+async function postTurnAction(turnId: string, action: string) {
+  const res = await fetch(`/api/chat/turns/${turnId}/${action}`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `HTTP ${res.status}`);
+  }
 }
 
 export function Chat({
   agentId,
   initialConversationId,
   initialEntries,
+  initialTurn,
   status,
   artifactId,
   onConversationCreated,
@@ -92,16 +89,19 @@ export function Chat({
   agentId: string;
   initialConversationId: string | null;
   initialEntries: ChatEntry[];
+  /** The conversation's open turn when it was opened — reattached on mount. */
+  initialTurn: TurnSnapshot | null;
   /** Resolution state of the active conversation (from the sidebar list). */
   status?: "open" | "resolved";
   artifactId?: string | null;
   onConversationCreated: (id: string) => void;
+  /** Something the sidebar shows changed (a turn started, settled, stopped). */
   onActivity: () => void;
 }) {
   const router = useRouter();
   const { user } = useSession();
   const [entries, setEntries] = useState<ChatEntry[]>(initialEntries);
-  const [live, setLive] = useState<LiveState | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const models = useModels(agentId);
   const [pickedModel, setModel] = useState<string | null>(null);
   // Derived, not stored: the agent's first model IS the default, and a pick
@@ -113,8 +113,33 @@ export function Chat({
   const [conversationId, setConversationId] = useState(initialConversationId);
   const [resolveOpen, setResolveOpen] = useState(false);
   const conversationIdRef = useRef<string | null>(initialConversationId);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const busy = live !== null;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+
+  /** Messages are the one source of truth once a turn settles or is dismissed. */
+  const refresh = useCallback(async () => {
+    const id = conversationIdRef.current;
+    if (!id) return null;
+    try {
+      const loaded = await loadConversation(id);
+      setEntries(loaded.entries);
+      return loaded;
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to reload");
+      return null;
+    }
+  }, []);
+
+  const { view, follow, resume, clear } = useTurnStream(
+    initialTurn,
+    async (followNext) => {
+      const loaded = await refresh();
+      // Another tab may have queued the next question already.
+      if (loaded?.turn) followNext(loaded.turn);
+      onActivity();
+    },
+  );
+  const active = view != null && isActiveTurn(view.turn.status);
   const hasAnswer = entries.some((e) => e.role === "assistant" && e.response);
 
   async function unresolve() {
@@ -125,9 +150,13 @@ export function Chat({
     onActivity();
   }
 
+  // Follow the progress only while the reader is at the bottom: expanding a
+  // tool's output mid-investigation must not be yanked away by the next event.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries, live]);
+    const el = scrollRef.current;
+    if (el && stickRef.current)
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [entries, view]);
 
   function send(ask: string, preNotice?: string) {
     return run(ask, { ask }, preNotice);
@@ -149,17 +178,27 @@ export function Chat({
     return run(summary, { tool_decisions: decisions });
   }
 
+  /**
+   * Queue a turn and follow it. Resolves false when nothing was queued, so the
+   * composer can put the question back.
+   */
   async function run(
     userLine: string,
     payload: { ask: string } | { tool_decisions: ToolApprovalDecision[] },
     preNotice?: string,
-  ) {
-    if (!model) return;
-    setLive({ calls: [], notice: preNotice });
+  ): Promise<boolean> {
+    if (!model) return false;
+    setActionError(null);
+    stickRef.current = true;
+    // Sending over a stopped turn files it into the transcript server-side.
+    const replacesStopped = view != null && !active;
+    const optimisticId = crypto.randomUUID();
     setEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: "user", ask: userLine },
+      { id: optimisticId, role: "user", ask: userLine },
     ]);
+    const unsend = () =>
+      setEntries((prev) => prev.filter((e) => e.id !== optimisticId));
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -171,127 +210,52 @@ export function Chat({
           conversation_id: conversationIdRef.current ?? undefined,
         }),
       });
-      if (!res.ok || !res.body) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error ?? `HTTP ${res.status}`);
+      const body = await res.json().catch(() => null);
+      if (res.status === 409 && body?.turn_id) {
+        // Already investigating here — started from another tab. Show that one.
+        unsend();
+        const loaded = await refresh();
+        if (loaded?.turn) follow(loaded.turn);
+        setActionError(
+          "An investigation is already running in this conversation — showing it. Send again once it finishes.",
+        );
+        return false;
       }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finished = false;
-
-      const handle = (event: StreamEvent) => {
-        switch (event.type) {
-          case "meta": {
-            if (!conversationIdRef.current) {
-              conversationIdRef.current = event.conversation_id;
-              setConversationId(event.conversation_id);
-              onConversationCreated(event.conversation_id);
-            }
-            break;
-          }
-          case "tool_start": {
-            setLive((prev) =>
-              prev && {
-                ...prev,
-                notice: undefined,
-                calls: [
-                  ...prev.calls,
-                  {
-                    id: event.id || crypto.randomUUID(),
-                    tool_name: event.tool_name,
-                  },
-                ],
-              },
-            );
-            break;
-          }
-          case "tool_result": {
-            setLive((prev) => {
-              if (!prev) return prev;
-              const calls = [...prev.calls];
-              const idx = calls.findIndex(
-                (c) => c.id === event.toolCall.tool_call_id && !c.toolCall,
-              );
-              if (idx >= 0)
-                calls[idx] = { ...calls[idx], toolCall: event.toolCall };
-              else
-                calls.push({
-                  id: event.toolCall.tool_call_id || crypto.randomUUID(),
-                  tool_name: event.toolCall.tool_name,
-                  toolCall: event.toolCall,
-                });
-              return { ...prev, calls };
-            });
-            break;
-          }
-          case "ai_message": {
-            setLive((prev) => prev && { ...prev, aiNote: event.content });
-            break;
-          }
-          case "done": {
-            setEntries((prev) => [
-              ...prev,
-              {
-                id: crypto.randomUUID(),
-                role: "assistant",
-                response: {
-                  ...event.response,
-                  drill_duration_ms: event.drill_duration_ms,
-                },
-                model,
-              },
-            ]);
-            finished = true;
-            onActivity();
-            break;
-          }
-          case "error": {
-            setEntries((prev) => [
-              ...prev,
-              {
-                id: crypto.randomUUID(),
-                role: "assistant",
-                error: event.message,
-              },
-            ]);
-            finished = true;
-            break;
-          }
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let sep: number;
-        while ((sep = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          for (const line of frame.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            try {
-              handle(JSON.parse(line.slice(5)));
-            } catch {
-              // skip malformed frame
-            }
-          }
-        }
+      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
+      if (!conversationIdRef.current) {
+        conversationIdRef.current = body.conversation_id;
+        setConversationId(body.conversation_id);
+        onConversationCreated(body.conversation_id);
       }
-      if (!finished) throw new Error("Stream ended unexpectedly");
+      if (replacesStopped) {
+        clear();
+        await refresh();
+      }
+      follow(queuedTurn(body.turn_id), preNotice);
+      onActivity();
+      return true;
     } catch (err) {
-      setEntries((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          error: err instanceof Error ? err.message : "Unknown error",
-        },
-      ]);
-    } finally {
-      setLive(null);
+      unsend();
+      setActionError(err instanceof Error ? err.message : "Could not send");
+      return false;
+    }
+  }
+
+  async function turnAction(action: "cancel" | "resume" | "dismiss") {
+    if (!view) return;
+    setActionError(null);
+    try {
+      await postTurnAction(view.turn.id, action);
+      if (action === "resume") resume();
+      if (action === "dismiss") {
+        clear();
+        await refresh();
+      }
+      onActivity();
+    } catch (err) {
+      // A Stop that lands after the answer is not an error worth showing.
+      if (action !== "cancel")
+        setActionError(err instanceof Error ? err.message : "Request failed");
     }
   }
 
@@ -299,7 +263,7 @@ export function Chat({
     send(action.prompt, action.pre_action_notification_text);
   }
 
-  const empty = entries.length === 0 && !busy;
+  const empty = entries.length === 0 && !view;
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -333,7 +297,7 @@ export function Chat({
               variant="secondary"
               size="sm"
               className="gap-2"
-              disabled={!hasAnswer || busy}
+              disabled={!hasAnswer || active}
               onClick={() => setResolveOpen(true)}
             >
               <CheckCircle2 className="size-4 text-traffic-green" />
@@ -342,7 +306,15 @@ export function Chat({
           )}
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stickRef.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+        }}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         <div className="mx-auto w-full max-w-[820px] px-6">
           {empty ? (
             <div className="flex h-full flex-col justify-center pt-[18vh]">
@@ -379,22 +351,19 @@ export function Chat({
                     entry={entry}
                     onFollowUp={onFollowUp}
                     onDecide={decide}
-                    busy={busy}
+                    busy={active}
                     isLatest={i === entries.length - 1}
                   />
                 ),
               )}
-              {live && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3 text-body-sm text-bone-gray">
-                    <span className="size-2 animate-pulse rounded-full bg-gold-leaf" />
-                    <span>{live.notice ?? "Investigating…"}</span>
-                    <ElapsedTimer />
-                  </div>
-                  <LiveTimeline calls={live.calls} aiNote={live.aiNote} />
-                </div>
+              {view && (
+                <TurnCard
+                  view={view}
+                  onStop={() => turnAction("cancel")}
+                  onResume={() => turnAction("resume")}
+                  onDismiss={() => turnAction("dismiss")}
+                />
               )}
-              <div ref={bottomRef} />
             </div>
           )}
         </div>
@@ -411,9 +380,13 @@ export function Chat({
           user.actorIsAdmin && "pr-20 xl:pr-6",
         )}
       >
+        {actionError && (
+          <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
+        )}
         <Composer
           onSend={send}
-          busy={busy}
+          onStop={() => turnAction("cancel")}
+          busy={active}
           models={models}
           model={model}
           onModelChange={setModel}

@@ -39,7 +39,7 @@ import { targetLabel, type MonitorCategory, type ResolvedTarget } from "./types"
 /**
  * Executes monitoring runs. The one place a run is turned into concerns.
  *
- * Only the worker (lib/monitoring/worker.ts) calls in here: no HTTP request ever
+ * Only the worker's monitoring lane (lib/monitoring/worker.ts) calls in here: no HTTP request ever
  * waits on an investigation. A run goes through three steps —
  *
  *   prepare      snapshot the rubric and lay out one row per investigation

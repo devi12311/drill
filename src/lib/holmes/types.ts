@@ -67,6 +67,17 @@ export interface HolmesChatResponse {
    * approvals. Holmes needs them back alongside the decisions on resume.
    */
   drill_frontend_tool_results?: FrontendToolResult[];
+  /**
+   * Drill-only, on a pause: the question the paused investigation is answering.
+   * The decision turn that resumes it carries it forward, so if that turn has to
+   * be rebuilt from evidence it still knows what was asked (its own ask is "").
+   */
+  drill_question?: string;
+  /**
+   * Drill-only: set on a turn that failed or was stopped and then dismissed. Its
+   * partial tool calls are kept; there is no answer and no replayable history.
+   */
+  drill_error?: string;
   metadata?: HolmesMetadata;
 }
 

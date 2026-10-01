@@ -12,7 +12,7 @@ type Context = { params: Promise<{ id: string }> };
 /**
  * Run a job now: enqueue it and return `202` with the queued run. That is all.
  *
- * The investigation is executed by the monitoring worker (lib/monitoring/worker.ts),
+ * The investigation is executed by the monitoring lane of the worker (lib/monitoring/worker.ts),
  * never by this request or this process — a deep run outlives any request budget,
  * and running it in the web server meant a UI deploy killed it. The page learns
  * about progress by polling the run, not by waiting here.

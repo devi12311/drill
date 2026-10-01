@@ -169,16 +169,36 @@ export function ToolTimeline({ toolCalls }: { toolCalls: ToolCall[] }) {
   );
 }
 
-/** In-flight timeline: rows appear as Holmes calls tools. */
+/** Where an attempt began again inside one turn — drawn as a divider. */
+export interface ResumeMark {
+  kind: "resume";
+  attempt: number;
+  /** Plain-language reason the previous attempt stopped. */
+  reason: string;
+  callsBefore: number;
+}
+
+export type LiveItem = { kind: "call"; call: LiveToolCall } | ResumeMark;
+
+/**
+ * A turn's timeline as it streams in — and, when it stops, as it stopped: rows
+ * appear as Holmes calls tools, with a divider wherever a resume picked up.
+ */
 export function LiveTimeline({
-  calls,
+  items,
   aiNote,
+  stopped = false,
 }: {
-  calls: LiveToolCall[];
+  items: LiveItem[];
   aiNote?: string;
+  /** The turn has stopped: a call without a result was cut off, not running. */
+  stopped?: boolean;
 }) {
+  const calls = items.flatMap((i) => (i.kind === "call" ? [i.call] : []));
   const todos = latestTodos(calls.map((c) => c.toolCall));
-  const steps = calls.filter((c) => c.tool_name !== "TodoWrite");
+  const rows = items.filter(
+    (i) => i.kind === "resume" || i.call.tool_name !== "TodoWrite",
+  );
 
   return (
     <div className="space-y-3">
@@ -186,22 +206,42 @@ export function LiveTimeline({
       {aiNote && (
         <div className="text-body-sm italic text-bone-gray">{aiNote}</div>
       )}
-      {steps.length > 0 && (
+      {rows.length > 0 && (
         <div className="space-y-0.5 border-l border-border/60 pl-3">
-          {steps.map((live, i) =>
-            live.toolCall ? (
-              <ToolCallRow key={`${live.id}-${i}`} call={live.toolCall} />
+          {rows.map((item, i) =>
+            item.kind === "resume" ? (
+              <div
+                key={`resume-${item.attempt}`}
+                className="flex items-center gap-3 py-2 text-caption-tracked uppercase text-bone-gray"
+              >
+                <span className="h-px flex-1 bg-border" />
+                <span className="shrink-0">
+                  {item.reason} after {item.callsBefore} tool call
+                  {item.callsBefore === 1 ? "" : "s"} · resuming from saved
+                  results · attempt {item.attempt}
+                </span>
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            ) : item.call.toolCall ? (
+              <ToolCallRow key={`${item.call.id}-${i}`} call={item.call.toolCall} />
             ) : (
               <div
-                key={`${live.id}-${i}`}
+                key={`${item.call.id}-${i}`}
                 className="flex items-center gap-2.5 px-2 py-1.5"
               >
                 <span className="size-3.5 shrink-0" />
-                <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-gold-leaf" />
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    stopped ? "bg-bone-gray" : "animate-pulse bg-gold-leaf",
+                  )}
+                />
                 <span className="font-mono text-[13px] text-pale-stone">
-                  {live.tool_name}
+                  {item.call.tool_name}
                 </span>
-                <span className="text-body-sm text-bone-gray">running…</span>
+                <span className="text-body-sm text-bone-gray">
+                  {stopped ? "interrupted" : "running…"}
+                </span>
               </div>
             ),
           )}

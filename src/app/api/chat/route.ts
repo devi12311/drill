@@ -1,14 +1,13 @@
 import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { openTurn } from "@/lib/db/chat-turn-queries";
 import {
-  addAssistantMessage,
-  addUserMessage,
   createConversation,
   getAgent,
   getConversation,
   getPendingApproval,
   getReplayHistory,
 } from "@/lib/db/queries";
-import { fixtureMode, streamHolmes, type StreamOutcome } from "@/lib/holmes/stream";
+import { fixtureMode } from "@/lib/holmes/stream";
 import type {
   HolmesChatRequest,
   HolmesChatResponse,
@@ -21,8 +20,6 @@ import {
   searchArtifacts,
   SEARCH_TOOL_DEF,
 } from "@/lib/artifacts/search";
-
-export const maxDuration = 900;
 
 /** How a decision reads in the transcript (stored as the user's turn). */
 function describeDecisions(
@@ -44,9 +41,12 @@ function describeDecisions(
  * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }, or
  * { tool_decisions, agent_id, conversation_id, model? } to answer a paused
  * tool approval (see lib/holmes/stream.ts).
- * Responds with an SSE stream of DrillEvents (see lib/holmes/stream.ts).
- * The first event is `meta` carrying the conversation id; `done` carries the
- * final response (without conversation_history — the server owns history).
+ *
+ * Queues the turn and returns at once — 202 { conversation_id, turn_id }. The
+ * worker's chat lane runs the investigation (lib/chat/runner.ts) and the client
+ * follows it on GET /api/chat/turns/[id]/events, so nothing about it depends on
+ * this request, the browser tab, or the web pod staying up. 409 carries the
+ * turn already running in the conversation, for the client to attach to.
  */
 export async function POST(request: Request) {
   const user = await getAuthUser();
@@ -88,6 +88,7 @@ export async function POST(request: Request) {
 
   let model = body.model?.trim();
   let conversationId: string;
+  let conversationTitle: string | null = null;
   let history: Awaited<ReturnType<typeof getReplayHistory>>;
   let paused: HolmesChatResponse | null = null;
   let agent: Awaited<ReturnType<typeof getAgent>>;
@@ -119,6 +120,7 @@ export async function POST(request: Request) {
         );
       }
       conversationId = conversation.id;
+      conversationTitle = conversation.title;
       if (decisions) {
         paused = await getPendingApproval(conversationId);
         const pendingIds = new Set(
@@ -147,18 +149,8 @@ export async function POST(request: Request) {
         })
       ).id;
     }
-    await addUserMessage(
-      conversationId,
-      paused ? describeDecisions(paused, decisions!) : ask!,
-    );
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    return Response.json(
-      {
-        error: `Database unreachable (run \`docker compose up -d\` in drill/): ${detail.slice(0, 200)}`,
-      },
-      { status: 503 },
-    );
+    return databaseUnreachable(err);
   }
 
   // Knowledge integration (live only): inject the top similar resolutions
@@ -194,75 +186,48 @@ export async function POST(request: Request) {
     }
   }
 
-  const encoder = new TextEncoder();
-  const convId = conversationId;
-  const target = { url: agent.url, apiKey: agent.apiKey };
-  const started = Date.now();
+  const note = paused ? describeDecisions(paused, decisions!) : undefined;
+  try {
+    const result = await openTurn({
+      conversationId,
+      userId: user.id,
+      agentId: agent.id,
+      model,
+      kind: paused ? "decision" : "ask",
+      request: holmesReq,
+      // A pause stored before `drill_question` existed falls back to the title,
+      // which is the conversation's first question.
+      question: paused
+        ? (paused.drill_question ?? conversationTitle ?? "")
+        : ask!,
+      note,
+      userLine: note ?? ask!,
+    });
+    if (!result.ok) {
+      return Response.json(
+        {
+          error: "An investigation is already running in this conversation",
+          conversation_id: conversationId,
+          turn_id: result.activeTurnId,
+        },
+        { status: 409 },
+      );
+    }
+    return Response.json(
+      { conversation_id: conversationId, turn_id: result.turnId },
+      { status: 202 },
+    );
+  } catch (err) {
+    return databaseUnreachable(err);
+  }
+}
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      // If the client disconnects mid-investigation, keep consuming Holmes
-      // and persist the result anyway — investigations are slow and costly.
-      let clientGone = false;
-      const send = (payload: unknown) => {
-        if (clientGone) return;
-        try {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
-          );
-        } catch {
-          clientGone = true;
-        }
-      };
-      send({ type: "meta", conversation_id: convId });
-      // Holmes is silent while one LLM turn runs (a minute or more for a long
-      // answer), and an ingress in front of Drill drops a connection idle for its
-      // read timeout — 60s by default. An SSE comment every 15s keeps the browser's
-      // stream alive; the client parser only reads `data:` lines, so it is inert.
-      const heartbeat = setInterval(() => {
-        if (clientGone) return;
-        try {
-          controller.enqueue(encoder.encode(": ping\n\n"));
-        } catch {
-          clientGone = true;
-        }
-      }, 15_000);
-      const outcome: StreamOutcome = { response: null! };
-      try {
-        for await (const event of streamHolmes(holmesReq, outcome, target)) {
-          send(event);
-        }
-        if (outcome.response) {
-          await addAssistantMessage({
-            conversationId: convId,
-            response: outcome.response,
-            model,
-            durationMs: Date.now() - started,
-          });
-        }
-      } catch (err) {
-        send({
-          type: "error",
-          message: err instanceof Error ? err.message : "Unknown error",
-        });
-      } finally {
-        clearInterval(heartbeat);
-        if (!clientGone) {
-          try {
-            controller.close();
-          } catch {
-            // already closed by cancellation
-          }
-        }
-      }
+function databaseUnreachable(err: unknown) {
+  const detail = err instanceof Error ? err.message : String(err);
+  return Response.json(
+    {
+      error: `Database unreachable (run \`docker compose up -d\` in drill/): ${detail.slice(0, 200)}`,
     },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+    { status: 503 },
+  );
 }

@@ -1,4 +1,5 @@
 import {
+  bigserial,
   boolean,
   doublePrecision,
   index,
@@ -10,10 +11,17 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
 import type { ArtifactGraph } from "@/lib/artifacts/types";
+import {
+  TURN_STATUSES,
+  type TurnEvent,
+  type TurnStatus,
+} from "@/lib/chat/types";
+import type { HolmesChatRequest } from "@/lib/holmes/types";
 import type {
   ExpectedObservations,
   ObservationSpec,
@@ -126,6 +134,90 @@ export const messages = pgTable("messages", {
   durationMs: integer("duration_ms"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
+
+/**
+ * A chat question (or tool-approval decision) while Holmes works on it. Also the
+ * chat lane's work queue: inserted `queued`, claimed with `FOR UPDATE SKIP LOCKED`
+ * by the worker, which holds it with a heartbeat exactly like `monitoring_runs`.
+ *
+ * Deleted the moment it answers — the answer lives in `messages` — so a row that
+ * exists is in flight or waiting on the user (Resume / Dismiss). One per
+ * conversation, which is what stops two sends racing on the same history.
+ */
+export const chatTurns = pgTable(
+  "chat_turns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => holmesAgents.id, { onDelete: "cascade" }),
+    model: text("model").notNull(),
+    kind: text("kind", { enum: ["ask", "decision"] }).notNull(),
+    /** The request exactly as first sent — the worker executes it without recomputing. */
+    request: jsonb("request").$type<HolmesChatRequest>().notNull(),
+    /**
+     * What the user asked. For a decision this is the paused question, carried
+     * forward: rebuilding a dropped turn from evidence needs it, and a decision's
+     * own `ask` is empty.
+     */
+    question: text("question").notNull(),
+    /** A decision turn's "Approved bash…" line, so a rebuilt resume knows what was allowed. */
+    note: text("note"),
+    status: text("status", { enum: TURN_STATUSES })
+      .$type<TurnStatus>()
+      .notNull()
+      .default("queued"),
+    error: text("error"),
+    /** False only when a resume cannot help — the conversation's agent is gone. */
+    resumable: boolean("resumable").notNull().default(true),
+    /** Bumped by every claim; doubles as the fencing token for the worker's writes. */
+    attempt: integer("attempt").notNull().default(0),
+    /**
+     * Automatic resumes spent on dropped connections (the budget is one). A worker
+     * shutdown or crash requeues without spending it: Drill stopped that call itself.
+     */
+    autoResumes: integer("auto_resumes").notNull().default(0),
+    claimedAt: timestamp("claimed_at"),
+    heartbeatAt: timestamp("heartbeat_at"),
+    cancelRequestedAt: timestamp("cancel_requested_at"),
+    /** First claim — kept across resumes, so the timer and duration cover the whole turn. */
+    startedAt: timestamp("started_at"),
+    finishedAt: timestamp("finished_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("chat_turns_conversation_idx").on(t.conversationId),
+    // The queue claim: WHERE status='queued' ORDER BY created_at.
+    index("chat_turns_queue_idx").on(t.status, t.createdAt),
+  ],
+);
+
+/**
+ * A turn's progress, appended as Holmes streams it. Replayed to the browser by
+ * `seq` (also the SSE event id), and the evidence a dropped turn resumes from:
+ * Holmes only hands out its own history at a pause or the final answer, so these
+ * tool results are all there is to continue from. Deleted with the turn.
+ */
+export const chatTurnEvents = pgTable(
+  "chat_turn_events",
+  {
+    seq: bigserial("seq", { mode: "number" }).primaryKey(),
+    turnId: uuid("turn_id")
+      .notNull()
+      .references(() => chatTurns.id, { onDelete: "cascade" }),
+    attempt: integer("attempt").notNull(),
+    type: text("type").notNull(),
+    payload: jsonb("payload").$type<TurnEvent>().notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("chat_turn_events_turn_idx").on(t.turnId, t.seq)],
+);
 
 /**
  * Distilled knowledge from resolved investigations. Global: readable and

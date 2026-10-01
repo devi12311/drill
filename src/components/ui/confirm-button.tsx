@@ -30,7 +30,7 @@ export function ConfirmButton({
   destructive,
   comment,
   disabled,
-  variant = "outline",
+  variant,
   size,
   className,
   onConfirm,
@@ -45,6 +45,11 @@ export function ConfirmButton({
   /** Ask for a note, and pass it to `onConfirm`. */
   comment?: { label: string; placeholder?: string; required?: boolean };
   disabled?: boolean;
+  /**
+   * The trigger's look. Defaults to destructive for a destructive action, else
+   * outline; set it explicitly for a quiet trigger (an icon in a list row) whose
+   * confirm button should still be red.
+   */
   variant?: React.ComponentProps<typeof Button>["variant"];
   size?: React.ComponentProps<typeof Button>["size"];
   className?: string;
@@ -64,7 +69,7 @@ export function ConfirmButton({
     >
       <Button
         type="button"
-        variant={destructive ? "destructive" : variant}
+        variant={variant ?? (destructive ? "destructive" : "outline")}
         size={size}
         className={className}
         disabled={disabled}

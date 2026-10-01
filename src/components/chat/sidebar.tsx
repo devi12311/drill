@@ -13,8 +13,10 @@ import {
 import { BrandMark } from "@/components/shell/brand-mark";
 import { SideNavLink } from "@/components/shell/side-nav-link";
 import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { cn } from "@/lib/utils";
 import type { AgentSummary } from "@/components/agents/agents-dialog";
+import type { ConversationActivity } from "@/lib/chat/types";
 
 export interface ConversationSummary {
   id: string;
@@ -23,6 +25,31 @@ export interface ConversationSummary {
   status: "open" | "resolved";
   artifactId: string | null;
   updatedAt: string;
+  activity: ConversationActivity;
+}
+
+export function isInvestigating(conv: ConversationSummary): boolean {
+  return conv.activity === "queued" || conv.activity === "running";
+}
+
+/**
+ * One dot per row, most urgent first: something the user must act on outranks
+ * "resolved". Traffic colours, not gold — DESIGN.md keeps gold inside code.
+ */
+function activityDot(conv: ConversationSummary): { className: string; title: string } | null {
+  switch (conv.activity) {
+    case "queued":
+    case "running":
+      return { className: "animate-pulse bg-traffic-yellow", title: "Investigating" };
+    case "awaiting_approval":
+      return { className: "bg-traffic-yellow", title: "Waiting for your approval" };
+    case "failed":
+    case "cancelled":
+      return { className: "bg-traffic-red", title: "Stopped — open it to resume" };
+  }
+  return conv.status === "resolved"
+    ? { className: "bg-traffic-green", title: "Resolved" }
+    : null;
 }
 
 function shortDate(iso: string) {
@@ -148,12 +175,20 @@ export function Sidebar({
                   className="min-w-0 flex-1 text-left"
                 >
                   <div className="flex items-center gap-1.5">
-                    {conv.status === "resolved" && (
-                      <span
-                        title="Resolved"
-                        className="size-1.5 shrink-0 rounded-full bg-traffic-green"
-                      />
-                    )}
+                    {(() => {
+                      const dot = activityDot(conv);
+                      return (
+                        dot && (
+                          <span
+                            title={dot.title}
+                            className={cn(
+                              "size-1.5 shrink-0 rounded-full",
+                              dot.className,
+                            )}
+                          />
+                        )
+                      );
+                    })()}
                     <span className="truncate text-body-sm text-pale-stone group-hover:text-warm-off-white">
                       {conv.title}
                     </span>
@@ -162,14 +197,23 @@ export function Sidebar({
                     {shortDate(conv.updatedAt)} · {conv.model}
                   </div>
                 </button>
-                <button
-                  type="button"
-                  aria-label="Delete conversation"
-                  onClick={() => onDelete(conv.id)}
-                  className="hidden shrink-0 rounded-sm p-1 text-bone-gray hover:text-traffic-red group-hover:block"
+                <ConfirmButton
+                  label="Delete conversation"
+                  title="Delete this investigation?"
+                  description={
+                    isInvestigating(conv)
+                      ? "Holmes is still working on it — deleting stops the investigation and removes the whole conversation. This cannot be undone."
+                      : "The whole conversation is removed. A resolution artifact made from it stays in Resolutions. This cannot be undone."
+                  }
+                  confirmLabel="Delete"
+                  destructive
+                  variant="ghost"
+                  size="icon-xs"
+                  className="hidden shrink-0 text-bone-gray hover:text-traffic-red group-hover:inline-flex"
+                  onConfirm={() => onDelete(conv.id)}
                 >
                   <Trash2 className="size-3.5" />
-                </button>
+                </ConfirmButton>
               </div>
             ))}
           </div>

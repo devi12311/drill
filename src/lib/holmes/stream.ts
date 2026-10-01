@@ -23,9 +23,10 @@ const INVESTIGATION_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_FRONTEND_TOOL_ROUNDS = 4;
 
 /**
- * Drill's normalized stream events. The client only ever sees these;
- * Holmes SSE (or the fixture simulator) is mapped into them server-side.
- * `done.response` has conversation_history stripped — it stays server-side.
+ * Drill's normalized stream events: Holmes SSE (or the fixture simulator)
+ * mapped server-side. The chat runner saves all but `done` as the turn's
+ * progress (lib/chat/types.ts TurnEvent); the answer itself comes from the
+ * StreamOutcome, since `done.response` has conversation_history stripped.
  */
 export type DrillEvent =
   | { type: "tool_start"; id: string; tool_name: string }
@@ -35,8 +36,7 @@ export type DrillEvent =
       type: "done";
       response: Omit<HolmesChatResponse, "conversation_history">;
       drill_duration_ms: number;
-    }
-  | { type: "error"; message: string };
+    };
 
 /** Full response including history — for persistence, never sent to the client. */
 export interface StreamOutcome {
@@ -49,7 +49,7 @@ export function fixtureMode(): boolean {
 
 const FIXTURE_STEP_DELAY_MS = 350;
 
-async function* fixtureStream(): AsyncGenerator<DrillEvent> {
+async function* fixtureStream(abort?: AbortSignal): AsyncGenerator<DrillEvent> {
   const file = path.join(process.cwd(), "fixtures", "holmes-response.json");
   const response = JSON.parse(
     await fs.readFile(file, "utf-8"),
@@ -64,6 +64,9 @@ async function* fixtureStream(): AsyncGenerator<DrillEvent> {
       tool_name: call.tool_name,
     };
     await new Promise((r) => setTimeout(r, FIXTURE_STEP_DELAY_MS));
+    // Same contract as the live path: an abort surfaces as the caller's reason,
+    // so Stop and a worker shutdown can be exercised without spending a run.
+    if (abort?.aborted) throw abort.reason;
     yield { type: "tool_result", toolCall: call };
   }
   const { conversation_history: _history, ...clientResponse } = response;
@@ -95,6 +98,7 @@ async function* liveStream(
   req: HolmesChatRequest,
   outcome: StreamOutcome,
   agent: AgentTarget,
+  abort?: AbortSignal,
 ): AsyncGenerator<DrillEvent> {
   const started = Date.now();
   const toolCalls: ToolCall[] = [];
@@ -105,6 +109,7 @@ async function* liveStream(
       agent,
       body,
       INVESTIGATION_TIMEOUT_MS,
+      abort,
     );
 
     let resume: {
@@ -218,13 +223,18 @@ async function* liveStream(
   );
 }
 
+/**
+ * `abort` stops the investigation early (Stop, a worker shutting down); the
+ * stream then throws the signal's own reason, as `openHolmesStream` does.
+ */
 export async function* streamHolmes(
   req: HolmesChatRequest,
   outcome: StreamOutcome,
   agent: AgentTarget,
+  abort?: AbortSignal,
 ): AsyncGenerator<DrillEvent> {
   if (fixtureMode()) {
-    for await (const ev of fixtureStream()) {
+    for await (const ev of fixtureStream(abort)) {
       if (ev.type === "done") {
         // Re-read for the full history copy used in persistence.
         const file = path.join(
@@ -238,5 +248,5 @@ export async function* streamHolmes(
     }
     return;
   }
-  yield* liveStream(req, outcome, agent);
+  yield* liveStream(req, outcome, agent, abort);
 }

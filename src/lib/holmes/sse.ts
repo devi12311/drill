@@ -65,6 +65,13 @@ export interface HolmesStream {
 /** Holmes reported the failure itself (SSE `error` event) — not a transport problem. */
 class HolmesReportedError extends Error {}
 
+/**
+ * Drill lost Holmes rather than Holmes failing: unreachable, dropped mid-stream, or
+ * past the deadline. Its own class because a chat turn resumes these on its own
+ * (lib/chat/runner.ts) and must not have to recognise them by their wording.
+ */
+export class HolmesConnectionError extends Error {}
+
 /** Minimal SSE parser: yields {event, data} per frame. Comment lines are ignored. */
 async function* parseSse(
   body: AsyncIterable<Uint8Array>,
@@ -125,7 +132,7 @@ export function connectionLost(progress: StreamProgress, cause: string): Error {
     idle >= 55_000 && idle <= 70_000
       ? " A drop about 60s after the last event is a proxy idle timeout — reach Holmes by its in-cluster Service URL or raise the ingress read timeout."
       : "";
-  return new Error(
+  return new HolmesConnectionError(
     `Connection to Holmes dropped ${seconds(idle)} after its last event, ${progress.toolCalls} tool calls and ${seconds(
       Date.now() - progress.startedAt,
     )} in (${cause}). Holmes may still be running this investigation.${proxyHint}`,
@@ -174,7 +181,7 @@ async function* readEvents(
     if (err instanceof HolmesReportedError) throw err;
     if (signal.aborted && callerAborted(signal)) throw signal.reason;
     if (signal.aborted)
-      throw new Error(
+      throw new HolmesConnectionError(
         `Holmes did not finish within the ${seconds(
           Date.now() - progress.startedAt,
         )} deadline (${progress.toolCalls} tool calls in)`,
@@ -224,7 +231,9 @@ export async function openHolmesStream(
     });
   } catch (err) {
     if (signal.aborted && callerAborted(signal)) throw signal.reason;
-    throw new Error(`Could not reach Holmes at ${base}: ${causeOf(err)}`);
+    throw new HolmesConnectionError(
+      `Could not reach Holmes at ${base}: ${causeOf(err)}`,
+    );
   }
   if (!res.ok || !res.body) {
     const errBody = await res.text().catch(() => "");

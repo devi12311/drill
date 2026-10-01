@@ -3,6 +3,7 @@
 import { Markdown } from "./markdown";
 import { ToolTimeline } from "./tool-timeline";
 import { ApprovalCard } from "./approval-card";
+import { StoppedNotice } from "./turn-card";
 import type {
   FollowUpAction,
   HolmesChatResponse,
@@ -110,6 +111,20 @@ export function AssistantMessage({
   }
   const response = entry.response;
   if (!response) return null;
+  if (response.drill_error) {
+    // A stopped turn the user moved on from: what it gathered stays readable.
+    const toolCalls = response.tool_calls ?? [];
+    return (
+      <div className="space-y-4">
+        <ToolTimeline toolCalls={toolCalls} />
+        <StoppedNotice
+          error={response.drill_error}
+          cancelled={response.drill_error.startsWith("Stopped")}
+          savedResults={toolCalls.filter((c) => c.tool_name !== "TodoWrite").length}
+        />
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
       <ToolTimeline toolCalls={response.tool_calls ?? []} />
