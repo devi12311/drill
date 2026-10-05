@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import {
   Collapsible,
@@ -37,51 +37,53 @@ function latestTodos(toolCalls: (ToolCall | undefined)[]): TodoItem[] | null {
 function TodoWidget({ todos }: { todos: TodoItem[] }) {
   const done = todos.filter((t) => t.status === "completed").length;
   return (
-    <div className="rounded-lg bg-smoke-charcoal/60 px-4 py-3">
+    <div className="px-2">
       <div className="text-caption-tracked uppercase text-bone-gray">
         Investigation plan · {done}/{todos.length}
       </div>
       <ul className="mt-2 space-y-1.5">
-        {[...todos]
-          .sort((a, b) => Number(a.id) - Number(b.id))
-          .map((todo) => (
-            <li
-              key={todo.id}
-              className="flex items-baseline gap-2.5 font-mono text-[13px] leading-snug"
+        {sortedTodos(todos).map((todo) => (
+          <li
+            key={todo.id}
+            className="flex items-baseline gap-2.5 font-mono text-[13px] leading-snug"
+          >
+            <span
+              className={cn(
+                "shrink-0",
+                todo.status === "completed" && "text-prompt-green",
+                todo.status === "in_progress" && "text-gold-leaf",
+                todo.status === "pending" && "text-bone-gray",
+              )}
             >
-              <span
-                className={cn(
-                  "shrink-0",
-                  todo.status === "completed" && "text-prompt-green",
-                  todo.status === "in_progress" && "text-gold-leaf",
-                  todo.status === "pending" && "text-bone-gray",
-                )}
-              >
-                {todo.status === "completed"
-                  ? "[x]"
-                  : todo.status === "in_progress"
-                    ? "[~]"
-                    : "[ ]"}
-              </span>
-              <span
-                className={cn(
-                  todo.status === "completed"
-                    ? "text-bone-gray"
-                    : "text-pale-stone",
-                )}
-              >
-                {todo.content}
-              </span>
-            </li>
-          ))}
+              {todo.status === "completed"
+                ? "[x]"
+                : todo.status === "in_progress"
+                  ? "[~]"
+                  : "[ ]"}
+            </span>
+            <span
+              className={cn(
+                todo.status === "completed"
+                  ? "text-bone-gray"
+                  : "text-pale-stone",
+              )}
+            >
+              {todo.content}
+            </span>
+          </li>
+        ))}
       </ul>
     </div>
   );
 }
 
+function isFailed(call: ToolCall): boolean {
+  return call.result.status === "error" || call.result.error !== null;
+}
+
 function ToolCallRow({ call }: { call: ToolCall }) {
   // Live statuses observed: success, error, no_data (empty but not failed).
-  const failed = call.result.status === "error" || call.result.error !== null;
+  const failed = isFailed(call);
   const noData = !failed && call.result.status !== "success";
   const output = call.result.data ?? call.result.error ?? "(no output)";
   const params = call.result.params;
@@ -139,33 +141,109 @@ function ToolCallRow({ call }: { call: ToolCall }) {
   );
 }
 
-/** Completed-investigation timeline (collapsed by default). */
+function sortedTodos(todos: TodoItem[]): TodoItem[] {
+  return [...todos].sort((a, b) => Number(a.id) - Number(b.id));
+}
+
+/** The step Holmes is on: the one in progress, else the next pending one. */
+function activeStep(todos: TodoItem[] | null): TodoItem | null {
+  if (!todos) return null;
+  const sorted = sortedTodos(todos);
+  return (
+    sorted.find((t) => t.status === "in_progress") ??
+    sorted.find((t) => t.status === "pending") ??
+    null
+  );
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function StatusDot({ state }: { state: "running" | "stopped" | "ok" | "failed" }) {
+  return (
+    <span
+      className={cn(
+        "size-1.5 shrink-0 rounded-full",
+        state === "running" && "animate-pulse bg-gold-leaf",
+        state === "stopped" && "bg-bone-gray",
+        state === "ok" && "bg-traffic-green",
+        state === "failed" && "bg-traffic-red",
+      )}
+    />
+  );
+}
+
+/**
+ * The whole investigation as one line that opens into the plan and every call.
+ * Collapsed even while live: a 70-call stack pushes the question off-screen, and
+ * the newest call is what the user actually watches.
+ */
+function TimelinePanel({
+  summary,
+  todos,
+  rows,
+  stopped,
+  footer,
+}: {
+  summary: ReactNode;
+  todos: TodoItem[] | null;
+  rows: LiveItem[];
+  stopped?: boolean;
+  footer?: ReactNode;
+}) {
+  return (
+    <div className="rounded-lg bg-smoke-charcoal/60 py-1">
+      <Collapsible>
+        <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2.5 rounded-sm px-2 py-1.5 text-left hover:bg-iron-veil/40">
+          <ChevronRight className="size-3.5 shrink-0 text-bone-gray transition-transform group-data-[state=open]:rotate-90" />
+          {summary}
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="mt-2 space-y-3 pl-2">
+            {todos && <TodoWidget todos={todos} />}
+            {rows.length > 0 && <TimelineRows rows={rows} stopped={stopped} />}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+      {footer}
+    </div>
+  );
+}
+
+function planFraction(todos: TodoItem[] | null): string {
+  if (!todos) return "";
+  return `${todos.filter((t) => t.status === "completed").length}/${todos.length}`;
+}
+
+/** Completed-investigation timeline: one collapsed summary line. */
 export function ToolTimeline({ toolCalls }: { toolCalls: ToolCall[] }) {
-  const [open, setOpen] = useState(false);
+  if (toolCalls.length === 0) return null;
   const todos = latestTodos(toolCalls);
   const steps = toolCalls.filter((c) => c.tool_name !== "TodoWrite");
-
-  if (toolCalls.length === 0) return null;
+  const failed = steps.filter(isFailed).length;
+  const rows: LiveItem[] = steps.map((c, i) => ({
+    kind: "call",
+    call: { id: `${c.tool_call_id}-${i}`, tool_name: c.tool_name, toolCall: c },
+  }));
 
   return (
-    <div className="space-y-3">
-      {todos && <TodoWidget todos={todos} />}
-      {steps.length > 0 && (
-        <Collapsible open={open} onOpenChange={setOpen}>
-          <CollapsibleTrigger className="group flex items-center gap-2 text-caption-tracked uppercase text-bone-gray hover:text-pale-stone">
-            <ChevronRight className="size-3.5 transition-transform group-data-[state=open]:rotate-90" />
-            Investigation · {steps.length} tool calls
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="mt-2 space-y-0.5 border-l border-border/60 pl-3">
-              {steps.map((call, i) => (
-                <ToolCallRow key={`${call.tool_call_id}-${i}`} call={call} />
-              ))}
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
-      )}
-    </div>
+    <TimelinePanel
+      todos={todos}
+      rows={rows}
+      summary={
+        <>
+          <StatusDot state={failed ? "failed" : "ok"} />
+          <span className="text-body-sm text-pale-stone">
+            Investigated with {plural(steps.length, "tool call")}
+          </span>
+          <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-bone-gray">
+            {todos ? `plan ${planFraction(todos)}` : ""}
+            {failed ? ` · ${failed} failed` : ""}
+          </span>
+        </>
+      }
+    />
   );
 }
 
@@ -181,8 +259,9 @@ export interface ResumeMark {
 export type LiveItem = { kind: "call"; call: LiveToolCall } | ResumeMark;
 
 /**
- * A turn's timeline as it streams in — and, when it stops, as it stopped: rows
- * appear as Holmes calls tools, with a divider wherever a resume picked up.
+ * A turn's timeline as it streams in — and, when it stops, as it stopped: the
+ * summary line tracks the newest call and the active plan step; opening it shows
+ * every row, with a divider wherever a resume picked up.
  */
 export function LiveTimeline({
   items,
@@ -199,53 +278,93 @@ export function LiveTimeline({
   const rows = items.filter(
     (i) => i.kind === "resume" || i.call.tool_name !== "TodoWrite",
   );
+  const steps = calls.filter((c) => c.tool_name !== "TodoWrite");
+  const current = steps.at(-1);
+  const running = !!current && !current.toolCall && !stopped;
+  const step = activeStep(todos);
 
   return (
-    <div className="space-y-3">
-      {todos && <TodoWidget todos={todos} />}
-      {aiNote && (
-        <div className="text-body-sm italic text-bone-gray">{aiNote}</div>
-      )}
-      {rows.length > 0 && (
-        <div className="space-y-0.5 border-l border-border/60 pl-3">
-          {rows.map((item, i) =>
-            item.kind === "resume" ? (
-              <div
-                key={`resume-${item.attempt}`}
-                className="flex items-center gap-3 py-2 text-caption-tracked uppercase text-bone-gray"
-              >
-                <span className="h-px flex-1 bg-border" />
-                <span className="shrink-0">
-                  {item.reason} after {item.callsBefore} tool call
-                  {item.callsBefore === 1 ? "" : "s"} · resuming from saved
-                  results · attempt {item.attempt}
-                </span>
-                <span className="h-px flex-1 bg-border" />
-              </div>
-            ) : item.call.toolCall ? (
-              <ToolCallRow key={`${item.call.id}-${i}`} call={item.call.toolCall} />
-            ) : (
-              <div
-                key={`${item.call.id}-${i}`}
-                className="flex items-center gap-2.5 px-2 py-1.5"
-              >
-                <span className="size-3.5 shrink-0" />
-                <span
-                  className={cn(
-                    "size-1.5 shrink-0 rounded-full",
-                    stopped ? "bg-bone-gray" : "animate-pulse bg-gold-leaf",
-                  )}
-                />
-                <span className="font-mono text-[13px] text-pale-stone">
-                  {item.call.tool_name}
-                </span>
-                <span className="text-body-sm text-bone-gray">
-                  {stopped ? "interrupted" : "running…"}
-                </span>
-              </div>
-            ),
+    <TimelinePanel
+      todos={todos}
+      rows={rows}
+      stopped={stopped}
+      summary={
+        <>
+          <StatusDot state={running ? "running" : stopped ? "stopped" : "ok"} />
+          <span className="shrink-0 font-mono text-[13px] text-warm-off-white">
+            {current?.tool_name ?? "Planning"}
+          </span>
+          <span className="min-w-0 truncate text-body-sm text-bone-gray">
+            {current?.toolCall?.description ?? (running ? "running…" : "")}
+          </span>
+          <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-bone-gray">
+            {todos ? `${planFraction(todos)} · ` : ""}
+            {steps.length}
+          </span>
+        </>
+      }
+      footer={
+        <>
+          {step && (
+            <p className="truncate px-9 pb-1.5 text-[12px] text-bone-gray">
+              Plan · {step.content}
+            </p>
           )}
-        </div>
+          {aiNote && (
+            <p className="px-9 pb-1.5 text-body-sm italic text-bone-gray">{aiNote}</p>
+          )}
+        </>
+      }
+    />
+  );
+}
+
+/** Streamed rows: finished calls, still-running calls, and resume dividers. */
+function TimelineRows({
+  rows,
+  stopped = false,
+}: {
+  rows: LiveItem[];
+  stopped?: boolean;
+}) {
+  return (
+    <div className="space-y-0.5 border-l border-border/60 pl-3">
+      {rows.map((item, i) =>
+        item.kind === "resume" ? (
+          <div
+            key={`resume-${item.attempt}`}
+            className="flex items-center gap-3 py-2 text-caption-tracked uppercase text-bone-gray"
+          >
+            <span className="h-px flex-1 bg-border" />
+            <span className="shrink-0">
+              {item.reason} after {item.callsBefore} tool call
+              {item.callsBefore === 1 ? "" : "s"} · resuming from saved
+              results · attempt {item.attempt}
+            </span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
+        ) : item.call.toolCall ? (
+          <ToolCallRow key={`${item.call.id}-${i}`} call={item.call.toolCall} />
+        ) : (
+          <div
+            key={`${item.call.id}-${i}`}
+            className="flex items-center gap-2.5 px-2 py-1.5"
+          >
+            <span className="size-3.5 shrink-0" />
+            <span
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                stopped ? "bg-bone-gray" : "animate-pulse bg-gold-leaf",
+              )}
+            />
+            <span className="font-mono text-[13px] text-pale-stone">
+              {item.call.tool_name}
+            </span>
+            <span className="text-body-sm text-bone-gray">
+              {stopped ? "interrupted" : "running…"}
+            </span>
+          </div>
+        ),
       )}
     </div>
   );
