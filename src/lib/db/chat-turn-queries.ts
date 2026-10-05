@@ -1,8 +1,9 @@
 import "server-only";
 import { and, asc, eq, gt, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { db, notify, type DbExecutor } from "./index";
+import { db, isUniqueViolation, notify, type DbExecutor } from "./index";
 import { addAssistantMessage, addUserMessage } from "./queries";
 import { chatTurnEvents, chatTurns } from "./schema";
+import type { MessageSkill } from "@/lib/skills/types";
 import {
   ACTIVE_TURN_STATUSES,
   type TurnEvent,
@@ -174,6 +175,8 @@ export async function openTurn(input: {
   question: string;
   note?: string;
   userLine: string;
+  /** The skill the line ran explicitly, recorded on the user's message. */
+  skill?: MessageSkill | null;
 }): Promise<OpenTurnResult> {
   try {
     const result = await db.transaction(async (tx): Promise<OpenTurnResult> => {
@@ -187,7 +190,7 @@ export async function openTurn(input: {
           return { ok: false, activeTurnId: existing.id };
         await dismissInTx(tx, existing);
       }
-      await addUserMessage(input.conversationId, input.userLine, tx);
+      await addUserMessage(input.conversationId, input.userLine, tx, input.skill);
       const [turn] = await tx
         .insert(chatTurns)
         .values({
@@ -210,7 +213,7 @@ export async function openTurn(input: {
   } catch (err) {
     // Two sends racing past the row lock (neither saw the other's insert): the
     // unique index decides, and the loser attaches to the winner.
-    if ((err as { code?: string }).code === "23505") {
+    if (isUniqueViolation(err)) {
       const open = await getOpenTurn(input.conversationId);
       if (open) return { ok: false, activeTurnId: open.id };
     }

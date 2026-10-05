@@ -8,13 +8,18 @@ import type {
   FollowUpAction,
   HolmesChatResponse,
   ToolApprovalDecision,
+  ToolCall,
 } from "@/lib/holmes/types";
+import { FETCH_SKILL_TOOL_NAME } from "@/lib/skills/prompt";
+import type { MessageSkill } from "@/lib/skills/types";
 
 export interface ChatEntry {
   id: string;
   role: "user" | "assistant";
   /** user entries */
   ask?: string;
+  /** user entries: the skill the line ran explicitly */
+  skill?: MessageSkill;
   /** assistant entries */
   response?: HolmesChatResponse & { drill_duration_ms?: number };
   error?: string;
@@ -22,15 +27,35 @@ export interface ChatEntry {
 }
 
 /** User ask rendered as a terminal command line (DESIGN.md brew-chip voice). */
-export function UserMessage({ ask }: { ask: string }) {
+export function UserMessage({ ask, skill }: { ask: string; skill?: MessageSkill }) {
   return (
     <div className="flex items-baseline gap-3">
       <span className="mt-1 size-2 shrink-0 translate-y-[-1px] rounded-full bg-prompt-green" />
-      <p className="min-w-0 flex-1 font-mono text-body whitespace-pre-wrap break-words text-warm-off-white">
-        {ask}
-      </p>
+      <div className="min-w-0 flex-1">
+        {skill && <SkillTag label="Ran skill" name={skill.name} />}
+        <p className="font-mono text-body whitespace-pre-wrap break-words text-warm-off-white">
+          {ask}
+        </p>
+      </div>
     </div>
   );
+}
+
+function SkillTag({ label, name }: { label: string; name: string }) {
+  return (
+    <div className="mb-1.5 text-caption-tracked uppercase text-bone-gray">
+      {label} · <span className="font-mono normal-case tracking-normal text-pale-stone">{name}</span>
+    </div>
+  );
+}
+
+/** Skills Holmes fetched on its own during the turn (failed fetches excluded). */
+function fetchedSkills(toolCalls: ToolCall[]): string[] {
+  const names = toolCalls
+    .filter((c) => c.tool_name === FETCH_SKILL_TOOL_NAME && c.result?.status === "success")
+    .map((c) => String((c.result.params as { skill_name?: unknown } | null)?.skill_name ?? ""))
+    .filter(Boolean);
+  return [...new Set(names)];
 }
 
 function CostFooter({
@@ -125,8 +150,10 @@ export function AssistantMessage({
       </div>
     );
   }
+  const usedSkills = fetchedSkills(response.tool_calls ?? []);
   return (
     <div className="space-y-4">
+      {usedSkills.length > 0 && <SkillTag label="Used skill" name={usedSkills.join(", ")} />}
       <ToolTimeline toolCalls={response.tool_calls ?? []} />
       <Markdown>{response.analysis}</Markdown>
       {!!response.pending_approvals?.length && (

@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { BookMarked, ChevronDown, Plus, Settings2, Trash2 } from "lucide-react";
+import { BookMarked, ChevronDown, ListChecks, Plus, Settings2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -145,6 +145,12 @@ export function Sidebar({
           icon={BookMarked}
           active={pathname.startsWith("/resolutions")}
         />
+        <SideNavLink
+          href="/skills"
+          label="Skills"
+          icon={ListChecks}
+          active={pathname.startsWith("/skills")}
+        />
       </div>
 
       <div className="mt-6 min-h-0 flex-1 overflow-y-auto px-3 pb-4">
@@ -165,14 +171,16 @@ export function Sidebar({
               <div
                 key={conv.id}
                 className={cn(
-                  "group flex items-center gap-2 rounded-sm px-2 py-2 hover:bg-smoke-charcoal",
-                  activeId === conv.id && "bg-smoke-charcoal",
+                  "group flex items-center gap-2 rounded-sm px-2 py-2 hover:bg-smoke-charcoal/50",
+                  activeId === conv.id && "bg-iron-veil hover:bg-iron-veil",
                 )}
+                data-active={activeId === conv.id ? "" : undefined}
               >
                 <button
                   type="button"
                   onClick={() => onSelect(conv.id)}
-                  className="min-w-0 flex-1 text-left"
+                  aria-current={activeId === conv.id ? "page" : undefined}
+                  className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 >
                   <div className="flex items-center gap-1.5">
                     {(() => {
@@ -189,11 +197,11 @@ export function Sidebar({
                         )
                       );
                     })()}
-                    <span className="truncate text-body-sm text-pale-stone group-hover:text-warm-off-white">
+                    <span className="truncate text-body-sm text-warm-off-white/90 group-data-[active]:font-medium group-data-[active]:text-warm-off-white">
                       {conv.title}
                     </span>
                   </div>
-                  <div className="mt-0.5 font-mono text-[11px] text-bone-gray">
+                  <div className="mt-0.5 font-mono text-[11px] text-bone-gray group-hover:text-pale-stone group-data-[active]:text-pale-stone">
                     {shortDate(conv.updatedAt)} · {conv.model}
                   </div>
                 </button>
@@ -209,7 +217,7 @@ export function Sidebar({
                   destructive
                   variant="ghost"
                   size="icon-xs"
-                  className="hidden shrink-0 text-bone-gray hover:text-traffic-red group-hover:inline-flex"
+                  className="hidden shrink-0 text-pale-stone hover:text-traffic-red focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex"
                   onConfirm={() => onDelete(conv.id)}
                 >
                   <Trash2 className="size-3.5" />

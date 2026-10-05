@@ -7,6 +7,7 @@ import { DialogBody } from "@/components/ui/dialog";
 import { Field } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
 import { autoSize } from "@/components/monitoring/auto-size";
+import { placeholdersIn } from "@/lib/templates";
 import { ModalFooter } from "@/components/monitoring/definition-modal";
 import { MeasurementRows } from "@/components/monitoring/measurement-rows";
 import {
@@ -223,9 +224,7 @@ export function PlaybookForm({
   const problems = useMemo(() => {
     const found: Record<string, string> = {};
     const unknownPlaceholder = (value: string) => {
-      for (const [, inner] of value.matchAll(/\{\{([^}]*)\}\}/g))
-        if (!PLACEHOLDERS.includes(inner.trim())) return inner.trim();
-      return null;
+      return placeholdersIn(value).find((name) => !PLACEHOLDERS.includes(name)) ?? null;
     };
 
     if (!framing.trim()) found.framing = "The framing paragraph is required.";

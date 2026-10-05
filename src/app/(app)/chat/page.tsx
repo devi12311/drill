@@ -14,9 +14,9 @@ import {
   type AgentSummary,
 } from "@/components/agents/agents-dialog";
 import type { ChatEntry } from "@/components/chat/messages";
+import { AGENT_STORAGE_KEY, pickActiveAgent } from "@/components/agents/active-agent";
 import type { ConversationActivity, TurnSnapshot } from "@/lib/chat/types";
 
-const AGENT_STORAGE_KEY = "drill.activeAgentId";
 /** While anything is investigating, the list is re-read this often (its dots). */
 const LIST_POLL_MS = 10_000;
 
@@ -66,12 +66,7 @@ export default function ChatWorkspace() {
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       const list = body as AgentSummary[];
       setAgents(list);
-      setActiveAgentId((current) => {
-        const stored =
-          current ?? localStorage.getItem(AGENT_STORAGE_KEY) ?? null;
-        if (stored && list.some((a) => a.id === stored)) return stored;
-        return list[0]?.id ?? null;
-      });
+      setActiveAgentId((current) => pickActiveAgent(list, current));
     } catch {
       // ignore; sidebar will show empty state
     } finally {

@@ -38,6 +38,7 @@ export async function GET(_request: Request, context: Context) {
         id: row.id,
         role: row.role,
         content: row.content,
+        skill: row.skill,
         model: row.model,
         response,
       };

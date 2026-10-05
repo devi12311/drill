@@ -10,7 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Composer } from "./composer";
+import { Composer, type SkillRun } from "./composer";
 import { loadConversation } from "./conversation-api";
 import {
   AssistantMessage,
@@ -20,6 +20,9 @@ import {
 import { TurnCard } from "./turn-card";
 import { useTurnStream } from "./use-turn-stream";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
+import { useSkills } from "@/components/skills/use-skills";
+import { invocationLine } from "@/lib/skills/prompt";
+import type { MessageSkill } from "@/lib/skills/types";
 import { useSession } from "@/components/session/session-provider";
 import { isActiveTurn, type TurnSnapshot } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
@@ -103,6 +106,14 @@ export function Chat({
   const [entries, setEntries] = useState<ChatEntry[]>(initialEntries);
   const [actionError, setActionError] = useState<string | null>(null);
   const models = useModels(agentId);
+  const { skills: visibleSkills } = useSkills();
+  // What the server will run for this user: their own and shared skills. An
+  // admin's list also holds other users' private ones, and always-on skills
+  // already apply to every turn.
+  const runnableSkills =
+    visibleSkills?.filter(
+      (s) => !s.alwaysOn && (s.visibility === "shared" || s.createdBy === user.id),
+    ) ?? null;
   const [pickedModel, setModel] = useState<string | null>(null);
   // Derived, not stored: the agent's first model IS the default, and a pick
   // the agent no longer serves (or one from another agent) falls back to it.
@@ -162,6 +173,19 @@ export function Chat({
     return run(ask, { ask }, preNotice);
   }
 
+  /** An explicit skill run; the line mirrors what the server stores. */
+  function runSkill(ask: string, { skill, values }: SkillRun) {
+    const filled = Object.fromEntries(
+      Object.entries(values).map(([k, v]) => [k, v.trim()]).filter(([, v]) => v),
+    );
+    return run(
+      invocationLine(skill, filled, ask),
+      { ask, skill: { id: skill.id, inputs: filled } },
+      undefined,
+      { id: skill.id, name: skill.name },
+    );
+  }
+
   /** Answers the pending approval; the summary mirrors what the server stores. */
   function decide(decisions: ToolApprovalDecision[]) {
     const pending =
@@ -184,8 +208,11 @@ export function Chat({
    */
   async function run(
     userLine: string,
-    payload: { ask: string } | { tool_decisions: ToolApprovalDecision[] },
+    payload:
+      | { ask: string; skill?: { id: string; inputs: Record<string, string> } }
+      | { tool_decisions: ToolApprovalDecision[] },
     preNotice?: string,
+    skill?: MessageSkill,
   ): Promise<boolean> {
     if (!model) return false;
     setActionError(null);
@@ -195,7 +222,7 @@ export function Chat({
     const optimisticId = crypto.randomUUID();
     setEntries((prev) => [
       ...prev,
-      { id: optimisticId, role: "user", ask: userLine },
+      { id: optimisticId, role: "user", ask: userLine, skill },
     ]);
     const unsend = () =>
       setEntries((prev) => prev.filter((e) => e.id !== optimisticId));
@@ -344,7 +371,7 @@ export function Chat({
             <div className="space-y-8 py-8">
               {entries.map((entry, i) =>
                 entry.role === "user" ? (
-                  <UserMessage key={entry.id} ask={entry.ask!} />
+                  <UserMessage key={entry.id} ask={entry.ask!} skill={entry.skill} />
                 ) : (
                   <AssistantMessage
                     key={entry.id}
@@ -384,12 +411,13 @@ export function Chat({
           <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
         )}
         <Composer
-          onSend={send}
+          onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
           onStop={() => turnAction("cancel")}
           busy={active}
           models={models}
           model={model}
           onModelChange={setModel}
+          skills={runnableSkills}
         />
       </div>
       {conversationId && (

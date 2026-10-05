@@ -14,12 +14,10 @@ import type {
   ToolApprovalDecision,
 } from "@/lib/holmes/types";
 import { servedModels } from "@/lib/holmes/validate";
-import {
-  buildInjectionPrompt,
-  RELEVANCE_FLOOR,
-  searchArtifacts,
-  SEARCH_TOOL_DEF,
-} from "@/lib/artifacts/search";
+import { buildHolmesExtras } from "@/lib/chat/extras";
+import { getUsableSkill } from "@/lib/db/skill-queries";
+import { invocationLine, renderInvocation } from "@/lib/skills/prompt";
+import { validateSkillValues, type MessageSkill } from "@/lib/skills/types";
 
 /** How a decision reads in the transcript (stored as the user's turn). */
 function describeDecisions(
@@ -39,8 +37,9 @@ function describeDecisions(
 
 /**
  * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }, or
- * { tool_decisions, agent_id, conversation_id, model? } to answer a paused
- * tool approval (see lib/holmes/stream.ts).
+ * { skill: { id, inputs }, ask?, … } to run a skill explicitly (`ask` is then
+ * optional extra context), or { tool_decisions, agent_id, conversation_id,
+ * model? } to answer a paused tool approval (see lib/holmes/stream.ts).
  *
  * Queues the turn and returns at once — 202 { conversation_id, turn_id }. The
  * worker's chat lane runs the investigation (lib/chat/runner.ts) and the client
@@ -58,6 +57,7 @@ export async function POST(request: Request) {
     agent_id?: string;
     conversation_id?: string;
     tool_decisions?: ToolApprovalDecision[];
+    skill?: { id?: string; inputs?: Record<string, unknown> };
   };
   try {
     body = await request.json();
@@ -72,8 +72,9 @@ export async function POST(request: Request) {
           d.feedback?.trim() && { feedback: d.feedback.trim() }),
       }))
     : null;
-  const ask = body.ask?.trim();
-  if (!ask && !decisions?.length) {
+  const typed = body.ask?.trim() ?? "";
+  const skillId = !decisions && body.skill?.id ? String(body.skill.id) : null;
+  if (!typed && !skillId && !decisions?.length) {
     return Response.json({ error: "`ask` is required" }, { status: 400 });
   }
   if (decisions && !body.conversation_id) {
@@ -84,6 +85,34 @@ export async function POST(request: Request) {
   }
   if (!body.agent_id) {
     return Response.json({ error: "`agent_id` is required" }, { status: 400 });
+  }
+
+  // An explicit run sends the rendered procedure to Holmes, while the transcript
+  // (and a new conversation's title) shows only the command-like line.
+  let ask = typed;
+  let userLine = typed;
+  let messageSkill: MessageSkill | null = null;
+  if (skillId) {
+    let skill;
+    try {
+      skill = await getUsableSkill(user.id, { id: skillId });
+    } catch (err) {
+      return databaseUnreachable(err);
+    }
+    if (!skill) {
+      return Response.json({ error: "Skill not found" }, { status: 404 });
+    }
+    try {
+      const values = validateSkillValues(skill, body.skill?.inputs);
+      ask = renderInvocation(skill, values, typed);
+      userLine = invocationLine(skill, values, typed);
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : "Invalid skill inputs" },
+        { status: 400 },
+      );
+    }
+    messageSkill = { id: skill.id, name: skill.name };
   }
 
   let model = body.model?.trim();
@@ -144,7 +173,7 @@ export async function POST(request: Request) {
         await createConversation({
           userId: user.id,
           agentId: agent.id,
-          ask: ask!,
+          ask: userLine,
           model,
         })
       ).id;
@@ -153,11 +182,8 @@ export async function POST(request: Request) {
     return databaseUnreachable(err);
   }
 
-  // Knowledge integration (live only): inject the top similar resolutions
-  // into the system prompt and let Holmes search deeper via the frontend
-  // tool. Search failures must never block an investigation.
   // A decision resumes Holmes's paused history with no new user turn (empty
-  // `ask`); knowledge injection only applies to a fresh question.
+  // `ask`). Drill's tools and system prompt are live-only (lib/chat/extras.ts).
   const holmesReq: HolmesChatRequest = paused
     ? {
         ask: "",
@@ -168,22 +194,14 @@ export async function POST(request: Request) {
           frontend_tool_results: paused.drill_frontend_tool_results,
         }),
       }
-    : { ask: ask!, model, conversation_history: history };
+    : { ask, model, conversation_history: history };
   if (!fixtureMode()) {
-    holmesReq.enable_tool_approval = true;
-    holmesReq.frontend_tools = [SEARCH_TOOL_DEF];
-  }
-  if (!fixtureMode() && !paused) {
-    try {
-      const hits = (await searchArtifacts(ask!, { limit: 3 })).filter(
-        (h) => h.score >= RELEVANCE_FLOOR,
-      );
-      if (hits.length) {
-        holmesReq.additional_system_prompt = buildInjectionPrompt(hits);
-      }
-    } catch {
-      // knowledge base unavailable — investigate without it
-    }
+    Object.assign(
+      holmesReq,
+      // The typed text, not the rendered skill: past resolutions are matched on
+      // what the user described.
+      await buildHolmesExtras({ ask: paused ? null : typed || userLine, userId: user.id }),
+    );
   }
 
   const note = paused ? describeDecisions(paused, decisions!) : undefined;
@@ -199,9 +217,10 @@ export async function POST(request: Request) {
       // which is the conversation's first question.
       question: paused
         ? (paused.drill_question ?? conversationTitle ?? "")
-        : ask!,
+        : ask,
       note,
-      userLine: note ?? ask!,
+      userLine: note ?? userLine,
+      skill: messageSkill,
     });
     if (!result.ok) {
       return Response.json(

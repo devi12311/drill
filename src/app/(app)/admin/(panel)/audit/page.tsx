@@ -20,6 +20,8 @@ interface AuditRow {
 const ACTION_LABEL: Record<string, string> = {
   "impersonate.start": "Started impersonating",
   "impersonate.stop": "Stopped impersonating",
+  "skill.update": "Changed a shared skill",
+  "skill.delete": "Deleted a shared skill",
 };
 
 export default function AdminAuditPage() {

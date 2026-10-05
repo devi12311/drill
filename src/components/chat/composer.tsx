@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUp, ChevronDown, Square } from "lucide-react";
+import Link from "next/link";
+import { ArrowUp, ChevronDown, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -9,6 +10,52 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { fuzzyFilter } from "@/lib/fuzzy";
+import { parseInvocationLine } from "@/lib/skills/prompt";
+import type { SkillView } from "@/lib/skills/types";
+import { cn } from "@/lib/utils";
+
+const MAX_SUGGESTIONS = 8;
+
+interface Suggestion {
+  skill: SkillView;
+  /** Name characters the query matched, for highlighting. */
+  positions: number[];
+}
+
+/**
+ * While the draft is a bare `/partial-name` (no skill picked yet), the skills it
+ * could mean, fuzzy-ranked like an IDE file picker: `/cointpro` finds
+ * cost-integration-problems.
+ */
+function slashMatches(value: string, skills: SkillView[] | null): Suggestion[] | null {
+  const query = value.match(/^\/([\w-]*)$/)?.[1];
+  if (query === undefined || !skills) return null;
+  return fuzzyFilter(query, skills, (s) => s.name)
+    .slice(0, MAX_SUGGESTIONS)
+    .map(({ item, positions }) => ({ skill: item, positions }));
+}
+
+function HighlightedName({ name, positions }: { name: string; positions: number[] }) {
+  const hit = new Set(positions);
+  return (
+    <>
+      {[...name].map((ch, i) => (
+        <span key={i} className={hit.has(i) ? "text-gold-leaf" : undefined}>
+          {ch}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** An explicit skill run: the picked skill and the values typed for its inputs. */
+export interface SkillRun {
+  skill: SkillView;
+  values: Record<string, string>;
+}
+
 export function Composer({
   onSend,
   onStop,
@@ -16,9 +63,13 @@ export function Composer({
   models,
   model,
   onModelChange,
+  skills,
 }: {
-  /** Resolves false when the question was not sent — the draft is put back. */
-  onSend: (ask: string) => Promise<boolean>;
+  /**
+   * Resolves false when nothing was sent — the draft is put back. With `run`,
+   * `ask` is optional extra context for the skill.
+   */
+  onSend: (ask: string, run?: SkillRun) => Promise<boolean>;
   onStop: () => void;
   /** An investigation is running: Send becomes Stop, typing stays allowed. */
   busy: boolean;
@@ -27,38 +78,185 @@ export function Composer({
   /** Null until the agent has served at least one model. */
   model: string | null;
   onModelChange: (model: string) => void;
+  /** Skills that can be run explicitly here; null while loading. */
+  skills: SkillView[] | null;
 }) {
   const [value, setValue] = useState("");
   const [blocked, setBlocked] = useState(false);
+  const [run, setRun] = useState<SkillRun | null>(null);
+  const [highlight, setHighlight] = useState(0);
+  // Esc hides the list for the draft it was pressed on; typing brings it back.
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const suggestions =
+    run || dismissedFor === value ? null : slashMatches(value, skills);
+  const active = suggestions?.length ? Math.min(highlight, suggestions.length - 1) : 0;
+
+  function pick(skill: SkillView, values: Record<string, string> = {}, note = "") {
+    setRun({ skill, values });
+    setValue(note);
+    setHighlight(0);
+  }
+  const missing =
+    run?.skill.inputs.filter((i) => i.required && !run.values[i.key]?.trim()) ?? [];
+  const ready = run ? missing.length === 0 : value.trim() !== "";
 
   async function submit() {
-    const ask = value.trim();
+    // A fully typed `/skill key=value …` runs like a picked one. Missing a
+    // required input, it opens the inputs panel with what was typed instead.
+    const typed = !run && skills ? parseInvocationLine(value, skills) : null;
+    if (typed) {
+      const lacking = typed.skill.inputs.some((i) => i.required && !typed.values[i.key]);
+      if (lacking || busy) {
+        pick(typed.skill, typed.values, typed.note);
+        if (busy) setBlocked(true);
+        return;
+      }
+    }
+    const ask = typed ? typed.note : value.trim();
+    const skillRun = typed ? { skill: typed.skill, values: typed.values } : run;
     if (busy) {
-      if (ask) setBlocked(true);
+      if (ask || run) setBlocked(true);
       return;
     }
-    if (!ask || !model) return;
+    if (!(typed || ready) || !model) return;
     setValue("");
-    // Restored only if nothing new was typed meanwhile.
-    if (!(await onSend(ask))) setValue((current) => current || ask);
+    // Restored only if nothing new was typed meanwhile; the skill stays picked
+    // until a run actually goes out.
+    if (await onSend(ask, skillRun ?? undefined)) setRun(null);
+    else setValue((current) => current || (typed ? value : ask));
   }
 
   return (
-    <div className="rounded-lg border border-input bg-smoked-onyx focus-within:border-ring/60">
+    <div className="relative rounded-lg border border-input bg-smoked-onyx focus-within:border-ring/60">
+      {suggestions && (
+        <div
+          role="listbox"
+          aria-label="Skills"
+          className="absolute inset-x-0 bottom-full mb-2 overflow-hidden rounded-lg border border-border bg-smoke-charcoal"
+        >
+          {suggestions.length === 0 ? (
+            <div className="px-4 py-2.5 text-body-sm text-bone-gray">
+              {skills?.length ? "No skill matches." : "No skills yet."}{" "}
+              <Link href="/skills" className="text-pale-stone hover:text-warm-off-white">
+                Manage skills
+              </Link>
+            </div>
+          ) : (
+            suggestions.map(({ skill, positions }, i) => (
+              <button
+                key={skill.id}
+                type="button"
+                role="option"
+                aria-selected={i === active}
+                // mousedown, not click: keeps focus in the textarea
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(skill);
+                }}
+                onMouseEnter={() => setHighlight(i)}
+                className={cn(
+                  "flex w-full items-baseline gap-3 px-4 py-2 text-left",
+                  i === active && "bg-iron-veil",
+                )}
+              >
+                <span className="shrink-0 font-mono text-[13px] text-warm-off-white">
+                  /<HighlightedName name={skill.name} positions={positions} />
+                </span>
+                <span className="truncate text-[12px] text-bone-gray">{skill.description}</span>
+              </button>
+            ))
+          )}
+          <div className="border-t border-border px-4 py-1.5 text-[11px] text-bone-gray">
+            ↑↓ to choose · Enter or Tab to pick · Esc to close · or type{" "}
+            <span className="font-mono">/name key=value</span> and send ·{" "}
+            <Link href="/skills" className="text-pale-stone hover:text-warm-off-white">
+              Manage skills
+            </Link>
+          </div>
+        </div>
+      )}
+      {run && (
+        <div className="space-y-2.5 border-b border-border px-4 pb-3 pt-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-body-sm text-warm-off-white">
+              /{run.skill.name}
+            </span>
+            <button
+              type="button"
+              onClick={() => setRun(null)}
+              aria-label="Do not run the skill"
+              title="Do not run the skill (Esc)"
+              className="rounded-sm p-1 text-bone-gray hover:text-warm-off-white"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          {run.skill.inputs.length > 0 && (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {run.skill.inputs.map((input) => (
+                <Input
+                  key={input.key}
+                  value={run.values[input.key] ?? ""}
+                  onChange={(e) =>
+                    setRun({ ...run, values: { ...run.values, [input.key]: e.target.value } })
+                  }
+                  placeholder={input.required ? input.label : `${input.label} (optional)`}
+                  aria-label={input.label}
+                  className="font-mono text-[13px]"
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <textarea
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
           setBlocked(false);
+          setHighlight(0);
         }}
         onKeyDown={(e) => {
+          if (suggestions?.length) {
+            const move = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+            if (move) {
+              e.preventDefault();
+              setHighlight((active + move + suggestions.length) % suggestions.length);
+              return;
+            }
+            if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+              e.preventDefault();
+              pick(suggestions[active].skill);
+              return;
+            }
+          }
+          if (e.key === "Escape" && suggestions) {
+            e.preventDefault();
+            setDismissedFor(value);
+            return;
+          }
+          if (e.key === "Escape" && run) {
+            // Esc undoes the pick that Enter made; whatever was typed stays.
+            e.preventDefault();
+            setRun(null);
+            return;
+          }
+          if (e.key === "Backspace" && run && value === "") {
+            // Backspace on an empty draft undoes the pick, like deleting a chip.
+            setRun(null);
+            return;
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             submit();
           }
         }}
         rows={3}
-        placeholder="Describe the problem — include trace ids, namespaces, error text…"
+        placeholder={
+          run
+            ? "Anything else Holmes should know (optional)…"
+            : "Describe the problem — or type / to run a skill…"
+        }
         className="w-full resize-none bg-transparent px-4 pt-3 font-mono text-body-sm text-warm-off-white outline-none placeholder:text-bone-gray"
       />
       <div className="flex items-center justify-between px-3 pb-2.5">
@@ -99,7 +297,8 @@ export function Composer({
             <Button
               size="icon-sm"
               onClick={submit}
-              disabled={!model || !value.trim()}
+              disabled={!model || !(ready || value.trim().startsWith("/"))}
+              title={missing.length ? `Fill in ${missing.map((i) => i.label).join(", ")}` : undefined}
               aria-label="Send"
             >
               <ArrowUp />

@@ -1,7 +1,7 @@
 import "server-only";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { runSearchTool, SEARCH_TOOL_NAME } from "@/lib/artifacts/search";
+import { runFrontendTool, type FrontendToolContext } from "./frontend-tools";
 import type {
   ConversationMessage,
   FrontendToolResult,
@@ -19,8 +19,11 @@ import {
 } from "./sse";
 
 const INVESTIGATION_TIMEOUT_MS = 15 * 60 * 1000;
-/** Backstop against Holmes calling the knowledge tool in a loop. */
-const MAX_FRONTEND_TOOL_ROUNDS = 4;
+/**
+ * Backstop against Holmes calling Drill's tools in a loop. Knowledge searches and
+ * skill fetches share it; Holmes itself sets no limit on pause rounds.
+ */
+const MAX_FRONTEND_TOOL_ROUNDS = 6;
 
 /**
  * Drill's normalized stream events: Holmes SSE (or the fixture simulator)
@@ -84,10 +87,10 @@ async function* fixtureStream(abort?: AbortSignal): AsyncGenerator<DrillEvent> {
  * (ai_answer_end does not include it).
  *
  * Frontend tools: when Holmes pauses with `approval_required` carrying
- * `pending_frontend_tool_calls`, Drill executes the knowledge search
- * server-side, emits it as a regular tool_start/tool_result pair (so the
- * timeline and persistence need no special casing), and resumes with a new
- * POST carrying `frontend_tool_results` + Holmes's paused history.
+ * `pending_frontend_tool_calls`, Drill runs them server-side
+ * (lib/holmes/frontend-tools.ts), emits each as a regular tool_start/tool_result
+ * pair (so the timeline and persistence need no special casing), and resumes
+ * with a new POST carrying `frontend_tool_results` + Holmes's paused history.
  *
  * Tool approvals: a pause that also carries `pending_approvals` ends the
  * stream with a `done` whose response has them set. That response (with the
@@ -98,6 +101,7 @@ async function* liveStream(
   req: HolmesChatRequest,
   outcome: StreamOutcome,
   agent: AgentTarget,
+  ctx: FrontendToolContext,
   abort?: AbortSignal,
 ): AsyncGenerator<DrillEvent> {
   const started = Date.now();
@@ -155,24 +159,17 @@ async function* liveStream(
             const id = String(call.tool_call_id ?? "");
             const name = String(call.tool_name ?? "");
             yield { type: "tool_start", id, tool_name: name };
-            const resultData =
-              name === SEARCH_TOOL_NAME
-                ? await runSearchTool(call.arguments)
-                : JSON.stringify({ error: `unknown frontend tool: ${name}` });
-            const toolCall: ToolCall = {
-              tool_call_id: id,
-              tool_name: name,
-              toolset_name: "drill-knowledge",
-              description: `${name}(${
-                typeof call.arguments === "string"
-                  ? call.arguments
-                  : JSON.stringify(call.arguments ?? {})
-              })`,
-              result: { status: "success", error: null, data: resultData },
-            };
+            const toolCall = await runFrontendTool(
+              { id, name, arguments: call.arguments },
+              ctx,
+            );
             toolCalls.push(toolCall);
             yield { type: "tool_result", toolCall };
-            results.push({ tool_call_id: id, tool_name: name, result: resultData });
+            results.push({
+              tool_call_id: id,
+              tool_name: name,
+              result: toolCall.result.data ?? "",
+            });
           }
           if (approvals.length > 0) {
             const response: HolmesChatResponse = {
@@ -212,14 +209,18 @@ async function* liveStream(
     if (!resume)
       throw connectionLost(progress, "stream closed without a final answer");
     body = {
-      ...req, // keeps ask, model, frontend_tools, additional_system_prompt
+      ...req, // keeps model, frontend_tools, approval mode
+      // Empty, or Holmes takes this for a new turn: it rebuilds the messages and
+      // appends the question again after the tool result (server.py `resume_only`).
+      // The system prompt already sits in the paused history.
+      ask: "",
       tool_decisions: undefined, // already redeemed in the previous round
       conversation_history: resume.history, // Holmes's own paused state
       frontend_tool_results: resume.results,
     };
   }
   throw new Error(
-    `Investigation exceeded ${MAX_FRONTEND_TOOL_ROUNDS} knowledge-search rounds`,
+    `Investigation exceeded ${MAX_FRONTEND_TOOL_ROUNDS} rounds of Drill tool calls (knowledge search, skills)`,
   );
 }
 
@@ -231,6 +232,7 @@ export async function* streamHolmes(
   req: HolmesChatRequest,
   outcome: StreamOutcome,
   agent: AgentTarget,
+  ctx: FrontendToolContext,
   abort?: AbortSignal,
 ): AsyncGenerator<DrillEvent> {
   if (fixtureMode()) {
@@ -248,5 +250,5 @@ export async function* streamHolmes(
     }
     return;
   }
-  yield* liveStream(req, outcome, agent, abort);
+  yield* liveStream(req, outcome, agent, ctx, abort);
 }

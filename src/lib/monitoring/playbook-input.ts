@@ -1,5 +1,6 @@
 import type { ObservationSpec, Playbook } from "./playbook";
 import { OBSERVATION_SOURCES, type ObservationSource } from "./types";
+import { assertPlaceholders } from "@/lib/templates";
 
 /**
  * Request-body parsing for an edited method, the counterpart to
@@ -57,23 +58,13 @@ export const KEY_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/;
 
 /** What `renderPlaybook` actually substitutes. Exported for the editor's hints. */
 export const PLACEHOLDERS = ["namespace", "name"];
-const PLACEHOLDER_PATTERN = /\{\{([^}]*)\}\}/g;
-
-function assertPlaceholders(value: string, field: string) {
-  for (const [, inner] of value.matchAll(PLACEHOLDER_PATTERN)) {
-    if (!PLACEHOLDERS.includes(inner.trim()))
-      throw new Error(
-        `${field} uses an unknown placeholder {{${inner.trim()}}}. Only {{namespace}} and {{name}} are substituted — anything else reaches the model as literal text.`,
-      );
-  }
-}
 
 function text(raw: unknown, field: string, max: number, required = true) {
   const value = typeof raw === "string" ? raw.trim() : "";
   if (!value && required) throw new Error(`${field} is required`);
   if (value.length > max)
     throw new Error(`${field} must be at most ${max} characters`);
-  assertPlaceholders(value, field);
+  assertPlaceholders(value, PLACEHOLDERS, field);
   return value;
 }
 

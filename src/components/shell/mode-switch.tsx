@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { MessagesSquare, ShieldCheck } from "lucide-react";
 import { useSession } from "@/components/session/session-provider";
@@ -14,6 +15,8 @@ import { ADMIN_HOME, CHAT_HOME, isAdminPath } from "@/lib/routes";
  * Gated on `actorIsAdmin`, not `isAdmin`: an admin impersonating a regular user
  * must keep the way back to the panel.
  *
+ * Ctrl+K (⌘K on macOS) flips the mode too — same gate, same target as the button.
+ *
  * DESIGN.md note: the circle is a deliberate exception to "buttons are 4px" —
  * Devis asked for a round toggle island. Everything else stays design-true
  * (floating-panel surface, hairline border, no shadow, mono-weight icon).
@@ -22,11 +25,26 @@ export function ModeSwitch() {
   const { user } = useSession();
   const pathname = usePathname();
   const router = useRouter();
-
-  if (!user.actorIsAdmin) return null;
-
+  const allowed = user.actorIsAdmin;
   const inAdmin = isAdminPath(pathname);
   const target = inAdmin ? CHAT_HOME : ADMIN_HOME;
+
+  useEffect(() => {
+    if (!allowed) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key.toLowerCase() !== "k" || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) {
+        return;
+      }
+      // Overrides the browser's own Ctrl+K (focus the search bar) while Drill has focus.
+      e.preventDefault();
+      router.push(target);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [allowed, router, target]);
+
+  if (!allowed) return null;
+
   const label = inAdmin ? "Chat mode" : "Admin mode";
   const Icon = inAdmin ? MessagesSquare : ShieldCheck;
 
@@ -36,12 +54,12 @@ export function ModeSwitch() {
         aria-hidden
         className="pointer-events-none rounded-md border border-border bg-slate-hearth px-2.5 py-1 text-body-sm text-pale-stone opacity-0 transition-opacity group-focus-within/mode:opacity-100 group-hover/mode:opacity-100"
       >
-        {label}
+        {label} <span className="font-mono text-bone-gray">Ctrl+K</span>
       </span>
       <button
         type="button"
         onClick={() => router.push(target)}
-        title={`Switch to ${label.toLowerCase()}`}
+        title={`Switch to ${label.toLowerCase()} (Ctrl+K)`}
         aria-label={`Switch to ${label.toLowerCase()}`}
         className="flex size-11 items-center justify-center rounded-full border border-input bg-slate-hearth text-pale-stone transition-colors hover:bg-iron-veil hover:text-warm-off-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >

@@ -16,6 +16,7 @@ import type {
   HolmesChatResponse,
 } from "@/lib/holmes/types";
 import type { ArtifactDraft } from "@/lib/artifacts/types";
+import type { MessageSkill } from "@/lib/skills/types";
 
 // ---- Users ----
 
@@ -309,10 +310,11 @@ export async function addUserMessage(
   conversationId: string,
   ask: string,
   tx: DbExecutor = db,
+  skill: MessageSkill | null = null,
 ) {
   await tx
     .insert(messages)
-    .values({ conversationId, role: "user", content: ask });
+    .values({ conversationId, role: "user", content: ask, skill });
 }
 
 export async function addAssistantMessage(

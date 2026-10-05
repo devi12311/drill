@@ -22,6 +22,12 @@ import {
   type TurnStatus,
 } from "@/lib/chat/types";
 import type { HolmesChatRequest } from "@/lib/holmes/types";
+import {
+  SKILL_VISIBILITIES,
+  type MessageSkill,
+  type SkillInput,
+  type SkillVisibility,
+} from "@/lib/skills/types";
 import type {
   ExpectedObservations,
   ObservationSpec,
@@ -128,6 +134,8 @@ export const messages = pgTable("messages", {
    * conversation_history replay and re-rendering the tool timeline.
    */
   rawResponse: jsonb("raw_response"),
+  /** User only: the skill this line ran explicitly (rendered as a chip). */
+  skill: jsonb("skill").$type<MessageSkill>(),
   model: text("model"),
   costUsd: real("cost_usd"),
   totalTokens: integer("total_tokens"),
@@ -252,6 +260,38 @@ export const resolutionArtifacts = pgTable("resolution_artifacts", {
   graph: jsonb("graph").$type<ArtifactGraph>().notNull(),
   // pgvector-ready: unused until an embedding provider is configured.
   embedding: vector("embedding", { dimensions: 1536 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/**
+ * A procedure Holmes follows, authored in Drill (docs/DECISIONS.md — "Drill owns
+ * skills"). Reaches Holmes per request: listed in the system prompt and fetched
+ * through the `drill_fetch_skill` frontend tool, run explicitly with its inputs,
+ * or — `alwaysOn` — appended to every chat turn's system prompt.
+ *
+ * `private` skills are seen only by their author. Only an admin can make one
+ * `shared` (and only a shared one `alwaysOn`): a shared skill steers every
+ * user's investigations, which makes it a prompt-injection channel.
+ */
+export const skills = pgTable("skills", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** Slug the model sees and passes back; unique across all visibilities. */
+  name: text("name").notNull().unique(),
+  description: text("description").notNull(),
+  body: text("body").notNull(),
+  inputs: jsonb("inputs").$type<SkillInput[]>().notNull().default([]),
+  visibility: text("visibility", { enum: SKILL_VISIBILITIES })
+    .$type<SkillVisibility>()
+    .notNull()
+    .default("private"),
+  alwaysOn: boolean("always_on").notNull().default(false),
+  createdBy: uuid("created_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  lastEditedBy: uuid("last_edited_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

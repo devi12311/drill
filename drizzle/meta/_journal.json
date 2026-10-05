@@ -106,6 +106,13 @@
       "when": 1790866110145,
       "tag": "0014_numerous_krista_starr",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790949245957,
+      "tag": "0015_skills",
+      "breakpoints": true
     }
   ]
 }

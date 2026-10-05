@@ -20,6 +20,16 @@ export type DbExecutor =
   | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
+ * A unique-constraint violation (Postgres 23505). Drizzle wraps driver errors in
+ * a DrizzleQueryError with the Postgres error as `cause`, so the code is never on
+ * the error itself.
+ */
+export function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } } | null;
+  return e?.code === "23505" || e?.cause?.code === "23505";
+}
+
+/**
  * Postgres LISTEN on a dedicated connection (postgres.js reconnects it and
  * re-subscribes by itself). A wake-up signal only — never the source of truth:
  * a notification sent while nobody listened is simply lost, so every listener

@@ -1,10 +1,12 @@
 import type { TurnSnapshot } from "@/lib/chat/types";
+import type { MessageSkill } from "@/lib/skills/types";
 import type { ChatEntry } from "./messages";
 
 interface StoredMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  skill: MessageSkill | null;
   model: string | null;
   response: ChatEntry["response"] | null;
 }
@@ -39,7 +41,7 @@ export async function loadConversation(id: string): Promise<LoadedConversation> 
     turn: body.turn,
     entries: body.messages.map((msg): ChatEntry =>
       msg.role === "user"
-        ? { id: msg.id, role: "user", ask: msg.content }
+        ? { id: msg.id, role: "user", ask: msg.content, skill: msg.skill ?? undefined }
         : {
             id: msg.id,
             role: "assistant",

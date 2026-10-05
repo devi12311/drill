@@ -114,6 +114,7 @@ export async function executeClaimedTurn(
       request,
       outcome,
       { url: agent.url, apiKey: agent.apiKey },
+      { userId: turn.userId },
       controller.signal,
     )) {
       // `done` is not progress: the answer goes to `messages`, below.

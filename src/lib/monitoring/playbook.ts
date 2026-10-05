@@ -1,3 +1,4 @@
+import { renderTemplate } from "@/lib/templates";
 import type { AssessmentTarget, ObservationSource, WorkloadTechnology } from "./types";
 
 /**
@@ -122,11 +123,8 @@ function renderDataSources(
   playbook: Playbook,
   target: AssessmentTarget,
 ): string[] {
-  return playbook.dataSources.map((line) =>
-    line
-      .replaceAll("{{namespace}}", target.namespace)
-      .replaceAll("{{name}}", target.name),
-  );
+  const vars = { namespace: target.namespace, name: target.name };
+  return playbook.dataSources.map((line) => renderTemplate(line, vars));
 }
 
 /**
