@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { verifySession, verifyImpersonation } from "@/lib/auth/jwt";
 import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 import { IMPERSONATION_COOKIE } from "@/lib/auth/impersonation-cookie";
-import { isInternalApiPath, loginUrl, LOGIN_PATH } from "@/lib/routes";
+import { INVITE_PREFIX, isInternalApiPath, loginUrl, LOGIN_PATH } from "@/lib/routes";
 
 const PUBLIC_PATHS = [LOGIN_PATH, "/register"];
 const ADMIN_API_PREFIX = "/api/admin/";
@@ -13,6 +13,9 @@ export async function proxy(request: NextRequest) {
 
   if (
     PUBLIC_PATHS.includes(pathname) ||
+    // The page serves both cases (join, or sign up / sign in first); joining
+    // itself is POST /api/invites/[token], which stays behind the session check.
+    pathname.startsWith(INVITE_PREFIX) ||
     pathname.startsWith("/api/auth/login") ||
     pathname.startsWith("/api/auth/register")
   ) {

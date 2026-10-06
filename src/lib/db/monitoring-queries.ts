@@ -5,6 +5,7 @@ import {
   count,
   desc,
   eq,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -19,6 +20,7 @@ import {
 import { db } from "./index";
 import { openSecret, sealSecret } from "@/lib/secrets";
 import {
+  holmesAgents,
   monitoringChecks,
   monitoringClusters,
   monitoringConcerns,
@@ -812,22 +814,42 @@ export async function replaceJobOverrides(
 export interface ClusterSummary {
   id: string;
   name: string;
+  /** The org agent that investigates it; its URL is read through, never copied. */
+  agentId: string;
+  agentName: string;
   holmesUrl: string;
+  /** The agent's own health, so a cluster can say its investigator is down. */
+  agentLastValidatedAt: Date | null;
+  agentLastError: string | null;
   lastValidatedAt: Date | null;
   lastDiscoveredAt: Date | null;
   discoveryError: string | null;
   createdAt: Date;
 }
 
+/** Every select using these joins `holmesAgents` — see `withAgent`. */
 const CLUSTER_SAFE_COLUMNS = {
   id: monitoringClusters.id,
   name: monitoringClusters.name,
-  holmesUrl: monitoringClusters.holmesUrl,
+  agentId: monitoringClusters.agentId,
+  agentName: holmesAgents.name,
+  holmesUrl: holmesAgents.url,
+  agentLastValidatedAt: holmesAgents.lastValidatedAt,
+  agentLastError: holmesAgents.lastError,
   lastValidatedAt: monitoringClusters.lastValidatedAt,
   lastDiscoveredAt: monitoringClusters.lastDiscoveredAt,
   discoveryError: monitoringClusters.discoveryError,
   createdAt: monitoringClusters.createdAt,
 };
+
+/** The cluster's Holmes credentials, as the runner and validators want them. */
+const CLUSTER_SECRET_COLUMNS = {
+  ...getTableColumns(monitoringClusters),
+  holmesUrl: holmesAgents.url,
+  holmesApiKey: holmesAgents.apiKey,
+};
+
+const withAgent = eq(holmesAgents.id, monitoringClusters.agentId);
 
 export interface ClusterListRow extends ClusterSummary {
   workloadCount: number;
@@ -854,6 +876,7 @@ export async function listClusters(orgId: string): Promise<ClusterListRow[]> {
         where j.cluster_id = monitoring_clusters.id and c.status = 'open')`,
     })
     .from(monitoringClusters)
+    .innerJoin(holmesAgents, withAgent)
     .where(eq(monitoringClusters.orgId, orgId))
     .orderBy(asc(monitoringClusters.name));
   return rows;
@@ -865,6 +888,7 @@ export async function getClusterSummary(
   const [row] = await db
     .select(CLUSTER_SAFE_COLUMNS)
     .from(monitoringClusters)
+    .innerJoin(holmesAgents, withAgent)
     .where(eq(monitoringClusters.id, id))
     .limit(1);
   return row ?? null;
@@ -879,22 +903,36 @@ function openCluster<T extends { kubeconfig: string; holmesApiKey: string }>(row
   };
 }
 
-/** Full row INCLUDING kubeconfig + Holmes key, opened — server-side use only. */
+/**
+ * Full row INCLUDING kubeconfig + its agent's URL and key, opened — server-side
+ * use only.
+ */
 export async function getClusterSecrets(id: string) {
   const [row] = await db
-    .select()
+    .select(CLUSTER_SECRET_COLUMNS)
     .from(monitoringClusters)
+    .innerJoin(holmesAgents, withAgent)
     .where(eq(monitoringClusters.id, id))
     .limit(1);
   return row ? openCluster(row) : null;
 }
 
+/** The org's clusters investigated through `agentId` — what blocks deleting it. */
+export async function clustersUsingAgent(orgId: string, agentId: string): Promise<string[]> {
+  const rows = await db
+    .select({ name: monitoringClusters.name })
+    .from(monitoringClusters)
+    .where(and(eq(monitoringClusters.orgId, orgId), eq(monitoringClusters.agentId, agentId)))
+    .orderBy(asc(monitoringClusters.name));
+  return rows.map((r) => r.name);
+}
+
+/** The caller has checked that `agentId` belongs to `orgId` (`getAgent`). */
 export async function createCluster(input: {
   orgId: string;
   name: string;
   kubeconfig: string;
-  holmesUrl: string;
-  holmesApiKey: string;
+  agentId: string;
   createdBy: string;
 }): Promise<ClusterSummary> {
   const [row] = await db
@@ -902,11 +940,11 @@ export async function createCluster(input: {
     .values({
       ...input,
       kubeconfig: sealSecret(input.kubeconfig),
-      holmesApiKey: sealSecret(input.holmesApiKey),
       lastValidatedAt: new Date(),
     })
-    .returning(CLUSTER_SAFE_COLUMNS);
-  return row;
+    .returning({ id: monitoringClusters.id });
+  // RETURNING cannot reach the joined agent columns; re-read the summary.
+  return (await getClusterSummary(row.id))!;
 }
 
 export async function updateCluster(
@@ -914,8 +952,7 @@ export async function updateCluster(
   fields: Partial<{
     name: string;
     kubeconfig: string;
-    holmesUrl: string;
-    holmesApiKey: string;
+    agentId: string;
     lastValidatedAt: Date;
   }>,
 ): Promise<ClusterSummary | null> {
@@ -924,14 +961,11 @@ export async function updateCluster(
     .set({
       ...fields,
       ...(fields.kubeconfig !== undefined && { kubeconfig: sealSecret(fields.kubeconfig) }),
-      ...(fields.holmesApiKey !== undefined && {
-        holmesApiKey: sealSecret(fields.holmesApiKey),
-      }),
       updatedAt: new Date(),
     })
     .where(eq(monitoringClusters.id, id))
-    .returning(CLUSTER_SAFE_COLUMNS);
-  return row ?? null;
+    .returning({ id: monitoringClusters.id });
+  return row ? getClusterSummary(row.id) : null;
 }
 
 export async function deleteCluster(id: string): Promise<boolean> {
@@ -1176,6 +1210,13 @@ export async function replaceWorkloads(
   });
 }
 
+/** Every cluster of every org — what the worker's inventory refresh walks. */
+export async function listClustersToRefresh(): Promise<{ id: string; orgId: string }[]> {
+  return db
+    .select({ id: monitoringClusters.id, orgId: monitoringClusters.orgId })
+    .from(monitoringClusters);
+}
+
 export async function recordDiscoveryError(clusterId: string, error: string) {
   await db
     .update(monitoringClusters)
@@ -1408,12 +1449,13 @@ export async function getResolvedJobTargets(
 /** Everything the runner needs for one job, in one round trip. */
 export async function getJobExecutionContext(jobId: string) {
   const [row] = await db
-    .select({ job: monitoringJobs, cluster: monitoringClusters })
+    .select({ job: monitoringJobs, cluster: CLUSTER_SECRET_COLUMNS })
     .from(monitoringJobs)
     .innerJoin(
       monitoringClusters,
       eq(monitoringClusters.id, monitoringJobs.clusterId),
     )
+    .innerJoin(holmesAgents, withAgent)
     .where(eq(monitoringJobs.id, jobId))
     .limit(1);
   if (!row) return null;

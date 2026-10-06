@@ -196,16 +196,30 @@ export async function acceptInvite(
     return { orgId: invite.orgId, role: invite.role, alreadyMember: true };
   }
   return db.transaction(async (tx) => {
-    const [claimed] = await tx
-      .update(orgInvites)
-      .set({ acceptedBy: userId, acceptedAt: new Date() })
-      .where(and(eq(orgInvites.tokenHash, hashToken(token)), pending()))
-      .returning({ orgId: orgInvites.orgId, role: orgInvites.role });
-    if (!claimed) return null;
-    await tx
-      .insert(orgMemberships)
-      .values({ orgId: claimed.orgId, userId, role: claimed.role })
-      .onConflictDoNothing();
-    return { ...claimed, alreadyMember: false };
+    const claimed = await claimInvite(token, userId, tx);
+    return claimed && { ...claimed, alreadyMember: false };
   });
+}
+
+/**
+ * The claim itself: stamp the invite used and add the membership. Run inside the
+ * caller's transaction, so signing up from an invite either creates the account
+ * AND joins, or (invite spent meanwhile) neither.
+ */
+export async function claimInvite(
+  token: string,
+  userId: string,
+  tx: DbExecutor,
+): Promise<{ orgId: string; role: OrgRole } | null> {
+  const [claimed] = await tx
+    .update(orgInvites)
+    .set({ acceptedBy: userId, acceptedAt: new Date() })
+    .where(and(eq(orgInvites.tokenHash, hashToken(token)), pending()))
+    .returning({ orgId: orgInvites.orgId, role: orgInvites.role });
+  if (!claimed) return null;
+  await tx
+    .insert(orgMemberships)
+    .values({ orgId: claimed.orgId, userId, role: claimed.role })
+    .onConflictDoNothing();
+  return claimed;
 }

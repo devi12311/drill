@@ -16,15 +16,18 @@ import { Label } from "@/components/ui/label";
 import { formatRelative } from "@/lib/admin/format";
 import { cn } from "@/lib/utils";
 import { useSession } from "@/components/session/session-provider";
+import { agentHealth, HEALTH_DOT, type Health } from "@/lib/health";
 import { pickActiveAgent } from "./active-agent";
 
 export interface AgentSummary {
   id: string;
   name: string;
   url: string;
-  /** Who registered it; with org admins, the only one who may remove it. */
+  /** Who registered it — shown, not a permission: only org admins manage agents. */
   createdBy: string | null;
+  /** Last successful contact, and why the latest one failed (lib/health.ts). */
   lastValidatedAt: string | null;
+  lastError: string | null;
 }
 
 function Tag({ children }: { children: React.ReactNode }) {
@@ -35,12 +38,30 @@ function Tag({ children }: { children: React.ReactNode }) {
   );
 }
 
+const STATUS_LABEL: Record<Health, (agent: AgentSummary) => string> = {
+  ok: (a) => `reached ${formatRelative(a.lastValidatedAt)}`,
+  down: () => "unreachable",
+  stale: (a) => (a.lastValidatedAt ? `last reached ${formatRelative(a.lastValidatedAt)}` : "not checked yet"),
+};
+
+function AgentStatus({ agent }: { agent: AgentSummary }) {
+  const h = agentHealth(agent);
+  return (
+    <span
+      className={cn("shrink-0", h === "down" && "text-traffic-red")}
+      title={h === "down" ? (agent.lastError ?? undefined) : undefined}
+    >
+      {STATUS_LABEL[h](agent)}
+    </span>
+  );
+}
+
 function DeleteAgent({ agent, onDelete }: { agent: AgentSummary; onDelete: () => void }) {
   return (
     <ConfirmButton
       label={`Delete ${agent.name}`}
       title={`Delete ${agent.name}?`}
-      description="Every conversation that ran on this agent is deleted with it. This cannot be undone."
+      description="Every conversation that ran on this agent is deleted with it, for everyone in the org. This cannot be undone."
       confirmLabel="Delete agent"
       destructive
       variant="ghost"
@@ -137,14 +158,17 @@ export function AgentsDialog({
   onChanged: () => void;
 }) {
   const { user } = useSession();
+  // Members chat through the org's agents but cannot change them (the API agrees).
+  const canManage = user.isOrgAdmin;
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   // With no agents the form is the only thing worth showing.
-  const showForm = adding || agents.length === 0;
+  const showForm = canManage && (adding || agents.length === 0);
   // Read only while open: the dialog's content renders client-side, after hydration.
   const activeId = open ? pickActiveAgent(agents) : null;
 
@@ -178,7 +202,17 @@ export function AgentsDialog({
   }
 
   async function removeAgent(id: string) {
-    await fetch(`/api/agents/${id}`, { method: "DELETE" }).catch(() => null);
+    setRemoveError(null);
+    try {
+      const res = await fetch(`/api/agents/${id}`, { method: "DELETE" });
+      // A cluster still monitored through it is the usual reason; the API names it.
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setRemoveError(body.error ?? `HTTP ${res.status}`);
+      }
+    } catch {
+      setRemoveError("Could not delete the agent");
+    }
     onChanged();
   }
 
@@ -208,6 +242,7 @@ export function AgentsDialog({
         if (!next) {
           resetForm();
           setAdding(false);
+          setRemoveError(null);
         }
         onOpenChange(next);
       }}
@@ -216,8 +251,11 @@ export function AgentsDialog({
         <DialogHeader>
           <DialogTitle>Holmes agents</DialogTitle>
           <DialogDescription>
-            HolmesGPT endpoints everyone in {user.org.name} investigates with. Keys are
-            verified before saving.
+            HolmesGPT endpoints everyone in {user.org.name} investigates with, in chat
+            and in monitoring.{" "}
+            {canManage
+              ? "Keys are verified before saving."
+              : "Only owners and admins can add or change them."}
           </DialogDescription>
         </DialogHeader>
         {agents.length > 0 && (
@@ -232,7 +270,7 @@ export function AgentsDialog({
                   <span
                     className={cn(
                       "absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-popover",
-                      agent.lastValidatedAt ? "bg-traffic-green" : "bg-traffic-yellow",
+                      HEALTH_DOT[agentHealth(agent)],
                     )}
                   />
                 </span>
@@ -246,26 +284,28 @@ export function AgentsDialog({
                   <div className="flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-bone-gray">
                     <span className="truncate">{agent.url}</span>
                     <span aria-hidden>·</span>
-                    <span className="shrink-0">
-                      {agent.lastValidatedAt ? `verified ${formatRelative(agent.lastValidatedAt)}` : (
-                        <span className="text-traffic-yellow">not verified</span>
-                      )}
-                    </span>
+                    <AgentStatus agent={agent} />
                   </div>
                 </div>
-                {(user.isOrgAdmin || agent.createdBy === user.id) && (
+                {canManage && (
                   <DeleteAgent agent={agent} onDelete={() => removeAgent(agent.id)} />
                 )}
               </li>
             ))}
           </ul>
         )}
+        {removeError && <p className="text-body-sm text-traffic-red">{removeError}</p>}
+        {!canManage && agents.length === 0 && (
+          <p className="text-body-sm text-pale-stone">
+            No agents yet. Ask an owner or admin of {user.org.name} to add one.
+          </p>
+        )}
         {showForm ? (
           <div className={cn("space-y-3", agents.length > 0 && "border-t border-border pt-4")}>
             <div className="text-caption-tracked uppercase text-bone-gray">New agent</div>
             <AddAgentForm f={form} />
           </div>
-        ) : (
+        ) : canManage && (
           <Button variant="secondary" onClick={() => setAdding(true)} className="w-full justify-center">
             <Plus className="size-3.5" />
             Add agent

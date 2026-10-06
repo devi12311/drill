@@ -1,4 +1,4 @@
-import { getAuthContext, unauthorized } from "@/lib/auth/session";
+import { forbidden, getAuthContext, unauthorized } from "@/lib/auth/session";
 import { createAgent, listAgents } from "@/lib/db/queries";
 import { validateAgent } from "@/lib/holmes/validate";
 
@@ -8,9 +8,11 @@ export async function GET() {
   return Response.json(await listAgents(ctx.orgId));
 }
 
+/** Owners and admins only: every member's investigations go through the org's agents. */
 export async function POST(request: Request) {
   const ctx = await getAuthContext();
   if (!ctx) return unauthorized();
+  if (!ctx.isOrgAdmin) return forbidden();
 
   let body: { name?: string; url?: string; apiKey?: string };
   try {

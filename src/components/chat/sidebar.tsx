@@ -15,6 +15,7 @@ import { BrandMark } from "@/components/shell/brand-mark";
 import { SideNavLink } from "@/components/shell/side-nav-link";
 import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
 import { ConfirmButton } from "@/components/ui/confirm-button";
+import { useSession } from "@/components/session/session-provider";
 import { useWorkspace } from "@/components/workspace/workspace-provider";
 import { cn } from "@/lib/utils";
 import { CHAT_HOME } from "@/lib/routes";
@@ -79,6 +80,7 @@ export function Sidebar() {
     listError,
     deleteConversation,
   } = useWorkspace();
+  const { user } = useSession();
   const pathname = usePathname();
   const onChat = pathname === CHAT_HOME;
   const params = useSearchParams();
@@ -122,7 +124,7 @@ export function Sidebar() {
             {agents.length > 0 && <DropdownMenuSeparator />}
             <DropdownMenuItem onSelect={openAgents}>
               <Settings2 className="size-4" />
-              Manage agents
+              {user.isOrgAdmin ? "Manage agents" : "View agents"}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

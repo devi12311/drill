@@ -18,6 +18,7 @@ import {
   type OrgMemberView,
   type OrgRole,
 } from "@/lib/orgs/types";
+import { invitePath } from "@/lib/routes";
 import { reloadInto, sendJson } from "./org-actions";
 
 const SELECT_CLASS =
@@ -244,7 +245,7 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
       sendJson("/api/org/invites", { role, label }) as Promise<{ token: string }>,
     );
     if (invite) {
-      setLink(`${window.location.origin}/invite/${invite.token}`);
+      setLink(`${window.location.origin}${invitePath(invite.token)}`);
       setCopied(false);
       setLabel("");
     }
@@ -253,12 +254,12 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
   return (
     <Section
       title="Invite people"
-      description="An invite is a single-use link that expires in 7 days. Send it however you like. Drill shows it only once, so copy it now."
+      description="An invite is a single-use link that expires in 7 days. Whoever opens it signs in, or creates an account with a username of their choosing, and joins. Drill shows it only once, so copy it now."
     >
       <form onSubmit={create} className="flex flex-wrap items-end gap-2">
         <div className="min-w-[180px] flex-1 space-y-2">
           <Label htmlFor="invite-label" className="text-pale-stone">
-            For <span className="text-bone-gray">(optional note)</span>
+            Note <span className="text-bone-gray">(optional, only admins see it)</span>
           </Label>
           <Input
             id="invite-label"
@@ -315,7 +316,7 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
               <li key={inv.id} className="flex items-center gap-3 py-2.5">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-body-sm text-warm-off-white">
-                    {inv.label ?? "Unlabelled link"}
+                    {inv.label ?? "No note"}
                   </div>
                   <div className="text-[12px] text-bone-gray">
                     {ORG_ROLE_LABEL[inv.role]} · by {inv.createdByName ?? "former member"} ·

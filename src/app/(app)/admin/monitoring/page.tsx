@@ -5,7 +5,9 @@ import { DataTable, type Column } from "@/components/admin/data-table";
 import { Card } from "@/components/ui/card";
 import { ClusterForm } from "@/components/monitoring/cluster-form";
 import { formatNumber, formatRelative } from "@/lib/admin/format";
+import { clusterStatus, HEALTH_TEXT } from "@/lib/health";
 import { listClusters, type ClusterListRow } from "@/lib/db/monitoring-queries";
+import { listAgents } from "@/lib/db/queries";
 
 /**
  * The cluster index, rendered on the server.
@@ -19,7 +21,7 @@ import { listClusters, type ClusterListRow } from "@/lib/db/monitoring-queries";
  */
 export default async function MonitoringHomePage() {
   const { orgId } = await monitoringPageContext();
-  const clusters = await listClusters(orgId);
+  const [clusters, agents] = await Promise.all([listClusters(orgId), listAgents(orgId)]);
 
   const columns: Column<ClusterListRow>[] = [
     {
@@ -61,16 +63,20 @@ export default async function MonitoringHomePage() {
     },
     {
       key: "lastDiscoveredAt",
-      header: "Inventory",
+      header: "Status",
       align: "right",
-      render: (c) =>
-        c.discoveryError ? (
-          <span className="text-traffic-yellow" title={c.discoveryError}>
-            stale
+      render: (c) => {
+        const status = clusterStatus(c);
+        return status.health === "ok" ? (
+          <span title={`Inventory refreshed ${formatRelative(c.lastDiscoveredAt)}`}>
+            {status.summary}
           </span>
         ) : (
-          formatRelative(c.lastDiscoveredAt)
-        ),
+          <span className={HEALTH_TEXT[status.health]} title={status.detail ?? undefined}>
+            {status.summary}
+          </span>
+        );
+      },
     },
   ];
 
@@ -92,12 +98,21 @@ export default async function MonitoringHomePage() {
           </h2>
           <p className="text-body-sm text-bone-gray">
             Drill needs two things: a kubeconfig to list your workloads, and a
-            Holmes endpoint running inside that cluster to investigate them.
+            Holmes agent running inside that cluster to investigate them.
           </p>
         </div>
         {/* No `onCreated` callback any more: this table is server-rendered, and
             the form's refresh-then-navigate updates it along with the tree. */}
-        <ClusterForm />
+        <ClusterForm
+          agents={agents.map((a) => ({
+            id: a.id,
+            name: a.name,
+            url: a.url,
+            createdBy: a.createdBy,
+            lastValidatedAt: a.lastValidatedAt?.toISOString() ?? null,
+            lastError: a.lastError,
+          }))}
+        />
       </Card>
     </div>
   );

@@ -37,6 +37,16 @@ export function safeNext(raw: string | null | undefined): string | null {
   return raw;
 }
 
+/**
+ * An invitation link. Public: a signed-out invitee must see which org invited
+ * them, and usually signs up right there — they have no account to log in with.
+ */
+export const INVITE_PREFIX = "/invite/";
+
+export function invitePath(token: string): string {
+  return `${INVITE_PREFIX}${encodeURIComponent(token)}`;
+}
+
 /** The login URL that brings the user back to `path` afterwards. */
 export function loginUrl(path: string): string {
   return `${LOGIN_PATH}?next=${encodeURIComponent(path)}`;

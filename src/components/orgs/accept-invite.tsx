@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
+import { CredentialsForm } from "@/components/auth/auth-form";
 import { Button } from "@/components/ui/button";
+import { invitePath, loginUrl } from "@/lib/routes";
 import { reloadInto, sendJson } from "./org-actions";
 
 export function AcceptInvite({ token, orgName }: { token: string; orgName: string }) {
@@ -28,5 +31,32 @@ export function AcceptInvite({ token, orgName }: { token: string; orgName: strin
         {busy ? "Joining…" : `Join ${orgName}`}
       </Button>
     </div>
+  );
+}
+
+/**
+ * For a signed-out invitee: create the account and join in one request — the
+ * invitee chooses their own username, the link only carries the org and role.
+ * Someone who already has an account signs in and comes back here to join.
+ */
+export function SignUpAndJoin({ token }: { token: string }) {
+  return (
+    <>
+      <CredentialsForm
+        mode="register"
+        extra={{ invite: token }}
+        submitLabel="Create account & join"
+        onSuccess={() => reloadInto("/")}
+      />
+      <p className="text-body-sm text-bone-gray">
+        Already have a Drill account?{" "}
+        <Link
+          href={loginUrl(invitePath(token))}
+          className="text-pale-stone underline underline-offset-4 hover:text-warm-off-white"
+        >
+          Sign in to join
+        </Link>
+      </p>
+    </>
   );
 }

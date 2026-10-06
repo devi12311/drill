@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Chat } from "@/components/chat/chat";
 import { loadConversation } from "@/components/chat/conversation-api";
 import type { ChatEntry } from "@/components/chat/messages";
+import { useSession } from "@/components/session/session-provider";
 import { useWorkspace } from "@/components/workspace/workspace-provider";
 import { writeChatUrl } from "@/lib/workspace/nav";
 import type { TurnSnapshot } from "@/lib/chat/types";
@@ -46,6 +47,7 @@ function ChatPane() {
     conversations,
     refreshConversations,
   } = useWorkspace();
+  const { user } = useSession();
   const c = useSearchParams().get("c");
   const [pane, setPane] = useState<Pane>(() => freshPane(c, 0));
 
@@ -111,14 +113,29 @@ function ChatPane() {
             <div className="text-caption-tracked uppercase text-bone-gray">
               No Holmes agent configured
             </div>
-            <h1 className="text-heading text-warm-off-white">
-              Connect your first agent.
-            </h1>
-            <p className="max-w-[46ch] text-center text-body text-pale-stone">
-              Drill needs a HolmesGPT endpoint to investigate. Add its URL
-              and API key — credentials are verified before saving.
-            </p>
-            <Button onClick={openAgents}>Add agent</Button>
+            {user.isOrgAdmin ? (
+              <>
+                <h1 className="text-heading text-warm-off-white">
+                  Connect your first agent.
+                </h1>
+                <p className="max-w-[46ch] text-center text-body text-pale-stone">
+                  Drill needs a HolmesGPT endpoint to investigate. Add its URL
+                  and API key — credentials are verified before saving.
+                </p>
+                <Button onClick={openAgents}>Add agent</Button>
+              </>
+            ) : (
+              <>
+                <h1 className="text-heading text-warm-off-white">
+                  Nothing to investigate with yet.
+                </h1>
+                <p className="max-w-[46ch] text-center text-body text-pale-stone">
+                  Drill needs a HolmesGPT agent, and only an owner or admin of{" "}
+                  {user.org.name} can connect one. Ask them to add it, then
+                  reload this page.
+                </p>
+              </>
+            )}
           </>
         )}
       </div>

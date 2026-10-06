@@ -3,6 +3,7 @@ import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db, type DbExecutor } from "./index";
 import { openSecret, sealSecret } from "@/lib/secrets";
+import { isUuid } from "@/lib/uuid";
 import {
   chatTurns,
   conversations,
@@ -64,6 +65,7 @@ const agentColumns = {
   url: holmesAgents.url,
   createdBy: holmesAgents.createdBy,
   lastValidatedAt: holmesAgents.lastValidatedAt,
+  lastError: holmesAgents.lastError,
   createdAt: holmesAgents.createdAt,
 };
 
@@ -80,6 +82,7 @@ export async function listAgents(orgId: string) {
  * The one read path for the credential, so it is decrypted here and nowhere else.
  */
 export async function getAgent(orgId: string, agentId: string) {
+  if (!isUuid(agentId)) return null;
   const [agent] = await db
     .select()
     .from(holmesAgents)
@@ -99,26 +102,18 @@ export async function createAgent(
       orgId: scope.orgId,
       createdBy: scope.userId,
       lastValidatedAt: new Date(),
+      lastError: null,
     })
     .returning(agentColumns);
   return agent;
 }
 
-/**
- * Every member chats through the org's agents, but only whoever registered one
- * (or an org admin) may repoint or remove it — otherwise any member could
- * silently redirect everyone's investigations.
- */
-function manageableAgent(scope: ManagerScope, agentId: string) {
-  return and(
-    eq(holmesAgents.id, agentId),
-    eq(holmesAgents.orgId, scope.orgId),
-    scope.isOrgAdmin ? undefined : eq(holmesAgents.createdBy, scope.userId),
-  );
-}
+/** Org admins only — the routes check; a member could otherwise redirect everyone's investigations. */
+const orgAgent = (orgId: string, agentId: string) =>
+  and(eq(holmesAgents.id, agentId), eq(holmesAgents.orgId, orgId));
 
 export async function updateAgent(
-  scope: ManagerScope,
+  orgId: string,
   agentId: string,
   data: Partial<{ name: string; url: string; apiKey: string }>,
 ) {
@@ -127,19 +122,41 @@ export async function updateAgent(
     .set({
       ...data,
       ...(data.apiKey !== undefined && { apiKey: sealSecret(data.apiKey) }),
+      // Callers validate before saving, so a save is a successful contact.
       lastValidatedAt: new Date(),
+      lastError: null,
     })
-    .where(manageableAgent(scope, agentId))
+    .where(orgAgent(orgId, agentId))
     .returning(agentColumns);
   return agent ?? null;
 }
 
-export async function deleteAgent(scope: ManagerScope, agentId: string) {
+export async function deleteAgent(orgId: string, agentId: string) {
   const deleted = await db
     .delete(holmesAgents)
-    .where(manageableAgent(scope, agentId))
+    .where(orgAgent(orgId, agentId))
     .returning({ id: holmesAgents.id });
   return deleted.length > 0;
+}
+
+/** Every agent of every org, key opened — for the worker's health probe only. */
+export async function listAgentsToProbe() {
+  const rows = await db
+    .select({ id: holmesAgents.id, url: holmesAgents.url, apiKey: holmesAgents.apiKey })
+    .from(holmesAgents);
+  return rows.map((r) => ({ ...r, apiKey: openSecret(r.apiKey) }));
+}
+
+/** Stamp one contact with an agent: success refreshes it, a failure says why. */
+export async function recordAgentContact(agentId: string, error: string | null) {
+  await db
+    .update(holmesAgents)
+    .set(
+      error
+        ? { lastError: error.slice(0, 2000) }
+        : { lastValidatedAt: new Date(), lastError: null },
+    )
+    .where(eq(holmesAgents.id, agentId));
 }
 
 // ---- Conversations (private to their user, inside the org) ----

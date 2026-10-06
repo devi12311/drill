@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq, notLike, or } from "drizzle-orm";
+import { and, eq, notLike } from "drizzle-orm";
 import { db } from "./index";
 import { holmesAgents, monitoringClusters } from "./schema";
 import { encryptionEnabled, sealSecret } from "@/lib/secrets";
@@ -33,27 +33,17 @@ export async function sealLegacySecrets(): Promise<number> {
     .select({
       id: monitoringClusters.id,
       kubeconfig: monitoringClusters.kubeconfig,
-      holmesApiKey: monitoringClusters.holmesApiKey,
     })
     .from(monitoringClusters)
-    .where(
-      or(
-        notLike(monitoringClusters.kubeconfig, "enc:v1:%"),
-        notLike(monitoringClusters.holmesApiKey, "enc:v1:%"),
-      ),
-    );
+    .where(notLike(monitoringClusters.kubeconfig, "enc:v1:%"));
   for (const c of clusters) {
     const rows = await db
       .update(monitoringClusters)
-      .set({
-        kubeconfig: sealSecret(c.kubeconfig),
-        holmesApiKey: sealSecret(c.holmesApiKey),
-      })
+      .set({ kubeconfig: sealSecret(c.kubeconfig) })
       .where(
         and(
           eq(monitoringClusters.id, c.id),
           eq(monitoringClusters.kubeconfig, c.kubeconfig),
-          eq(monitoringClusters.holmesApiKey, c.holmesApiKey),
         ),
       )
       .returning({ id: monitoringClusters.id });

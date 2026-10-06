@@ -1,6 +1,7 @@
 import { forbidden, getConsoleContext } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
 import { isUniqueViolation } from "@/lib/db";
+import { agentUnreachable, findClusterAgent } from "@/lib/monitoring/cluster-agent";
 import {
   createCluster,
   listClusters,
@@ -17,9 +18,10 @@ export async function GET() {
 }
 
 /**
- * Register a cluster. Both credentials are proved BEFORE the row is written —
- * the kubeconfig by actually listing workloads (which doubles as the first
- * discovery pass) and the Holmes endpoint by listing its models.
+ * Register a cluster: a kubeconfig plus one of the org's Holmes agents (the one
+ * deployed in it). Both are proved BEFORE the row is written — the kubeconfig by
+ * actually listing workloads (which doubles as the first discovery pass) and the
+ * agent by listing its models, since it may have gone stale since it was added.
  */
 export async function POST(request: Request) {
   const ctx = await getConsoleContext();
@@ -28,8 +30,7 @@ export async function POST(request: Request) {
   let body: {
     name?: string;
     kubeconfig?: string;
-    holmesUrl?: string;
-    holmesApiKey?: string;
+    agentId?: string;
   };
   try {
     body = await request.json();
@@ -39,20 +40,14 @@ export async function POST(request: Request) {
 
   const name = body.name?.trim() ?? "";
   const kubeconfig = body.kubeconfig?.trim() ?? "";
-  const holmesUrl = body.holmesUrl?.trim().replace(/\/$/, "") ?? "";
-  const holmesApiKey = body.holmesApiKey?.trim() ?? "";
-  if (!name || !kubeconfig || !holmesUrl || !holmesApiKey) {
+  if (!name || !kubeconfig) {
     return Response.json(
-      { error: "name, kubeconfig, holmesUrl and holmesApiKey are required" },
+      { error: "name and kubeconfig are required" },
       { status: 400 },
     );
   }
-  if (!/^https?:\/\//.test(holmesUrl)) {
-    return Response.json(
-      { error: "holmesUrl must start with http:// or https://" },
-      { status: 400 },
-    );
-  }
+  const holmes = await findClusterAgent(ctx.orgId, body.agentId);
+  if (holmes instanceof Response) return holmes;
 
   /**
    * Both credentials are proved concurrently. They are independent — one lists
@@ -65,7 +60,7 @@ export async function POST(request: Request) {
    */
   const [discovery, agent] = await Promise.allSettled([
     discoverWorkloads(kubeconfig, await detectableTypes(ctx.orgId)),
-    validateAgent(holmesUrl, holmesApiKey),
+    validateAgent(holmes.url, holmes.apiKey),
   ]);
   if (discovery.status === "rejected") {
     const err = discovery.reason;
@@ -77,16 +72,7 @@ export async function POST(request: Request) {
       { status: 422 },
     );
   }
-  if (agent.status === "rejected") {
-    const err = agent.reason;
-    return Response.json(
-      {
-        error: err instanceof Error ? err.message : "Holmes validation failed",
-        field: "holmesUrl",
-      },
-      { status: 422 },
-    );
-  }
+  if (agent.status === "rejected") return agentUnreachable(holmes.name, agent.reason);
   const discovered = discovery.value;
   const models = agent.value;
 
@@ -96,8 +82,7 @@ export async function POST(request: Request) {
       orgId: ctx.orgId,
       name,
       kubeconfig,
-      holmesUrl,
-      holmesApiKey,
+      agentId: holmes.id,
       createdBy: ctx.userId,
     });
   } catch (err) {

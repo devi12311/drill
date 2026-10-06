@@ -12,6 +12,7 @@ import {
 import { discoverWorkloads } from "@/lib/monitoring/discovery";
 import { detectableTypes } from "@/lib/monitoring/workload-types-live";
 import { validateAgent } from "@/lib/holmes/validate";
+import { agentUnreachable, findClusterAgent } from "@/lib/monitoring/cluster-agent";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
@@ -32,9 +33,9 @@ export async function GET(_request: Request, context: Context) {
 }
 
 /**
- * Update a cluster. Secrets are write-only: omitting `kubeconfig` or
- * `holmesApiKey` keeps the stored value (same convention as
- * `PATCH /api/agents/[id]`). Whichever credential is supplied is re-validated.
+ * Update a cluster. The kubeconfig is write-only: omitting it keeps the stored
+ * value (same convention as `PATCH /api/agents/[id]`). A changed kubeconfig or
+ * a different `agentId` is re-validated before it is saved.
  */
 export async function PATCH(request: Request, context: Context) {
   const ctx = await getConsoleContext();
@@ -47,8 +48,7 @@ export async function PATCH(request: Request, context: Context) {
   let body: {
     name?: string;
     kubeconfig?: string;
-    holmesUrl?: string;
-    holmesApiKey?: string;
+    agentId?: string;
   };
   try {
     body = await request.json();
@@ -58,16 +58,7 @@ export async function PATCH(request: Request, context: Context) {
 
   const name = body.name?.trim() || existing.name;
   const kubeconfig = body.kubeconfig?.trim() || existing.kubeconfig;
-  const holmesUrl =
-    body.holmesUrl?.trim().replace(/\/$/, "") || existing.holmesUrl;
-  const holmesApiKey = body.holmesApiKey?.trim() || existing.holmesApiKey;
-  if (!/^https?:\/\//.test(holmesUrl)) {
-    return Response.json(
-      { error: "holmesUrl must start with http:// or https://" },
-      { status: 400 },
-    );
-  }
-
+  const agentId = body.agentId || existing.agentId;
   if (kubeconfig !== existing.kubeconfig) {
     try {
       await discoverWorkloads(kubeconfig, await detectableTypes(ctx.orgId));
@@ -81,25 +72,20 @@ export async function PATCH(request: Request, context: Context) {
       );
     }
   }
-  if (holmesUrl !== existing.holmesUrl || holmesApiKey !== existing.holmesApiKey) {
+  if (agentId !== existing.agentId) {
+    const holmes = await findClusterAgent(ctx.orgId, agentId);
+    if (holmes instanceof Response) return holmes;
     try {
-      await validateAgent(holmesUrl, holmesApiKey);
+      await validateAgent(holmes.url, holmes.apiKey);
     } catch (err) {
-      return Response.json(
-        {
-          error: err instanceof Error ? err.message : "Holmes validation failed",
-          field: "holmesUrl",
-        },
-        { status: 422 },
-      );
+      return agentUnreachable(holmes.name, err);
     }
   }
 
   const cluster = await updateCluster(id, {
     name,
     kubeconfig,
-    holmesUrl,
-    holmesApiKey,
+    agentId,
     lastValidatedAt: new Date(),
   });
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
@@ -107,7 +93,7 @@ export async function PATCH(request: Request, context: Context) {
     actorId: ctx.userId,
     orgId: ctx.orgId,
     action: "monitoring.cluster.updated",
-    metadata: { clusterId: id, name },
+    metadata: { clusterId: id, name, agentId },
   });
   return Response.json(cluster);
 }

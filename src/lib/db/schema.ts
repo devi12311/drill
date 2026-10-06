@@ -120,7 +120,8 @@ export const orgInvites = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     role: text("role", { enum: ORG_ROLES }).$type<OrgRole>().notNull(),
-    /** Who it is for, in the inviter's words — bookkeeping only, never checked. */
+    /** Who it is for, in the inviter's words — bookkeeping only, never checked
+     *  (the invitee picks their own username; DECISIONS 123). */
     label: text("label"),
     tokenHash: text("token_hash").notNull().unique(),
     createdBy: uuid("created_by").references(() => users.id, {
@@ -166,15 +167,16 @@ export const auditLog = pgTable("audit_log", {
 
 /**
  * A Holmes endpoint the org investigates through. Org-owned: one Holmes serves a
- * cluster, so every member chats through the same registration and a key is
- * rotated in one place.
+ * cluster, so every member chats through the same registration, monitored
+ * clusters point at it too, and a key is rotated in one place.
  */
 export const holmesAgents = pgTable("holmes_agents", {
   id: uuid("id").primaryKey().defaultRandom(),
   orgId: orgId(),
   /**
-   * Who registered it — the only member besides org admins who may edit or remove
-   * it. The column keeps its pre-org name (`user_id`, when agents were personal).
+   * Who registered it — bookkeeping only: adding, editing and removing agents is
+   * for org owners and admins. The column keeps its pre-org name (`user_id`,
+   * when agents were personal).
    */
   createdBy: uuid("user_id").references(() => users.id, {
     onDelete: "set null",
@@ -184,7 +186,13 @@ export const holmesAgents = pgTable("holmes_agents", {
   // Stored as plaintext: Drill must replay it verbatim to Holmes on every
   // request. Accepted tradeoff for an internal tool (docs/DECISIONS.md).
   apiKey: text("api_key").notNull(),
+  /**
+   * Last SUCCESSFUL contact — saving it, or the worker's periodic probe
+   * (lib/health.ts). The name predates the probe.
+   */
   lastValidatedAt: timestamp("last_validated_at"),
+  /** Why the latest contact failed; null once one succeeds. */
+  lastError: text("last_error"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -394,11 +402,12 @@ export const skills = pgTable("skills", {
  * ServiceAccount and takes no context argument (docs/DECISIONS.md).
  *
  *  - `kubeconfig` — used by DRILL only, to discover Deployments/StatefulSets.
- *  - `holmesUrl`/`holmesApiKey` — a Holmes deployment living IN this cluster,
- *    which does all the actual investigating.
- *
- * Both are stored plaintext: Drill must replay them verbatim. Same accepted
- * tradeoff as `holmesAgents.apiKey`.
+ *    Sealed at rest, like `holmesAgents.apiKey`.
+ *  - `agentId` — the org's Holmes agent living IN this cluster, which does all
+ *    the actual investigating. A reference, not a copy of its URL and key, so
+ *    chat and monitoring use one registration and a rotated key applies to both.
+ *    No ON DELETE action: an agent a cluster still uses cannot be deleted (the
+ *    API says which cluster to repoint first); an org delete cascades both.
  */
 export const monitoringClusters = pgTable("monitoring_clusters", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -406,8 +415,9 @@ export const monitoringClusters = pgTable("monitoring_clusters", {
   orgId: orgId(),
   name: text("name").notNull(),
   kubeconfig: text("kubeconfig").notNull(),
-  holmesUrl: text("holmes_url").notNull(),
-  holmesApiKey: text("holmes_api_key").notNull(),
+  agentId: uuid("agent_id")
+    .notNull()
+    .references(() => holmesAgents.id),
   // Clusters are shared infrastructure, so they outlive the admin who added them.
   createdBy: uuid("created_by").references(() => users.id, {
     onDelete: "set null",

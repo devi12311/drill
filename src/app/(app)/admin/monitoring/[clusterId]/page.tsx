@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
+  ClusterAgentSelect,
   DeleteClusterButton,
   RescanButton,
 } from "@/components/monitoring/cluster-actions";
@@ -22,7 +23,10 @@ import {
   type JobListRow,
   type WorkloadRow,
 } from "@/lib/db/monitoring-queries";
+import { listAgents } from "@/lib/db/queries";
 import { CATEGORY_LABEL } from "@/lib/monitoring/ui";
+import { CLUSTER_REFRESH_MS, clusterStatus, HEALTH_TEXT } from "@/lib/health";
+import { cn } from "@/lib/utils";
 
 /**
  * One cluster: its jobs, its discovered inventory, and the way out.
@@ -58,12 +62,14 @@ export default async function ClusterPage({
   if (!isUuid(clusterId)) notFound();
   const ctx = await monitoringPageContext({ cluster: clusterId });
   const { q } = await searchParams;
-  const [cluster, inventory, jobs] = await Promise.all([
+  const [cluster, inventory, jobs, agents] = await Promise.all([
     getClusterSummary(clusterId),
     listWorkloadPage(clusterId, { search: q, limit: INVENTORY_PAGE }),
     listJobs(ctx.orgId, clusterId),
+    listAgents(ctx.orgId),
   ]);
   if (!cluster) notFound();
+  const status = clusterStatus(cluster);
 
   const workloadColumns: Column<WorkloadRow>[] = [
     {
@@ -169,8 +175,14 @@ export default async function ClusterPage({
         description={
           <>
             Investigated by{" "}
-            <span className="font-mono text-[12px]">{cluster.holmesUrl}</span>.
-            Inventory refreshed {formatRelative(cluster.lastDiscoveredAt)}.
+            <ClusterAgentSelect
+              clusterId={clusterId}
+              agentId={cluster.agentId}
+              agents={agents.map(({ id, name }) => ({ id, name }))}
+            />{" "}
+            <span className="font-mono text-[12px]">({cluster.holmesUrl})</span>.
+            Inventory refreshed {formatRelative(cluster.lastDiscoveredAt)}, and
+            every {CLUSTER_REFRESH_MS / 60_000} minutes on its own.
           </>
         }
       >
@@ -189,14 +201,23 @@ export default async function ClusterPage({
         </Button>
       </AdminPageHeader>
 
-      {cluster.discoveryError && (
-        <Card className="border-traffic-yellow/40 p-4">
-          <p className="text-body-sm text-traffic-yellow">
-            The last inventory scan failed, so this list may be out of date.
+      {status.health !== "ok" && (
+        <Card
+          className={cn(
+            "p-4",
+            status.health === "down" ? "border-traffic-red/40" : "border-border",
+          )}
+        >
+          <p className={cn("text-body-sm", HEALTH_TEXT[status.health])}>
+            {status.summary}
+            {status.health === "down" &&
+              (cluster.discoveryError
+                ? " — the inventory below may be out of date."
+                : " — runs on this cluster will fail until it answers.")}
           </p>
-          <p className="mt-1 font-mono text-[12px] text-bone-gray">
-            {cluster.discoveryError}
-          </p>
+          {status.detail && (
+            <p className="mt-1 font-mono text-[12px] text-bone-gray">{status.detail}</p>
+          )}
         </Card>
       )}
 

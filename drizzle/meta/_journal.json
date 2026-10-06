@@ -148,6 +148,27 @@
       "when": 1791290438526,
       "tag": "0020_workload_types",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791303483780,
+      "tag": "0021_cluster_agent",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791303495177,
+      "tag": "0022_cluster_agent_drop_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791304468793,
+      "tag": "0023_agent_last_error",
+      "breakpoints": true
     }
   ]
 }
