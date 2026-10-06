@@ -1,14 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { ArrowLeft, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   ArtifactCard,
   type ArtifactListItem,
 } from "@/components/resolutions/artifact-card";
-import { CHAT_HOME } from "@/lib/routes";
 
 /**
  * The treasury: every resolved investigation across the team, searchable
@@ -64,15 +62,7 @@ export default function ResolutionsPage() {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-[920px] px-6 pb-20 pt-8">
-      <Link
-        href={CHAT_HOME}
-        className="inline-flex items-center gap-2 text-body-sm text-bone-gray hover:text-warm-off-white"
-      >
-        <ArrowLeft className="size-3.5" />
-        Investigations
-      </Link>
-
-      <div className="mt-6">
+      <div>
         <div className="text-caption-tracked uppercase text-bone-gray">
           Team treasury
         </div>

@@ -7,7 +7,13 @@ import {
   type ConcernCheckInfo,
   type ConcernView,
 } from "@/components/monitoring/concern-card";
+import {
+  SeverityGroups,
+  type SeverityGroup,
+} from "@/components/monitoring/severity-groups";
 import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
+import { bySeverity } from "@/lib/monitoring/ui";
+import type { Severity } from "@/lib/monitoring/types";
 
 /**
  * The concern list, and the open/all switch above it.
@@ -37,6 +43,34 @@ export function ConcernList({
   else toggled.set("status", "all");
   const toggleQs = toggled.toString();
 
+  // Bucketed by the severity the card shows — the effective one, after any
+  // per-job or contextual re-rating.
+  const groups: Partial<Record<Severity, SeverityGroup>> = {};
+  for (const [severity, members] of bySeverity(
+    concerns,
+    (c) => c.effectiveSeverity,
+  )) {
+    const open = members.filter((c) => c.status === "open").length;
+    groups[severity] = {
+      count: members.length,
+      // Only with resolved concerns included, where the count alone would
+      // overstate what is still live.
+      detail: showAll ? `${open} open` : undefined,
+      content: (
+        <div className="space-y-2">
+          {members.map((concern) => (
+            <ConcernCard
+              key={concern.id}
+              concern={concern}
+              check={checkInfo[concern.checkId]}
+              onChanged={() => refresh(null)}
+            />
+          ))}
+        </div>
+      ),
+    };
+  }
+
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
@@ -65,16 +99,7 @@ export function ConcernList({
             : "No open concerns. Either this job has not run yet, or everything it checks is currently passing."}
         </p>
       ) : (
-        <div className="space-y-2">
-          {concerns.map((concern) => (
-            <ConcernCard
-              key={concern.id}
-              concern={concern}
-              check={checkInfo[concern.checkId]}
-              onChanged={() => refresh(null)}
-            />
-          ))}
-        </div>
+        <SeverityGroups groups={groups} />
       )}
     </section>
   );

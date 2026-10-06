@@ -350,3 +350,4 @@ export const CLICKHOUSE_CHECKS: readonly MonitorCheck[] = [
     requires: "engine-sql",
   },
 ];
+

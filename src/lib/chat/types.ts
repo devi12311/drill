@@ -46,3 +46,18 @@ export type TurnStreamMessage =
 
 /** One sidebar dot per conversation (`listConversations`). */
 export type ConversationActivity = TurnStatus | "awaiting_approval" | null;
+
+/** One Recent row: what the sidebar lists for the active agent. */
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  model: string;
+  status: "open" | "resolved";
+  artifactId: string | null;
+  updatedAt: string;
+  activity: ConversationActivity;
+}
+
+export function isInvestigating(conv: Pick<ConversationSummary, "activity">): boolean {
+  return conv.activity === "queued" || conv.activity === "running";
+}

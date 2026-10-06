@@ -65,6 +65,25 @@ export const SEVERITY_ORDER: Severity[] = [
   "info",
 ];
 
+/**
+ * Buckets items by severity, preserving their order within each bucket. Lives
+ * here rather than beside `SeverityGroups` because that module is client-only,
+ * and the run page builds its groups on the server.
+ */
+export function bySeverity<T>(
+  items: readonly T[],
+  severityOf: (item: T) => Severity,
+): Map<Severity, T[]> {
+  const buckets = new Map<Severity, T[]>();
+  for (const item of items) {
+    const severity = severityOf(item);
+    const bucket = buckets.get(severity);
+    if (bucket) bucket.push(item);
+    else buckets.set(severity, [item]);
+  }
+  return buckets;
+}
+
 export const CONCERN_STATUS_LABEL: Record<ConcernStatus, string> = {
   open: "Open",
   resolved: "Fixed",

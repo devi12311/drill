@@ -1,11 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SkillScope } from "@/components/skills/skill-badges";
 import { useSkills } from "@/components/skills/use-skills";
-import { CHAT_HOME } from "@/lib/routes";
 
 /**
  * The skills library: procedures Holmes follows. Everyone writes private ones;
@@ -17,15 +16,7 @@ export default function SkillsPage() {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-[920px] px-6 pb-20 pt-8">
-        <Link
-          href={CHAT_HOME}
-          className="inline-flex items-center gap-2 text-body-sm text-bone-gray hover:text-warm-off-white"
-        >
-          <ArrowLeft className="size-3.5" />
-          Investigations
-        </Link>
-
-        <div className="mt-6 flex items-end justify-between gap-6">
+        <div className="flex items-end justify-between gap-6">
           <div>
             <div className="text-caption-tracked uppercase text-bone-gray">
               Procedures

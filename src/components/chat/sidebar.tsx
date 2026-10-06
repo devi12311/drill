@@ -1,7 +1,8 @@
 "use client";
 
-import { usePathname } from "next/navigation";
-import { BookMarked, ChevronDown, ListChecks, Plus, Settings2, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
+import { ChevronDown, Plus, Settings2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,23 +15,11 @@ import { BrandMark } from "@/components/shell/brand-mark";
 import { SideNavLink } from "@/components/shell/side-nav-link";
 import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
 import { ConfirmButton } from "@/components/ui/confirm-button";
+import { useWorkspace } from "@/components/workspace/workspace-provider";
 import { cn } from "@/lib/utils";
-import type { AgentSummary } from "@/components/agents/agents-dialog";
-import type { ConversationActivity } from "@/lib/chat/types";
-
-export interface ConversationSummary {
-  id: string;
-  title: string;
-  model: string;
-  status: "open" | "resolved";
-  artifactId: string | null;
-  updatedAt: string;
-  activity: ConversationActivity;
-}
-
-export function isInvestigating(conv: ConversationSummary): boolean {
-  return conv.activity === "queued" || conv.activity === "running";
-}
+import { CHAT_HOME } from "@/lib/routes";
+import { isInvestigating, type ConversationSummary } from "@/lib/chat/types";
+import { WORKSPACE_NAV, chatUrl, isNavActive, writeChatUrl } from "@/lib/workspace/nav";
 
 /**
  * One dot per row, most urgent first: something the user must act on outranks
@@ -61,30 +50,40 @@ function shortDate(iso: string) {
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function Sidebar({
-  agents,
-  activeAgentId,
-  onSelectAgent,
-  onManageAgents,
-  conversations,
-  activeId,
-  onNewChat,
-  onSelect,
-  onDelete,
-  listError,
-}: {
-  agents: AgentSummary[];
-  activeAgentId: string | null;
-  onSelectAgent: (id: string) => void;
-  onManageAgents: () => void;
-  conversations: ConversationSummary[];
-  activeId: string | null;
-  onNewChat: () => void;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-  listError: string | null;
-}) {
+/**
+ * On the chat page a conversation link changes only the URL (the pane follows
+ * `?c=`), skipping a navigation; elsewhere it is an ordinary link — which also
+ * lets the skill editor's unsaved-changes guard catch it, and middle-click work.
+ */
+function onChatClick(onChat: boolean, conversationId: string | null) {
+  return (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!onChat || e.defaultPrevented) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    writeChatUrl(conversationId, "push");
+  };
+}
+
+/**
+ * The workspace sidebar, rendered once by the `(workspace)` layout so it stays
+ * put across chat, Resolutions and Skills. All of it reads the
+ * workspace context; nothing is threaded through a page.
+ */
+export function Sidebar() {
+  const {
+    agents,
+    activeAgentId,
+    selectAgent,
+    openAgents,
+    conversations,
+    listError,
+    deleteConversation,
+  } = useWorkspace();
   const pathname = usePathname();
+  const onChat = pathname === CHAT_HOME;
+  const params = useSearchParams();
+  // A row is "open" only on the chat page; elsewhere none is highlighted.
+  const openId = onChat ? params.get("c") : null;
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
 
   return (
@@ -109,7 +108,7 @@ export function Sidebar({
             {agents.map((agent) => (
               <DropdownMenuItem
                 key={agent.id}
-                onSelect={() => onSelectAgent(agent.id)}
+                onSelect={() => selectAgent(agent.id)}
                 className={cn(agent.id === activeAgentId && "bg-smoke-charcoal")}
               >
                 <div className="min-w-0">
@@ -121,37 +120,40 @@ export function Sidebar({
               </DropdownMenuItem>
             ))}
             {agents.length > 0 && <DropdownMenuSeparator />}
-            <DropdownMenuItem onSelect={onManageAgents}>
+            <DropdownMenuItem onSelect={openAgents}>
               <Settings2 className="size-4" />
               Manage agents
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Button
-          variant="secondary"
-          className="w-full justify-start gap-2"
-          onClick={onNewChat}
-          disabled={!activeAgent}
-        >
-          <Plus className="size-4" />
-          New investigation
-        </Button>
-
-        {/* Admin lives behind the mode island (bottom-right), not here. */}
-        <SideNavLink
-          href="/resolutions"
-          label="Resolutions"
-          icon={BookMarked}
-          active={pathname.startsWith("/resolutions")}
-        />
-        <SideNavLink
-          href="/skills"
-          label="Skills"
-          icon={ListChecks}
-          active={pathname.startsWith("/skills")}
-        />
+        {activeAgent ? (
+          <Button asChild variant="secondary" className="w-full justify-start gap-2">
+            <Link href={CHAT_HOME} onClick={onChatClick(onChat, null)}>
+              <Plus className="size-4" />
+              New investigation
+            </Link>
+          </Button>
+        ) : (
+          <Button variant="secondary" className="w-full justify-start gap-2" disabled>
+            <Plus className="size-4" />
+            New investigation
+          </Button>
+        )}
       </div>
+
+      <nav aria-label="Workspace" className="mt-4 space-y-0.5 px-3">
+        {/* Admin lives behind the mode island (bottom-right), not here. */}
+        {WORKSPACE_NAV.map((item) => (
+          <SideNavLink
+            key={item.href}
+            href={item.href}
+            label={item.label}
+            icon={item.icon}
+            active={isNavActive(item, pathname)}
+          />
+        ))}
+      </nav>
 
       <div className="mt-6 min-h-0 flex-1 overflow-y-auto px-3 pb-4">
         <div className="text-caption-tracked px-2 uppercase text-bone-gray">
@@ -172,14 +174,14 @@ export function Sidebar({
                 key={conv.id}
                 className={cn(
                   "group flex items-center gap-2 rounded-sm px-2 py-2 hover:bg-smoke-charcoal/50",
-                  activeId === conv.id && "bg-iron-veil hover:bg-iron-veil",
+                  openId === conv.id && "bg-iron-veil hover:bg-iron-veil",
                 )}
-                data-active={activeId === conv.id ? "" : undefined}
+                data-active={openId === conv.id ? "" : undefined}
               >
-                <button
-                  type="button"
-                  onClick={() => onSelect(conv.id)}
-                  aria-current={activeId === conv.id ? "page" : undefined}
+                <Link
+                  href={chatUrl(conv.id)}
+                  onClick={onChatClick(onChat, conv.id)}
+                  aria-current={openId === conv.id ? "page" : undefined}
                   className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 >
                   <div className="flex items-center gap-1.5">
@@ -204,7 +206,7 @@ export function Sidebar({
                   <div className="mt-0.5 font-mono text-[11px] text-bone-gray group-hover:text-pale-stone group-data-[active]:text-pale-stone">
                     {shortDate(conv.updatedAt)} · {conv.model}
                   </div>
-                </button>
+                </Link>
                 <ConfirmButton
                   label="Delete conversation"
                   title="Delete this investigation?"
@@ -218,7 +220,7 @@ export function Sidebar({
                   variant="ghost"
                   size="icon-xs"
                   className="hidden shrink-0 text-pale-stone hover:text-traffic-red focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex"
-                  onConfirm={() => onDelete(conv.id)}
+                  onConfirm={() => deleteConversation(conv.id)}
                 >
                   <Trash2 className="size-3.5" />
                 </ConfirmButton>

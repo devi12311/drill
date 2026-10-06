@@ -51,10 +51,11 @@ export interface DefinitionTileProps {
  * Memoised, and every prop it takes is a primitive or a stable callback so the
  * comparison can actually succeed.
  *
- * The catalogue renders ~180 of these under a filter box, and opening a panel
- * re-renders the page (the open definition lives in the URL). Without a memo
- * that holds, both cost a re-render of all 180 tiles — including the ones
- * nothing about them changed.
+ * The catalogue renders dozens of these under a filter box (one technology
+ * shelf, or every match for a broad search), and opening a panel re-renders the
+ * page (the open definition lives in the URL). Without a memo that holds, both
+ * cost a re-render of every tile — including the ones nothing about them
+ * changed.
  */
 export const DefinitionTile = memo(function DefinitionTile({
   id,

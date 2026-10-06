@@ -21,6 +21,7 @@ import { TurnCard } from "./turn-card";
 import { useTurnStream } from "./use-turn-stream";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSkills } from "@/components/skills/use-skills";
+import { useAgentModels } from "@/components/workspace/workspace-provider";
 import { invocationLine } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
 import { useSession } from "@/components/session/session-provider";
@@ -39,22 +40,6 @@ const EXAMPLE_ASKS = [
 
 /** Within this many px of the bottom, new progress keeps the view pinned there. */
 const STICK_PX = 120;
-
-/** The agent's served models, in its order; null while loading, [] on failure. */
-function useModels(agentId: string): string[] | null {
-  // Tagged with the agent it came from, so switching agents reads as loading
-  // instead of briefly offering the previous agent's models.
-  const [entry, setEntry] = useState<{ agentId: string; models: string[] } | null>(null);
-  useEffect(() => {
-    fetch(`/api/agents/${agentId}/models`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { models?: string[] } | null) =>
-        setEntry({ agentId, models: body?.models ?? [] }),
-      )
-      .catch(() => setEntry({ agentId, models: [] }));
-  }, [agentId]);
-  return entry?.agentId === agentId ? entry.models : null;
-}
 
 /** What a just-queued turn looks like until its stream sends the real row. */
 function queuedTurn(id: string): TurnSnapshot {
@@ -105,7 +90,7 @@ export function Chat({
   const { user } = useSession();
   const [entries, setEntries] = useState<ChatEntry[]>(initialEntries);
   const [actionError, setActionError] = useState<string | null>(null);
-  const models = useModels(agentId);
+  const models = useAgentModels(agentId);
   const { skills: visibleSkills } = useSkills();
   // What the server will run for this user: their own and shared skills. An
   // admin's list also holds other users' private ones, and always-on skills
@@ -418,6 +403,8 @@ export function Chat({
           model={model}
           onModelChange={setModel}
           skills={runnableSkills}
+          // Survives leaving for Skills and coming back (the pane remounts).
+          draftKey={initialConversationId ?? `new:${agentId}`}
         />
       </div>
       {conversationId && (

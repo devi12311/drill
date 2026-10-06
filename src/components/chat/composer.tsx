@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowUp, ChevronDown, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,31 @@ export interface SkillRun {
   values: Record<string, string>;
 }
 
+const DRAFT_PREFIX = "drill.draft.";
+
+/**
+ * The unsent text, per conversation, for this tab: the chat pane remounts when
+ * the user opens Skills or Resolutions, and a half-written question must not go
+ * with it. Storage can be unavailable (private mode, blocked site data).
+ */
+function readDraft(key: string): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return sessionStorage.getItem(DRAFT_PREFIX + key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(key: string, value: string) {
+  try {
+    if (value) sessionStorage.setItem(DRAFT_PREFIX + key, value);
+    else sessionStorage.removeItem(DRAFT_PREFIX + key);
+  } catch {
+    // Not persisting a draft is a lost convenience, never an error.
+  }
+}
+
 export function Composer({
   onSend,
   onStop,
@@ -64,6 +89,7 @@ export function Composer({
   model,
   onModelChange,
   skills,
+  draftKey,
 }: {
   /**
    * Resolves false when nothing was sent — the draft is put back. With `run`,
@@ -80,8 +106,13 @@ export function Composer({
   onModelChange: (model: string) => void;
   /** Skills that can be run explicitly here; null while loading. */
   skills: SkillView[] | null;
+  /** Where the unsent text is kept: the conversation id, or `new:<agentId>`. */
+  draftKey: string;
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(() => readDraft(draftKey));
+  // Sending clears `value`, which clears the stored draft; a send that is put
+  // back restores it. A picked skill is not kept — it may be stale on return.
+  useEffect(() => writeDraft(draftKey, value), [draftKey, value]);
   const [blocked, setBlocked] = useState(false);
   const [run, setRun] = useState<SkillRun | null>(null);
   const [highlight, setHighlight] = useState(0);

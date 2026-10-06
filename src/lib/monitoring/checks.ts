@@ -184,6 +184,7 @@ export async function checkListItems(): Promise<CheckListItem[]> {
     builtin: c.builtin,
     enabled: c.enabled,
     version: c.version,
+    technologies: c.appliesToTechnologies,
   }));
 }
 

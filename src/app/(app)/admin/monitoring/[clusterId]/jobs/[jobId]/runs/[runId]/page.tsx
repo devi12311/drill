@@ -6,6 +6,10 @@ import { Card } from "@/components/ui/card";
 import { RunProgress } from "@/components/monitoring/run-progress";
 import { RunPrompts } from "@/components/monitoring/run-prompts";
 import { SeverityBadge } from "@/components/monitoring/severity-badge";
+import {
+  SeverityGroups,
+  type SeverityGroup,
+} from "@/components/monitoring/severity-groups";
 import { formatDateTime, formatDuration, formatUsd } from "@/lib/admin/format";
 import {
   getRun,
@@ -16,6 +20,7 @@ import {
 } from "@/lib/db/monitoring-queries";
 import { checkSummaries } from "@/lib/monitoring/checks";
 import {
+  bySeverity,
   OBSERVATION_SOURCE_LABEL,
   RUN_STATUS_CLASS,
   TECHNOLOGY_LABEL,
@@ -25,7 +30,7 @@ import {
   targetNamespaceLabel,
   isUuid,
 } from "@/lib/monitoring/types";
-import type { ObservationSource } from "@/lib/monitoring/types";
+import type { ObservationSource, Severity } from "@/lib/monitoring/types";
 
 interface RunObservation {
   targetKind: string;
@@ -158,6 +163,49 @@ export default async function RunPage({
     };
   });
 
+  // Grouped by severity so a fifty-check cluster run reads as five tiles, not
+  // fifty rows; `SeverityGroups` explains the choice.
+  const findingGroups: Partial<Record<Severity, SeverityGroup>> = {};
+  for (const [severity, members] of bySeverity(findings, (f) => f.severity)) {
+    const fresh = members.filter((f) => f.isNew).length;
+    findingGroups[severity] = {
+      count: members.length,
+      detail: fresh > 0 ? `${fresh} new` : undefined,
+      content: (
+        <div className="space-y-1.5">
+          {members.map((finding) => (
+            <Card
+              key={finding.concernId}
+              className="flex flex-wrap items-center gap-2 p-3"
+            >
+              <SeverityBadge
+                severity={finding.severity}
+                base={finding.baseSeverity}
+              />
+              <span className="font-mono text-[12px] text-muted-cobalt">
+                {finding.checkId}
+              </span>
+              <span className="min-w-0 flex-1 text-body-sm text-pale-stone">
+                {finding.title}
+              </span>
+              <span className="font-mono text-[12px] text-bone-gray">
+                {targetLabel({
+                  kind: finding.targetKind,
+                  name: finding.targetName,
+                })}
+              </span>
+              {finding.isNew && (
+                <span className="text-caption-tracked uppercase text-traffic-yellow">
+                  new
+                </span>
+              )}
+            </Card>
+          ))}
+        </div>
+      ),
+    };
+  }
+
   return (
     <div className="space-y-8">
       {chrome}
@@ -209,36 +257,7 @@ export default async function RunPage({
               : "Nothing failed in this run."}
           </p>
         ) : (
-          <div className="space-y-1.5">
-            {findings.map((finding) => (
-              <Card
-                key={finding.concernId}
-                className="flex flex-wrap items-center gap-2 p-3"
-              >
-                <SeverityBadge
-                  severity={finding.severity}
-                  base={finding.baseSeverity}
-                />
-                <span className="font-mono text-[12px] text-muted-cobalt">
-                  {finding.checkId}
-                </span>
-                <span className="min-w-0 flex-1 text-body-sm text-pale-stone">
-                  {finding.title}
-                </span>
-                <span className="font-mono text-[12px] text-bone-gray">
-                  {targetLabel({
-                    kind: finding.targetKind,
-                    name: finding.targetName,
-                  })}
-                </span>
-                {finding.isNew && (
-                  <span className="text-caption-tracked uppercase text-traffic-yellow">
-                    new
-                  </span>
-                )}
-              </Card>
-            ))}
-          </div>
+          <SeverityGroups groups={findingGroups} />
         )}
       </section>
 

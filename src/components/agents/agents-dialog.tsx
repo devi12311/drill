@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import {
   Dialog,
   DialogContent,
@@ -12,12 +13,113 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatRelative } from "@/lib/admin/format";
+import { cn } from "@/lib/utils";
+import { pickActiveAgent } from "./active-agent";
 
 export interface AgentSummary {
   id: string;
   name: string;
   url: string;
   lastValidatedAt: string | null;
+}
+
+function Tag({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="shrink-0 rounded-sm bg-iron-veil px-1.5 py-px text-[10px] font-medium uppercase tracking-[0.1em] text-pale-stone">
+      {children}
+    </span>
+  );
+}
+
+function DeleteAgent({ agent, onDelete }: { agent: AgentSummary; onDelete: () => void }) {
+  return (
+    <ConfirmButton
+      label={`Delete ${agent.name}`}
+      title={`Delete ${agent.name}?`}
+      description="Every conversation that ran on this agent is deleted with it. This cannot be undone."
+      confirmLabel="Delete agent"
+      destructive
+      variant="ghost"
+      size="icon-xs"
+      className="shrink-0 text-bone-gray opacity-0 hover:text-traffic-red focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+      onConfirm={onDelete}
+    >
+      <Trash2 className="size-3.5" />
+    </ConfirmButton>
+  );
+}
+
+interface FormState {
+  name: string;
+  url: string;
+  apiKey: string;
+  setName: (v: string) => void;
+  setUrl: (v: string) => void;
+  setApiKey: (v: string) => void;
+  error: string | null;
+  busy: boolean;
+  onSubmit: (e: React.FormEvent) => void;
+  /** Absent when there are no agents yet: the form is then the whole dialog. */
+  onCancel?: () => void;
+}
+
+function AddAgentForm({ f }: { f: FormState }) {
+  const ready = f.name.trim() && f.url.trim() && f.apiKey.trim();
+  return (
+    <form onSubmit={f.onSubmit} className="space-y-3">
+      <div className="grid gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-name" className="text-pale-stone">
+            Name
+          </Label>
+          <Input
+            id="agent-name"
+            placeholder="prod-cluster"
+            value={f.name}
+            onChange={(e) => f.setName(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-url" className="text-pale-stone">
+            URL
+          </Label>
+          <Input
+            id="agent-url"
+            placeholder="http://localhost:43289"
+            value={f.url}
+            onChange={(e) => f.setUrl(e.target.value)}
+            className="font-mono"
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="agent-key" className="text-pale-stone">
+          API key
+        </Label>
+        <Input
+          id="agent-key"
+          type="password"
+          autoComplete="off"
+          value={f.apiKey}
+          onChange={(e) => f.setApiKey(e.target.value)}
+          className="font-mono"
+        />
+      </div>
+      {f.error && <p className="text-body-sm text-traffic-red">{f.error}</p>}
+      <div className="flex items-center justify-end gap-2 pt-1">
+        {f.onCancel && (
+          <Button type="button" variant="ghost" size="sm" onClick={f.onCancel} disabled={f.busy}>
+            Cancel
+          </Button>
+        )}
+        <Button type="submit" size="sm" disabled={f.busy || !ready}>
+          {f.busy ? "Validating…" : "Validate & add"}
+        </Button>
+      </div>
+    </form>
+  );
 }
 
 export function AgentsDialog({
@@ -36,6 +138,18 @@ export function AgentsDialog({
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  // With no agents the form is the only thing worth showing.
+  const showForm = adding || agents.length === 0;
+  // Read only while open: the dialog's content renders client-side, after hydration.
+  const activeId = open ? pickActiveAgent(agents) : null;
+
+  function resetForm() {
+    setName("");
+    setUrl("");
+    setApiKey("");
+    setError(null);
+  }
 
   async function addAgent(e: React.FormEvent) {
     e.preventDefault();
@@ -49,9 +163,8 @@ export function AgentsDialog({
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setName("");
-      setUrl("");
-      setApiKey("");
+      resetForm();
+      setAdding(false);
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add agent");
@@ -65,102 +178,92 @@ export function AgentsDialog({
     onChanged();
   }
 
+  const form: FormState = {
+    name,
+    url,
+    apiKey,
+    setName,
+    setUrl,
+    setApiKey,
+    error,
+    busy,
+    onSubmit: addAgent,
+    onCancel:
+      agents.length > 0
+        ? () => {
+            resetForm();
+            setAdding(false);
+          }
+        : undefined,
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[480px]">
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) {
+          resetForm();
+          setAdding(false);
+        }
+        onOpenChange(next);
+      }}
+    >
+      <DialogContent className="max-w-[480px] gap-4">
         <DialogHeader>
           <DialogTitle>Holmes agents</DialogTitle>
           <DialogDescription>
-            Each agent is a HolmesGPT endpoint. The API key is verified against
-            the agent before saving. Deleting an agent deletes its
-            conversations.
+            HolmesGPT endpoints Drill investigates with. Keys are verified before saving.
           </DialogDescription>
         </DialogHeader>
-
         {agents.length > 0 && (
-          <div className="space-y-1">
+          <ul className="-mx-2 space-y-0.5">
             {agents.map((agent) => (
-              <div
+              <li
                 key={agent.id}
-                className="group flex items-center gap-3 rounded-sm px-2 py-2 hover:bg-smoke-charcoal"
+                className="group flex items-center gap-3 rounded-md px-2 py-2 hover:bg-smoke-charcoal/60"
               >
-                <span
-                  className={
-                    "size-1.5 shrink-0 rounded-full " +
-                    (agent.lastValidatedAt
-                      ? "bg-traffic-green"
-                      : "bg-traffic-yellow")
-                  }
-                />
+                <span className="relative grid size-9 shrink-0 place-items-center rounded-md bg-iron-veil font-mono text-[13px] uppercase text-warm-off-white">
+                  {agent.name.slice(0, 2)}
+                  <span
+                    className={cn(
+                      "absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-popover",
+                      agent.lastValidatedAt ? "bg-traffic-green" : "bg-traffic-yellow",
+                    )}
+                  />
+                </span>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-body-sm text-warm-off-white">
-                    {agent.name}
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-body-sm font-medium text-warm-off-white">
+                      {agent.name}
+                    </span>
+                    {agent.id === activeId && <Tag>Active</Tag>}
                   </div>
-                  <div className="truncate font-mono text-[11px] text-bone-gray">
-                    {agent.url}
+                  <div className="flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-bone-gray">
+                    <span className="truncate">{agent.url}</span>
+                    <span aria-hidden>·</span>
+                    <span className="shrink-0">
+                      {agent.lastValidatedAt ? `verified ${formatRelative(agent.lastValidatedAt)}` : (
+                        <span className="text-traffic-yellow">not verified</span>
+                      )}
+                    </span>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  aria-label={`Delete ${agent.name}`}
-                  onClick={() => removeAgent(agent.id)}
-                  className="hidden shrink-0 rounded-sm p-1 text-bone-gray hover:text-traffic-red group-hover:block"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
-              </div>
+                <DeleteAgent agent={agent} onDelete={() => removeAgent(agent.id)} />
+              </li>
             ))}
-          </div>
+          </ul>
         )}
-
-        <form onSubmit={addAgent} className="space-y-4 border-t border-border pt-4">
-          <div className="text-caption-tracked uppercase text-bone-gray">
+        {showForm ? (
+          <div className={cn("space-y-3", agents.length > 0 && "border-t border-border pt-4")}>
+            <div className="text-caption-tracked uppercase text-bone-gray">New agent</div>
+            <AddAgentForm f={form} />
+          </div>
+        ) : (
+          <Button variant="secondary" onClick={() => setAdding(true)} className="w-full justify-center">
+            <Plus className="size-3.5" />
             Add agent
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="agent-name" className="text-pale-stone">
-              Name
-            </Label>
-            <Input
-              id="agent-name"
-              placeholder="prod-cluster"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="agent-url" className="text-pale-stone">
-              URL
-            </Label>
-            <Input
-              id="agent-url"
-              placeholder="http://localhost:43289"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              className="font-mono"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="agent-key" className="text-pale-stone">
-              API key
-            </Label>
-            <Input
-              id="agent-key"
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="font-mono"
-            />
-          </div>
-          {error && <p className="text-body-sm text-traffic-red">{error}</p>}
-          <Button
-            type="submit"
-            disabled={busy || !name.trim() || !url.trim() || !apiKey.trim()}
-          >
-            {busy ? "Validating…" : "Validate & add"}
           </Button>
-        </form>
+        )}
       </DialogContent>
     </Dialog>
   );

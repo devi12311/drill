@@ -194,6 +194,11 @@ export interface CheckListItem {
   builtin: boolean;
   enabled: boolean;
   version: number;
+  /**
+   * `appliesToTechnologies`, carried so the catalogue can shelve checks by
+   * technology. Empty means any technology, as on the full definition.
+   */
+  technologies: string[];
 }
 
 /**

@@ -11,10 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CheckForm } from "@/components/monitoring/check-form";
 import {
-  DefinitionGrid,
-  DefinitionSection,
-  DefinitionTile,
-} from "@/components/monitoring/definition-grid";
+  CheckTiles,
+  TechnologyShelves,
+} from "@/components/monitoring/check-shelves";
+import { DefinitionSection } from "@/components/monitoring/definition-grid";
 import {
   DefinitionBlock,
   DefinitionModal,
@@ -28,7 +28,6 @@ import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
 import {
   CATEGORY_LABEL,
   REQUIREMENT_LABEL,
-  SEVERITY_CLASS,
   describeScope,
 } from "@/lib/monitoring/ui";
 import { MONITOR_CATEGORIES } from "@/lib/monitoring/types";
@@ -135,26 +134,13 @@ export function ChecksBrowser({ checks }: { checks: CheckListItem[] }) {
                 : `${active} of ${total} active`
             }
           >
-            <DefinitionGrid>
-              {shown.map((check) => (
-                <DefinitionTile
-                  key={check.id}
-                  id={check.id}
-                  title={check.title}
-                  caption={check.id}
-                  railClass={SEVERITY_CLASS[check.baseSeverity]}
-                  marker={
-                    !check.enabled
-                      ? "disabled"
-                      : check.version > 1
-                        ? `v${check.version}`
-                        : undefined
-                  }
-                  dimmed={!check.enabled}
-                  onOpen={setOpenId}
-                />
-              ))}
-            </DefinitionGrid>
+            {/* A search already narrows to what you asked for, so it skips
+                the shelves; browsing is what needs them. */}
+            {filtering ? (
+              <CheckTiles checks={shown} onOpen={setOpenId} />
+            ) : (
+              <TechnologyShelves checks={shown} onOpen={setOpenId} />
+            )}
           </DefinitionSection>
         ))
       )}
