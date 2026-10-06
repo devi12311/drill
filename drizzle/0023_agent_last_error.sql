@@ -1,0 +1,1 @@
+ALTER TABLE "holmes_agents" ADD COLUMN "last_error" text;

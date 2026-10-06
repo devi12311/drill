@@ -19,6 +19,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Skeleton } from "@/components/ui/skeleton";
+import { HEALTH_DOT, type ClusterStatus } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
 export interface TreeJob {
@@ -34,7 +35,8 @@ export interface TreeJob {
 export interface TreeCluster {
   id: string;
   name: string;
-  discoveryError: string | null;
+  /** Derived on the server (lib/health.ts), so the dot never flips on hydration. */
+  status: ClusterStatus;
 }
 
 /**
@@ -222,8 +224,8 @@ function ClusterBranch({
             aria-hidden
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              cluster.discoveryError
-                ? "bg-traffic-yellow"
+              cluster.status.health !== "ok"
+                ? HEALTH_DOT[cluster.status.health]
                 : critical > 0
                   ? "bg-traffic-red"
                   : openConcerns > 0
@@ -231,8 +233,8 @@ function ClusterBranch({
                     : "bg-traffic-green",
             )}
             title={
-              cluster.discoveryError
-                ? "Discovery is failing"
+              cluster.status.health !== "ok"
+                ? [cluster.status.summary, cluster.status.detail].filter(Boolean).join(": ")
                 : `${openConcerns} open concern(s)`
             }
           />

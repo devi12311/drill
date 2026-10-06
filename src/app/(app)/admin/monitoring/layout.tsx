@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { monitoringPageContext } from "@/lib/monitoring/access";
 import { listClusters, listJobs } from "@/lib/db/monitoring-queries";
+import { clusterStatus } from "@/lib/health";
 import { technologyLabels } from "@/lib/monitoring/workload-types-live";
 import { TechnologiesProvider } from "@/components/monitoring/technologies-provider";
 import {
@@ -58,7 +59,7 @@ async function Tree() {
       clusters={clusters.map((c) => ({
         id: c.id,
         name: c.name,
-        discoveryError: c.discoveryError,
+        status: clusterStatus(c),
       }))}
       jobs={jobs.map((j) => ({
         id: j.id,

@@ -1,5 +1,6 @@
 import "server-only";
 import { chatLane } from "@/lib/chat/lane";
+import { startHealthChecks } from "@/lib/health-checks";
 import { monitoringLane } from "@/lib/monitoring/worker";
 import { runLane } from "./lane";
 
@@ -43,6 +44,7 @@ export function startWorker(): void {
     runLane(monitoringLane, shutdown.signal),
     runLane(chatLane, shutdown.signal),
   ];
+  startHealthChecks(shutdown.signal);
 
   const stop = async () => {
     if (shutdown.signal.aborted) return;

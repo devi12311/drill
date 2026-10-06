@@ -81,7 +81,7 @@ export default function AdminUserDetailPage({
     },
     {
       key: "lastValidatedAt",
-      header: "Last validated",
+      header: "Last reached",
       align: "right",
       render: (a) => formatRelative(a.lastValidatedAt),
     },

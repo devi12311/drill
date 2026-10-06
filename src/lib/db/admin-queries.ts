@@ -470,6 +470,7 @@ export interface AgentHealthRow {
   /** Who registered it; null once that user is deleted (the agent stays the org's). */
   addedByUsername: string | null;
   lastValidatedAt: Date | null;
+  lastError: string | null;
   createdAt: Date;
   conversationCount: number;
 }
@@ -493,6 +494,7 @@ export async function listAgentHealth(orgId: string): Promise<AgentHealthRow[]> 
       url: holmesAgents.url,
       addedByUsername: users.username,
       lastValidatedAt: holmesAgents.lastValidatedAt,
+      lastError: holmesAgents.lastError,
       createdAt: holmesAgents.createdAt,
       conversationCount: sql<number>`coalesce(${convCount.n}, 0)`,
     })
