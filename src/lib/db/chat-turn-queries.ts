@@ -1,7 +1,7 @@
 import "server-only";
 import { and, asc, eq, gt, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { db, isUniqueViolation, notify, type DbExecutor } from "./index";
-import { addAssistantMessage, addUserMessage } from "./queries";
+import { addAssistantMessage, addUserMessage, type Scope } from "./queries";
 import { chatTurnEvents, chatTurns } from "./schema";
 import type { MessageSkill } from "@/lib/skills/types";
 import {
@@ -59,7 +59,14 @@ function toSnapshot(row: {
   };
 }
 
-// ---- Web side (user-scoped) ----
+// ---- Web side (scoped to the member's own turns in the active org) ----
+
+const ownTurn = (scope: Scope, turnId: string) =>
+  and(
+    eq(chatTurns.id, turnId),
+    eq(chatTurns.userId, scope.userId),
+    eq(chatTurns.orgId, scope.orgId),
+  );
 
 /** The conversation's open turn, if any — what a reload reattaches to. */
 export async function getOpenTurn(
@@ -73,13 +80,13 @@ export async function getOpenTurn(
 }
 
 export async function getTurnSnapshot(
-  userId: string,
+  scope: Scope,
   turnId: string,
 ): Promise<TurnSnapshot | null> {
   const [row] = await db
     .select(snapshotColumns)
     .from(chatTurns)
-    .where(and(eq(chatTurns.id, turnId), eq(chatTurns.userId, userId)));
+    .where(ownTurn(scope, turnId));
   return row ? toSnapshot(row) : null;
 }
 
@@ -166,8 +173,8 @@ export type OpenTurnResult =
  * question. A stopped turn still open in the conversation is dismissed first.
  */
 export async function openTurn(input: {
+  scope: Scope;
   conversationId: string;
-  userId: string;
   agentId: string;
   model: string;
   kind: "ask" | "decision";
@@ -195,7 +202,8 @@ export async function openTurn(input: {
         .insert(chatTurns)
         .values({
           conversationId: input.conversationId,
-          userId: input.userId,
+          orgId: input.scope.orgId,
+          userId: input.scope.userId,
           agentId: input.agentId,
           model: input.model,
           kind: input.kind,
@@ -223,14 +231,14 @@ export async function openTurn(input: {
 
 /** "dismissed", or why not: the turn is still running / does not exist. */
 export async function dismissTurn(
-  userId: string,
+  scope: Scope,
   turnId: string,
 ): Promise<"dismissed" | "active" | "missing"> {
   return db.transaction(async (tx) => {
     const [turn] = await tx
       .select()
       .from(chatTurns)
-      .where(and(eq(chatTurns.id, turnId), eq(chatTurns.userId, userId)))
+      .where(ownTurn(scope, turnId))
       .for("update");
     if (!turn) return "missing";
     if ((ACTIVE_TURN_STATUSES as readonly string[]).includes(turn.status))
@@ -246,10 +254,10 @@ export async function dismissTurn(
  * that has to abort it — exactly as monitoring's `requestCancel`.
  */
 export async function requestTurnCancel(
-  userId: string,
+  scope: Scope,
   turnId: string,
 ): Promise<"cancelled" | "requested" | "inactive"> {
-  const owned = and(eq(chatTurns.id, turnId), eq(chatTurns.userId, userId));
+  const owned = ownTurn(scope, turnId);
   const now = new Date();
   const [queued] = await db
     .update(chatTurns)
@@ -274,7 +282,7 @@ export async function requestTurnCancel(
 
 /** A manual Resume: no attempt budget applies — the user asked for it. */
 export async function resumeTurn(
-  userId: string,
+  scope: Scope,
   turnId: string,
 ): Promise<boolean> {
   const [row] = await db
@@ -282,8 +290,7 @@ export async function resumeTurn(
     .set({ status: "queued", cancelRequestedAt: null, finishedAt: null })
     .where(
       and(
-        eq(chatTurns.id, turnId),
-        eq(chatTurns.userId, userId),
+        ownTurn(scope, turnId),
         inArray(chatTurns.status, ["failed", "cancelled"]),
         eq(chatTurns.resumable, true),
       ),
@@ -299,7 +306,8 @@ export interface ClaimedTurn {
   id: string;
   conversationId: string;
   agentId: string;
-  userId: string;
+  /** Whose org's agent, knowledge base and skills the turn runs with. */
+  scope: Scope;
   model: string;
   kind: "ask" | "decision";
   request: HolmesChatRequest;
@@ -315,13 +323,31 @@ export interface ClaimedTurn {
 export async function claimQueuedTurns(limit: number): Promise<ClaimedTurn[]> {
   // The CTE keeps the pre-update error: RETURNING only sees the new row, and the
   // claim clears `error` so a running turn never shows a stale one.
+  //
+  // FAIR across orgs (decision 130), not first-in-first-out: a turn's rank is how
+  // many turns its org already has running plus its place in its org's own queue,
+  // so free slots alternate between orgs and one org's backlog cannot starve the
+  // rest. An org alone on the system still gets every slot. The ranking is
+  // computed without locks; only the chosen rows are locked (window functions and
+  // FOR UPDATE cannot share a query level).
   const rows = (await db.execute(sql`
-    with picked as (
-      select id, error from ${chatTurns}
-      where status = 'queued'
-      order by created_at
+    with running as (
+      select org_id, count(*) as n from ${chatTurns}
+      where status = 'running' group by org_id
+    ),
+    ranked as (
+      select q.id, q.created_at,
+        coalesce(r.n, 0) + row_number() over (partition by q.org_id order by q.created_at) as fair
+      from ${chatTurns} q left join running r on r.org_id = q.org_id
+      where q.status = 'queued'
+    ),
+    picked as (
+      select c.id, c.error from ${chatTurns} c
+      join ranked k on k.id = c.id
+      where c.status = 'queued'
+      order by k.fair, k.created_at
       limit ${limit}
-      for update skip locked
+      for update of c skip locked
     )
     update ${chatTurns} t set
       status = 'running',
@@ -332,7 +358,7 @@ export async function claimQueuedTurns(limit: number): Promise<ClaimedTurn[]> {
       error = null
     from picked
     where t.id = picked.id
-    returning t.id, t.conversation_id, t.agent_id, t.user_id, t.model, t.kind,
+    returning t.id, t.conversation_id, t.agent_id, t.org_id, t.user_id, t.model, t.kind,
       t.request, t.question, t.note, t.attempt, t.auto_resumes,
       -- As epoch ms: raw execute skips Drizzle's column mappers, and a bare
       -- timestamp string would be parsed in the process's local zone, not UTC.
@@ -342,6 +368,7 @@ export async function claimQueuedTurns(limit: number): Promise<ClaimedTurn[]> {
     id: string;
     conversation_id: string;
     agent_id: string;
+    org_id: string;
     user_id: string;
     model: string;
     kind: "ask" | "decision";
@@ -357,7 +384,7 @@ export async function claimQueuedTurns(limit: number): Promise<ClaimedTurn[]> {
     id: r.id,
     conversationId: r.conversation_id,
     agentId: r.agent_id,
-    userId: r.user_id,
+    scope: { orgId: r.org_id, userId: r.user_id },
     model: r.model,
     kind: r.kind,
     request: r.request,

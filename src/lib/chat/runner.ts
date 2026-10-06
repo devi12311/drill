@@ -91,7 +91,7 @@ export async function executeClaimedTurn(
     if (!first) return;
     if (first.cancelRequested) stop("cancel");
 
-    const agent = await getAgent(turn.userId, turn.agentId);
+    const agent = await getAgent(turn.scope.orgId, turn.agentId);
     if (!agent) {
       await stopTurn(turn.id, turn.attempt, {
         status: "failed",
@@ -114,7 +114,7 @@ export async function executeClaimedTurn(
       request,
       outcome,
       { url: agent.url, apiKey: agent.apiKey },
-      { userId: turn.userId },
+      turn.scope,
       controller.signal,
     )) {
       // `done` is not progress: the answer goes to `messages`, below.

@@ -7,8 +7,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BrandMark } from "@/components/shell/brand-mark";
+import { LOGIN_PATH } from "@/lib/routes";
 
-export function AuthForm({ mode }: { mode: "login" | "register" }) {
+/**
+ * `next` is where to go afterwards (already checked with `safeNext` by the page):
+ * an invite link opened while signed out comes back to the invite. It rides
+ * along to the other form too, since an invitee usually has no account yet.
+ */
+export function AuthForm({
+  mode,
+  next,
+}: {
+  mode: "login" | "register";
+  next: string | null;
+}) {
+  const carry = next ? `?next=${encodeURIComponent(next)}` : "";
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -27,7 +40,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      router.push("/");
+      router.push(next ?? "/");
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -93,7 +106,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
               <>
                 No account?{" "}
                 <Link
-                  href="/register"
+                  href={`/register${carry}`}
                   className="text-pale-stone underline underline-offset-4 hover:text-warm-off-white"
                 >
                   Register
@@ -103,7 +116,7 @@ export function AuthForm({ mode }: { mode: "login" | "register" }) {
               <>
                 Already registered?{" "}
                 <Link
-                  href="/login"
+                  href={`${LOGIN_PATH}${carry}`}
                   className="text-pale-stone underline underline-offset-4 hover:text-warm-off-white"
                 >
                   Sign in

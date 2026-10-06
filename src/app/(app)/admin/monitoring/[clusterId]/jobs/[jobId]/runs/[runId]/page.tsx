@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { ArrowLeft } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { Card } from "@/components/ui/card";
@@ -23,8 +24,8 @@ import {
   bySeverity,
   OBSERVATION_SOURCE_LABEL,
   RUN_STATUS_CLASS,
-  TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
+import { technologyLabels } from "@/lib/monitoring/workload-types-live";
 import {
   targetLabel,
   targetNamespaceLabel,
@@ -67,15 +68,19 @@ export default async function RunPage({
 }) {
   const { clusterId, jobId, runId } = await params;
   if (!isUuid(jobId) || !isUuid(runId)) notFound();
-  const [runRow, findings, observations, catalogue, prompts, progress] =
+  const { orgId } = await monitoringPageContext({ job: jobId }, { run: runId });
+  const [runRow, findings, observations, catalogue, prompts, progress, technologies] =
     await Promise.all([
       getRun(runId),
       getRunFindings(runId),
       getRunObservations(runId),
-      checkSummaries(),
+      checkSummaries(orgId),
       runPromptIndex(runId),
       runProgress(runId),
+      technologyLabels(orgId),
     ]);
+  const technologyLabel = (slug: string) =>
+    technologies.find((t) => t.slug === slug)?.label ?? slug;
   if (!runRow) notFound();
 
   const run = runRow;
@@ -281,7 +286,7 @@ export default async function RunPage({
                   {shortKind(entry.target.kind)}/{entry.target.name}
                 </p>
                 <span className="text-caption-tracked uppercase text-bone-gray">
-                  {TECHNOLOGY_LABEL[entry.technology]}
+                  {technologyLabel(entry.technology)}
                 </span>
                 <span
                   className={

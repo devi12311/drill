@@ -113,6 +113,41 @@
       "when": 1790949245957,
       "tag": "0015_skills",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791278579339,
+      "tag": "0016_orgs",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791285845445,
+      "tag": "0017_org_invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791288029122,
+      "tag": "0018_catalogue_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791289734408,
+      "tag": "0019_scrub_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791290438526,
+      "tag": "0020_workload_types",
+      "breakpoints": true
     }
   ]
 }

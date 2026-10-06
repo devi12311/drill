@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   enqueueRun,
@@ -18,9 +19,10 @@ type Context = { params: Promise<{ id: string }> };
  * about progress by polling the run, not by waiting here.
  */
 export async function POST(_request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { job: id }))) return monitoringNotFound();
 
   const job = await getJob(id);
   if (!job) return Response.json({ error: "Not found" }, { status: 404 });
@@ -40,10 +42,11 @@ export async function POST(_request: Request, context: Context) {
   const queued = await enqueueRun({
     jobId: id,
     trigger: "manual",
-    triggeredBy: actor.id,
+    triggeredBy: ctx.userId,
   });
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.run.triggered",
     metadata: { jobId: id, runId: queued.id, name: job.name },
   });

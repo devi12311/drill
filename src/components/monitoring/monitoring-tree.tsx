@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import {
   BookOpen,
+  Boxes,
   ChevronRight,
   Gauge,
   ListChecks,
@@ -121,9 +122,10 @@ export function MonitoringTree({
           <span className="truncate">Add a cluster</span>
         </Link>
 
-        {/* The rubric and the playbooks are module-wide, not per cluster, so they
-            sit outside the tree. Two entries because they answer two different
-            questions: what is asked, and how it is investigated. */}
+        {/* The rubric, the playbooks and the workload types are module-wide, not
+            per cluster, so they sit outside the tree. Three entries because they
+            answer three questions: what is asked, how it is investigated, and what
+            a workload is. */}
         <Link
           href="/admin/monitoring/checks"
           className={cn(
@@ -143,6 +145,16 @@ export function MonitoringTree({
         >
           <BookOpen className="size-4 shrink-0 text-bone-gray" />
           <span className="truncate">Playbooks</span>
+        </Link>
+        <Link
+          href="/admin/monitoring/types"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-body-sm text-pale-stone transition-colors hover:text-warm-off-white",
+            pathname === "/admin/monitoring/types" && "text-warm-off-white",
+          )}
+        >
+          <Boxes className="size-4 shrink-0 text-bone-gray" />
+          <span className="truncate">Workload types</span>
         </Link>
       </nav>
     </aside>

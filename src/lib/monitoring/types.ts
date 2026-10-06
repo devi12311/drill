@@ -7,21 +7,7 @@
  * of importing the catalogue (which imports this file).
  */
 
-/**
- * Does this look like an id at all?
- *
- * Every monitoring page takes ids straight from the URL and reads them with a
- * query. Postgres rejects a malformed uuid with `invalid input syntax for type
- * uuid`, so `/admin/monitoring/not-a-uuid` produced a database error rather than a
- * missing page — and the error text carried the column type back to the browser.
- * A URL that cannot name a row names no row, which is a 404.
- */
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function isUuid(value: string): boolean {
-  return UUID_PATTERN.test(value);
-}
+export { isUuid } from "@/lib/uuid";
 
 export const SEVERITIES = [
   "critical",
@@ -74,41 +60,19 @@ export type TargetKind = (typeof TARGET_KINDS)[number];
  * one is worth asking. A check may be scoped to one or more technologies, and a
  * deep assessment loads that technology's playbook.
  *
- * `kubernetes` is the odd member and the one to read carefully: it is the only
- * value that does not name software running *inside* a workload, because its
- * subject is the cluster itself (see {@link CLUSTER_TARGET}). It therefore must
- * never be produced by detection, and must never be offered as an override for a
- * workload — `WORKLOAD_TECHNOLOGY_OPTIONS` in monitoring/profiles is the list any
- * workload-facing picker uses.
+ * A SLUG of a workload type, which is data now (decision 128): the vocabulary is
+ * each org's effective `monitoring_workload_types`, so it cannot be a union here.
+ * Validate against the live types (`lib/monitoring/workload-types-live.ts`), never
+ * against a constant.
  *
- * Deliberately limited to what we can actually observe today. Kafka and ksqlDB
- * are absent on purpose: neither has a Holmes toolset or a Prometheus exporter in
- * this cluster, so a profile for them would produce confident nonsense. Adding
- * one later is this list plus a playbook plus checks — nothing else.
+ * `kubernetes` is the odd value and the one to read carefully: it is not a type
+ * row, because its subject is the cluster itself (see {@link CLUSTER_TARGET}). It
+ * is never produced by detection and never offered as an override for a workload.
  */
-export const WORKLOAD_TECHNOLOGIES = [
-  "postgresql",
-  "mysql",
-  "mongodb",
-  "clickhouse",
-  "rabbitmq",
-  "nodejs",
-  "kubernetes",
-] as const;
-export type WorkloadTechnology = (typeof WORKLOAD_TECHNOLOGIES)[number];
+export type WorkloadTechnology = string;
 
 /** The one technology whose subject is the cluster rather than a workload. */
-export const CLUSTER_TECHNOLOGY = "kubernetes" satisfies WorkloadTechnology;
-
-/**
- * The technologies a WORKLOAD can be. Every workload-facing surface uses this
- * instead of the full vocabulary: the picker's override dropdown, and the route
- * behind it. Marking a Deployment as `kubernetes` would hand it the cluster
- * playbook and file its findings under a cluster check, so it is refused rather
- * than merely discouraged.
- */
-export const WORKLOAD_TECHNOLOGY_OPTIONS: readonly WorkloadTechnology[] =
-  Object.freeze(WORKLOAD_TECHNOLOGIES.filter((t) => t !== CLUSTER_TECHNOLOGY));
+export { CLUSTER_TECHNOLOGY } from "./workload-types";
 
 /**
  * How much work one run does per workload.
@@ -186,7 +150,16 @@ export const DISMISSED_STATUSES: readonly ConcernStatus[] = [
  * to render a wall of tiles put a quarter of a megabyte on the wire for two
  * fields per tile. The panel loads the one definition it opens.
  */
-export interface CheckListItem {
+/** Where an effective catalogue entry comes from (decision 126). */
+export type CatalogueSource = "template" | "override" | "custom";
+
+export interface CatalogueProvenance {
+  source: CatalogueSource;
+  /** An org's fork whose template has changed since it was made or last reviewed. */
+  updateAvailable: boolean;
+}
+
+export interface CheckListItem extends CatalogueProvenance {
   id: string;
   category: MonitorCategory;
   title: string;
@@ -224,7 +197,7 @@ export interface CheckRubricItem {
   requires: string | null;
 }
 
-export interface CheckView {
+export interface CheckView extends CatalogueProvenance {
   id: string;
   category: MonitorCategory;
   title: string;

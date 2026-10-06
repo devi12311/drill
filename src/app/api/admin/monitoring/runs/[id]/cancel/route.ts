@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import { requestCancel } from "@/lib/db/monitoring-queries";
 
@@ -11,18 +12,20 @@ type Context = { params: Promise<{ id: string }> };
  * already finished — so the response says which of the two happened.
  */
 export async function POST(_request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { run: id }))) return monitoringNotFound();
 
-  const result = await requestCancel(id, actor.id);
+  const result = await requestCancel(id, ctx.userId);
   if (result === "inactive")
     return Response.json(
       { error: "This run has already finished" },
       { status: 409 },
     );
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.run.cancelled",
     metadata: { runId: id, stage: result },
   });

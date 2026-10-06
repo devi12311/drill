@@ -2,7 +2,15 @@ import "server-only";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "./index";
-import { auditLog, conversations, holmesAgents, messages, users } from "./schema";
+import {
+  auditLog,
+  conversations,
+  holmesAgents,
+  messages,
+  orgMemberships,
+  organizations,
+  users,
+} from "./schema";
 
 // ---- Time ranges ----
 
@@ -42,16 +50,32 @@ export function resolveRange(opts: {
   return { range: preset, from, to };
 }
 
-/** WHERE clause for completed investigations (assistant messages) in a range. */
-function investigationsInRange(range: DateRange, userId?: string) {
+/**
+ * Whose investigations an analytics query counts. The console's org sections
+ * pass `orgId` (an org admin sees their org only); the platform user page passes
+ * `userId`; nothing means every org, which only platform-admin routes may ask.
+ */
+export interface AnalyticsFilter {
+  orgId?: string;
+  userId?: string;
+}
+
+/**
+ * WHERE clause for completed investigations (assistant messages) in a range.
+ * Every query using it joins `conversations`, which is where org and user live.
+ */
+function investigationsInRange(range: DateRange, filter: AnalyticsFilter = {}) {
   const clauses = [
     eq(messages.role, "assistant"),
     gte(messages.createdAt, range.from),
     lte(messages.createdAt, range.to),
   ];
-  if (userId) clauses.push(eq(conversations.userId, userId));
+  if (filter.orgId) clauses.push(eq(conversations.orgId, filter.orgId));
+  if (filter.userId) clauses.push(eq(conversations.userId, filter.userId));
   return and(...clauses);
 }
+
+const withConversation = eq(messages.conversationId, conversations.id);
 
 // Reusable SQL fragments (casts force real JS numbers — postgres-js returns
 // bigint/numeric as strings otherwise).
@@ -74,7 +98,10 @@ export interface OverviewKpis {
   totalUsers: number;
 }
 
-export async function overviewKpis(range: DateRange): Promise<OverviewKpis> {
+export async function overviewKpis(
+  range: DateRange,
+  filter: AnalyticsFilter = {},
+): Promise<OverviewKpis> {
   const [agg] = await db
     .select({
       spend: SPEND,
@@ -84,19 +111,24 @@ export async function overviewKpis(range: DateRange): Promise<OverviewKpis> {
       avgDurationMs: sql<number>`coalesce(avg(${messages.durationMs}), 0)::float`,
     })
     .from(messages)
-    .where(investigationsInRange(range));
+    .innerJoin(conversations, withConversation)
+    .where(investigationsInRange(range, filter));
 
   const [au] = await db
     .select({
       activeUsers: sql<number>`count(distinct ${conversations.userId})::int`,
     })
     .from(messages)
-    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
-    .where(investigationsInRange(range));
+    .innerJoin(conversations, withConversation)
+    .where(investigationsInRange(range, filter));
 
-  const [tu] = await db
-    .select({ totalUsers: sql<number>`count(*)::int` })
-    .from(users);
+  // An org's "users" are its members; the platform's are every account.
+  const [tu] = filter.orgId
+    ? await db
+        .select({ totalUsers: sql<number>`count(*)::int` })
+        .from(orgMemberships)
+        .where(eq(orgMemberships.orgId, filter.orgId))
+    : await db.select({ totalUsers: sql<number>`count(*)::int` }).from(users);
 
   return {
     spend: agg?.spend ?? 0,
@@ -119,21 +151,18 @@ export interface SpendPoint {
 
 export async function spendOverTime(
   range: DateRange,
-  userId?: string,
+  filter: AnalyticsFilter = {},
 ): Promise<SpendPoint[]> {
   const bucket = sql`date_trunc('day', ${messages.createdAt})`;
-  const q = db
+  return db
     .select({
       day: sql<string>`to_char(${bucket}, 'YYYY-MM-DD')`,
       spend: SPEND,
       investigations: COUNT,
     })
-    .from(messages);
-  const withJoin = userId
-    ? q.innerJoin(conversations, eq(messages.conversationId, conversations.id))
-    : q;
-  return withJoin
-    .where(investigationsInRange(range, userId))
+    .from(messages)
+    .innerJoin(conversations, withConversation)
+    .where(investigationsInRange(range, filter))
     .groupBy(bucket)
     .orderBy(bucket);
 }
@@ -147,7 +176,10 @@ export interface ModelUsage {
   tokens: number;
 }
 
-export async function costByModel(range: DateRange): Promise<ModelUsage[]> {
+export async function costByModel(
+  range: DateRange,
+  filter: AnalyticsFilter = {},
+): Promise<ModelUsage[]> {
   const rows = await db
     .select({
       model: messages.model,
@@ -156,7 +188,8 @@ export async function costByModel(range: DateRange): Promise<ModelUsage[]> {
       tokens: TOKENS,
     })
     .from(messages)
-    .where(investigationsInRange(range))
+    .innerJoin(conversations, withConversation)
+    .where(investigationsInRange(range, filter))
     .groupBy(messages.model)
     .orderBy(desc(SPEND));
   return rows.map((r) => ({ ...r, model: r.model ?? "unknown" }));
@@ -173,6 +206,7 @@ export interface UserCost {
 export async function costByUser(
   range: DateRange,
   limit = 50,
+  filter: AnalyticsFilter = {},
 ): Promise<UserCost[]> {
   return db
     .select({
@@ -185,7 +219,7 @@ export async function costByUser(
     .from(messages)
     .innerJoin(conversations, eq(messages.conversationId, conversations.id))
     .innerJoin(users, eq(conversations.userId, users.id))
-    .where(investigationsInRange(range))
+    .where(investigationsInRange(range, filter))
     .groupBy(users.id, users.username)
     .orderBy(desc(SPEND))
     .limit(limit);
@@ -242,6 +276,56 @@ export async function listUsersWithStats(range: DateRange): Promise<UserStats[]>
     .orderBy(desc(sql`coalesce(${stats.spend}, 0)`), users.username);
 }
 
+// ---- Organizations (platform view) ----
+
+export interface OrgStats {
+  id: string;
+  name: string;
+  createdAt: Date;
+  members: number;
+  agents: number;
+  clusters: number;
+  spend: number;
+  investigations: number;
+  lastActive: Date | null;
+}
+
+/**
+ * Every org with its size and its chat spend in the range — the platform
+ * operator's cross-tenant view. Correlated counts are plain SQL for the reason
+ * given on `listClusters` (drizzle interpolates unqualified identifiers).
+ */
+export async function listOrgsWithStats(range: DateRange): Promise<OrgStats[]> {
+  const usage = db
+    .select({
+      orgId: conversations.orgId,
+      spend: sql<number>`coalesce(sum(${messages.costUsd}), 0)::float`.as("spend"),
+      investigations: sql<number>`count(*)::int`.as("investigations"),
+      lastActive: sql<Date>`max(${messages.createdAt})`.as("last_active"),
+    })
+    .from(messages)
+    .innerJoin(conversations, withConversation)
+    .where(investigationsInRange(range))
+    .groupBy(conversations.orgId)
+    .as("usage");
+
+  return db
+    .select({
+      id: organizations.id,
+      name: organizations.name,
+      createdAt: organizations.createdAt,
+      members: sql<number>`(select count(*)::int from org_memberships m where m.org_id = organizations.id)`,
+      agents: sql<number>`(select count(*)::int from holmes_agents a where a.org_id = organizations.id)`,
+      clusters: sql<number>`(select count(*)::int from monitoring_clusters c where c.org_id = organizations.id)`,
+      spend: sql<number>`coalesce(${usage.spend}, 0)`,
+      investigations: sql<number>`coalesce(${usage.investigations}, 0)`,
+      lastActive: usage.lastActive,
+    })
+    .from(organizations)
+    .leftJoin(usage, eq(usage.orgId, organizations.id))
+    .orderBy(desc(sql`coalesce(${usage.spend}, 0)`), organizations.name);
+}
+
 // ---- Per-user detail ----
 
 export interface UserDetail {
@@ -283,9 +367,9 @@ export async function userDetail(
     .select({ spend: SPEND, investigations: COUNT, tokens: TOKENS })
     .from(messages)
     .innerJoin(conversations, eq(messages.conversationId, conversations.id))
-    .where(investigationsInRange(range, userId));
+    .where(investigationsInRange(range, { userId }));
 
-  const series = await spendOverTime(range, userId);
+  const series = await spendOverTime(range, { userId });
 
   const agents = await db
     .select({
@@ -296,7 +380,8 @@ export async function userDetail(
       createdAt: holmesAgents.createdAt,
     })
     .from(holmesAgents)
-    .where(eq(holmesAgents.userId, userId))
+    // Agents are org-owned now; a user's page lists the ones they registered.
+    .where(eq(holmesAgents.createdBy, userId))
     .orderBy(holmesAgents.createdAt);
 
   const convos = await db
@@ -345,11 +430,11 @@ export interface InvestigationRow {
 
 export async function recentInvestigations(opts: {
   range: DateRange;
-  userId?: string;
+  filter: AnalyticsFilter;
   model?: string;
   limit?: number;
 }): Promise<InvestigationRow[]> {
-  const clauses = [investigationsInRange(opts.range, opts.userId)];
+  const clauses = [investigationsInRange(opts.range, opts.filter)];
   if (opts.model) clauses.push(eq(messages.model, opts.model));
 
   return db
@@ -382,14 +467,15 @@ export interface AgentHealthRow {
   id: string;
   name: string;
   url: string;
-  ownerId: string;
-  ownerUsername: string;
+  /** Who registered it; null once that user is deleted (the agent stays the org's). */
+  addedByUsername: string | null;
   lastValidatedAt: Date | null;
   createdAt: Date;
   conversationCount: number;
 }
 
-export async function listAllAgents(): Promise<AgentHealthRow[]> {
+/** Agent health for one org — the console's view of the agents its members use. */
+export async function listAgentHealth(orgId: string): Promise<AgentHealthRow[]> {
   const convCount = db
     .select({
       agentId: conversations.agentId,
@@ -405,15 +491,15 @@ export async function listAllAgents(): Promise<AgentHealthRow[]> {
       id: holmesAgents.id,
       name: holmesAgents.name,
       url: holmesAgents.url,
-      ownerId: users.id,
-      ownerUsername: users.username,
+      addedByUsername: users.username,
       lastValidatedAt: holmesAgents.lastValidatedAt,
       createdAt: holmesAgents.createdAt,
       conversationCount: sql<number>`coalesce(${convCount.n}, 0)`,
     })
     .from(holmesAgents)
-    .innerJoin(users, eq(holmesAgents.userId, users.id))
+    .leftJoin(users, eq(holmesAgents.createdBy, users.id))
     .leftJoin(convCount, eq(convCount.agentId, holmesAgents.id))
+    .where(eq(holmesAgents.orgId, orgId))
     .orderBy(holmesAgents.lastValidatedAt);
 }
 
@@ -421,12 +507,15 @@ export async function listAllAgents(): Promise<AgentHealthRow[]> {
 
 export async function writeAudit(opts: {
   actorId: string;
+  /** The org the action happened in; omit for platform-level actions. */
+  orgId?: string | null;
   action: string;
   targetUserId?: string | null;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
   await db.insert(auditLog).values({
     actorId: opts.actorId,
+    orgId: opts.orgId ?? null,
     action: opts.action,
     targetUserId: opts.targetUserId ?? null,
     metadata: opts.metadata ?? null,
@@ -435,6 +524,7 @@ export async function writeAudit(opts: {
 
 export interface AuditRow {
   id: string;
+  orgName: string | null;
   action: string;
   actorId: string;
   actorUsername: string | null;
@@ -444,15 +534,17 @@ export interface AuditRow {
   createdAt: Date;
 }
 
+/** One org's audit trail (`orgId`), or every org's when it is omitted (platform). */
 export async function listAudit(
   range: DateRange,
-  limit = 200,
+  opts: { orgId?: string; limit?: number } = {},
 ): Promise<AuditRow[]> {
   const actor = alias(users, "audit_actor");
   const target = alias(users, "audit_target");
   return db
     .select({
       id: auditLog.id,
+      orgName: organizations.name,
       action: auditLog.action,
       actorId: auditLog.actorId,
       actorUsername: actor.username,
@@ -464,12 +556,14 @@ export async function listAudit(
     .from(auditLog)
     .leftJoin(actor, eq(auditLog.actorId, actor.id))
     .leftJoin(target, eq(auditLog.targetUserId, target.id))
+    .leftJoin(organizations, eq(organizations.id, auditLog.orgId))
     .where(
       and(
         gte(auditLog.createdAt, range.from),
         lte(auditLog.createdAt, range.to),
+        opts.orgId ? eq(auditLog.orgId, opts.orgId) : undefined,
       ),
     )
     .orderBy(desc(auditLog.createdAt))
-    .limit(limit);
+    .limit(opts.limit ?? 200);
 }

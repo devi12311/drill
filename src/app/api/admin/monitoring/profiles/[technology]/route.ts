@@ -1,70 +1,69 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
-  getPlaybookRow,
+  deleteOrgPlaybook,
   observedKeyCounts,
-  updatePlaybook,
+  savePlaybook,
 } from "@/lib/db/monitoring-queries";
+import { catalogueCaller } from "@/lib/monitoring/access";
 import {
   parsePlaybookPatch,
   unacknowledgedKeyLosses,
 } from "@/lib/monitoring/playbook-input";
 import {
-  ensurePlaybooks,
+  cataloguePlaybook,
+  EMPTY_METHOD,
   playbookView,
   toPlaybook,
 } from "@/lib/monitoring/playbooks";
-import {
-  WORKLOAD_TECHNOLOGIES,
-  type WorkloadTechnology,
-} from "@/lib/monitoring/types";
+import type { CatalogueOwner } from "@/lib/db/monitoring-queries";
+import { isKnownTechnology } from "@/lib/monitoring/workload-types-live";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ technology: string }> };
 
+const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
+
+/** The route's technology, if it is one `owner` knows — a workload type or the cluster. */
+async function technologyOf(
+  context: Context,
+  owner: CatalogueOwner,
+): Promise<string | null> {
+  const technology = (await context.params).technology.toLowerCase();
+  return (await isKnownTechnology(owner, technology)) ? technology : null;
+}
+
 /**
- * One method in full — what the panel loads when a tile is opened.
- *
- * The shelf endpoint deliberately returns only names and counts, so this is where
- * the framing, the data sources, the ordered method and the observation specs
- * (plus each key's reading count, which is what locks a rename) come from.
+ * One method in full, as the caller's catalogue has it — what the panel loads
+ * when a tile is opened. For an org's fork it also carries the template, so the
+ * panel can show what changed upstream.
  */
-export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
-  const { technology: raw } = await context.params;
-  const technology = raw.toLowerCase() as WorkloadTechnology;
-  if (!(WORKLOAD_TECHNOLOGIES as readonly string[]).includes(technology))
-    return Response.json({ error: "Not found" }, { status: 404 });
-  const profile = await playbookView(technology);
-  if (!profile) return Response.json({ error: "Not found" }, { status: 404 });
+export async function GET(request: Request, context: Context) {
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const technology = await technologyOf(context, caller.owner);
+  if (!technology) return notFound();
+  const profile = await playbookView(caller.owner, technology);
+  if (!profile) return notFound();
   return Response.json({ profile });
 }
 
 /**
- * Edit a method. Edit and save is the whole lifecycle — there is no version, no
- * comparison against the shipped text and no adopt/decline dance; a row nobody has
- * edited keeps tracking the text in git via `seedPlaybooks`, and an edited one is
- * the operator's.
+ * Edit a method. In an org's catalogue the first edit FORKS the template into
+ * the org's own copy (decision 126); in the templates (platform admins) it edits
+ * what every org without a fork runs, and bumps the template's version so the
+ * orgs that have forked it are told.
  *
- * There is deliberately no POST and no DELETE. A technology without a playbook is
- * also a technology without a `WORKLOAD_TECHNOLOGIES` entry and without detection
- * rules, so creating one here would produce a method nothing can ever be matched
- * to; and deleting one would silently downgrade every deep run of that engine to
- * the generic rubric, which is the failure this whole layer exists to fix.
+ * A workload type with no method yet gets its FIRST one through the same PATCH
+ * (decision 128): there is nothing to fork, so it is written as the caller's own —
+ * the org's, or a template in the templates scope.
  */
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
-
-  const { technology: raw } = await context.params;
-  const technology = raw.toLowerCase() as WorkloadTechnology;
-  if (!(WORKLOAD_TECHNOLOGIES as readonly string[]).includes(technology))
-    return Response.json({ error: "Not found" }, { status: 404 });
-
-  // The row may not exist yet if nothing has read the playbooks in this process.
-  await ensurePlaybooks();
-  const row = await getPlaybookRow(technology);
-  if (!row) return Response.json({ error: "Not found" }, { status: 404 });
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const { ctx, owner } = caller;
+  const technology = await technologyOf(context, owner);
+  if (!technology) return notFound();
+  const row = await cataloguePlaybook(owner, technology);
 
   let body: Record<string, unknown>;
   try {
@@ -75,7 +74,7 @@ export async function PATCH(request: Request, context: Context) {
 
   let after;
   try {
-    after = parsePlaybookPatch(body, toPlaybook(row));
+    after = parsePlaybookPatch(body, row ? toPlaybook(row) : EMPTY_METHOD(technology));
   } catch (err) {
     return Response.json(
       { error: err instanceof Error ? err.message : "Invalid playbook" },
@@ -83,10 +82,12 @@ export async function PATCH(request: Request, context: Context) {
     );
   }
 
+  const before = row?.observations ?? [];
   const readings = await observedKeyCounts(
-    row.observations.map((spec) => spec.key),
+    before.map((spec) => spec.key),
+    owner,
   );
-  const dropped = row.observations
+  const dropped = before
     .filter(
       (spec) =>
         !after.observations.some((kept) => kept.key === spec.key) &&
@@ -97,7 +98,7 @@ export async function PATCH(request: Request, context: Context) {
   // A rename and a delete-plus-add look identical in a payload, so the only
   // enforceable rule is that a key with history cannot leave without being named.
   const unacknowledged = unacknowledgedKeyLosses(
-    row.observations,
+    before,
     after.observations,
     readings,
     after.dropKeys,
@@ -115,22 +116,28 @@ export async function PATCH(request: Request, context: Context) {
       { status: 409 },
     );
 
-  const updated = await updatePlaybook(technology, {
-    framing: after.framing,
-    dataSources: after.dataSources,
-    method: after.method,
-    observations: after.observations,
-    // Marks the row as the operator's, which is also what stops a later release
-    // overwriting it in `seedPlaybooks`.
-    editedBy: actor.id,
-  });
-  if (!updated) return Response.json({ error: "Not found" }, { status: 404 });
+  await savePlaybook(
+    owner,
+    technology,
+    row,
+    {
+      framing: after.framing,
+      dataSources: after.dataSources,
+      method: after.method,
+      observations: after.observations,
+    },
+    ctx.userId,
+  );
 
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: owner,
     action: "monitoring.playbook.updated",
     metadata: {
       technology,
+      scope: owner === null ? "template" : "org",
+      forked: owner !== null && row?.source === "template" ? true : undefined,
+      created: row ? undefined : true,
       droppedKeys: dropped.length > 0 ? dropped.map((d) => d.key) : undefined,
     },
   });
@@ -140,4 +147,33 @@ export async function PATCH(request: Request, context: Context) {
     /** Keys whose trend ends here, so the UI can say so rather than lose it quietly. */
     droppedKeys: dropped,
   });
+}
+
+/**
+ * Reset to template: drop the org's fork, so it runs the template again. Only an
+ * org's own copy can go — a template is never deleted, for the reason PATCH gives.
+ */
+export async function DELETE(request: Request, context: Context) {
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const { ctx, owner } = caller;
+  const technology = await technologyOf(context, owner);
+  if (!technology) return notFound();
+  if (owner === null)
+    return Response.json(
+      { error: "A template playbook cannot be deleted — every deep run of that engine depends on it." },
+      { status: 409 },
+    );
+  if (!(await deleteOrgPlaybook(owner, technology)))
+    return Response.json(
+      { error: "This organization has no playbook of its own for this technology." },
+      { status: 409 },
+    );
+  await writeAudit({
+    actorId: ctx.userId,
+    orgId: owner,
+    action: "monitoring.playbook.reset",
+    metadata: { technology },
+  });
+  return Response.json({ ok: true });
 }

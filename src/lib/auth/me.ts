@@ -5,6 +5,14 @@
  * Deliberately NOT in `session.ts`: that module is `server-only`, and client
  * components need this type. Keep it free of server imports.
  */
+import type { OrgRole } from "@/lib/orgs/types";
+
+export interface SessionOrg {
+  id: string;
+  name: string;
+  role: OrgRole;
+}
+
 export interface SessionUser {
   id: string;
   username: string;
@@ -20,4 +28,10 @@ export interface SessionUser {
    * mode switch, so an impersonating admin never loses their way back.
    */
   actorIsAdmin: boolean;
+  /** The org this session works in; everything shared is scoped to it. */
+  org: SessionOrg;
+  /** Every org the user belongs to, for the switcher (includes `org`). */
+  orgs: SessionOrg[];
+  /** Org owner/admin — gates sharing skills and managing the org's agents. */
+  isOrgAdmin: boolean;
 }

@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import {
   getRun,
   getRunFindings,
@@ -10,8 +11,10 @@ import { checkSummaries } from "@/lib/monitoring/checks";
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { run: id }))) return monitoringNotFound();
   /**
    * All reads fire together, and the existence check happens after.
    *
@@ -25,7 +28,7 @@ export async function GET(_request: Request, context: Context) {
     getRunObservations(id),
     // The catalogue travels with the run so the UI can name and cite a check
     // (including ones that only appear in `coverage.skipped`, and custom ones).
-    checkSummaries(),
+    checkSummaries(ctx.orgId),
   ]);
   if (!run) return Response.json({ error: "Not found" }, { status: 404 });
 

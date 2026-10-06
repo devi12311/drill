@@ -1,9 +1,11 @@
 import "server-only";
 import {
-  getPlaybookRow,
-  listPlaybookRows,
+  getCataloguePlaybook,
+  listCataloguePlaybooks,
   observedKeyCounts,
   seedPlaybooks,
+  type CatalogueOwner,
+  type CataloguePlaybook,
   type PlaybookRow,
 } from "@/lib/db/monitoring-queries";
 import {
@@ -13,6 +15,8 @@ import {
 } from "./playbook";
 import { PROFILES } from "./profiles";
 import type { WorkloadTechnology } from "./types";
+import { liveChecks } from "./checks";
+import { technologyLabels } from "./workload-types-live";
 
 /**
  * Reads the LIVE methods — the `monitoring_playbooks` table — the way
@@ -23,8 +27,10 @@ import type { WorkloadTechnology } from "./types";
  * The split is the same one decision 54 made for the rubric, and it buys the same
  * thing: the text stays in git for review, while an operator can correct a method
  * against a cluster that turned out not to match it without waiting for a deploy.
- * Unlike the rubric there is no version and no adopt-the-shipped-text flow: an
- * edit simply wins, and `seedPlaybooks` keeps every un-edited row tracking git.
+ * Each read names its owner, as with checks: an org gets its own forks over the
+ * templates, `null` the templates alone. `seedPlaybooks` keeps every un-edited
+ * TEMPLATE tracking git; an org's fork is the org's and is never rewritten — it is
+ * told when its template moved on instead (decision 126).
  */
 
 /** The methods this release ships, keyed by technology. */
@@ -32,13 +38,31 @@ const SHIPPED: ReadonlyMap<WorkloadTechnology, Playbook> = new Map(
   PROFILES.map((profile) => [profile.technology, profile.playbook]),
 );
 
-/** The checks each method exists to answer — editor context, not prompt input. */
-const CHECK_IDS: ReadonlyMap<WorkloadTechnology, string[]> = new Map(
-  PROFILES.map((profile) => [
-    profile.technology,
-    profile.checks.map((check) => check.id),
-  ]),
-);
+/**
+ * The checks each method exists to answer — editor context, not prompt input. Read
+ * from the owner's LIVE catalogue (checks scoped to the technology), so a new
+ * workload type's own checks count as soon as they exist.
+ */
+async function checkIdsByTechnology(
+  owner: CatalogueOwner,
+): Promise<Map<WorkloadTechnology, string[]>> {
+  const byTechnology = new Map<WorkloadTechnology, string[]>();
+  for (const check of await liveChecks(owner)) {
+    for (const technology of check.appliesToTechnologies) {
+      byTechnology.set(technology, [...(byTechnology.get(technology) ?? []), check.id]);
+    }
+  }
+  return byTechnology;
+}
+
+/** The starting point for a type's FIRST method — nothing to fork, nothing to keep. */
+export const EMPTY_METHOD = (technology: WorkloadTechnology): Playbook => ({
+  technology,
+  framing: "",
+  dataSources: [],
+  method: [],
+  observations: [],
+});
 
 /**
  * Idempotently seed the shipped methods, once per process — same shape as
@@ -73,41 +97,93 @@ export function toPlaybook(row: PlaybookRow): Playbook {
   };
 }
 
-/** Every live method, seeding the shipped ones on first read. */
-export async function livePlaybookRows(): Promise<PlaybookRow[]> {
+/** Every method `owner` sees, seeding the shipped ones on first read. */
+export async function livePlaybooks(owner: CatalogueOwner): Promise<CataloguePlaybook[]> {
   await ensurePlaybooks();
-  return listPlaybookRows();
+  return listCataloguePlaybooks(owner);
 }
 
-/** The shelf's shape — see PlaybookSummary for why it is separate. */
-export async function playbookSummaries(): Promise<PlaybookSummary[]> {
-  return (await livePlaybookRows()).map((row) => ({
+/**
+ * The shelf's shape — see PlaybookSummary for why it is separate. Every type the
+ * owner knows gets a tile, so a type with no method yet shows up as one to write
+ * rather than being invisible.
+ */
+export async function playbookSummaries(owner: CatalogueOwner): Promise<PlaybookSummary[]> {
+  const [rows, checkIds, types] = await Promise.all([
+    livePlaybooks(owner),
+    checkIdsByTechnology(owner),
+    technologyLabels(owner),
+  ]);
+  const summaries: PlaybookSummary[] = rows.map((row) => ({
     technology: row.technology,
-    checkCount: (CHECK_IDS.get(row.technology) ?? []).length,
+    checkCount: (checkIds.get(row.technology) ?? []).length,
     observationCount: row.observations.length,
     editedAt: row.editedBy ? row.updatedAt.toISOString() : null,
+    source: row.source,
+    updateAvailable: row.updateAvailable,
+    missing: false,
   }));
+  const covered = new Set(rows.map((r) => r.technology));
+  for (const type of types) {
+    if (covered.has(type.slug)) continue;
+    summaries.push({
+      technology: type.slug,
+      checkCount: (checkIds.get(type.slug) ?? []).length,
+      observationCount: 0,
+      editedAt: null,
+      source: "custom",
+      updateAvailable: false,
+      missing: true,
+    });
+  }
+  return summaries;
+}
+
+/** One method as `owner` sees it — the catalogue row the routes edit. */
+export async function cataloguePlaybook(
+  owner: CatalogueOwner,
+  technology: WorkloadTechnology,
+): Promise<CataloguePlaybook | null> {
+  await ensurePlaybooks();
+  return getCataloguePlaybook(owner, technology);
 }
 
 /** One method in full, for the panel that opens it. */
 export async function playbookView(
+  owner: CatalogueOwner,
   technology: WorkloadTechnology,
 ): Promise<PlaybookView | null> {
-  await ensurePlaybooks();
-  const row = await getPlaybookRow(technology);
-  if (!row) return null;
+  const [row, checkIds] = await Promise.all([
+    cataloguePlaybook(owner, technology),
+    checkIdsByTechnology(owner),
+  ]);
+  // A known type with no method yet opens as an empty one to write.
+  if (!row)
+    return {
+      ...EMPTY_METHOD(technology),
+      checkIds: checkIds.get(technology) ?? [],
+      readings: {},
+      editedAt: null,
+      source: "custom",
+      updateAvailable: false,
+      template: null,
+    };
   const counts = await observedKeyCounts(
     row.observations.map((o) => o.key),
+    owner,
   );
   return {
     ...toPlaybook(row),
-    checkIds: CHECK_IDS.get(row.technology) ?? [],
+    checkIds: checkIds.get(row.technology) ?? [],
     readings: Object.fromEntries(
       row.observations
         .map((o) => [o.key, counts[o.key] ?? 0] as const)
         .filter(([, n]) => n > 0),
     ),
     editedAt: row.editedBy ? row.updatedAt.toISOString() : null,
+    source: row.source,
+    updateAvailable: row.updateAvailable,
+    template: row.template ? toPlaybook(row.template) : null,
   };
 }
 
@@ -129,9 +205,10 @@ export const NO_PLAYBOOKS: RunPlaybooks = {
   for: () => undefined,
 };
 
-export async function playbookResolver(): Promise<RunPlaybooks> {
+/** The methods the org owning the run's cluster actually uses. */
+export async function playbookResolver(orgId: string): Promise<RunPlaybooks> {
   const byTechnology = new Map(
-    (await livePlaybookRows()).map((row) => [row.technology, toPlaybook(row)]),
+    (await livePlaybooks(orgId)).map((row) => [row.technology, toPlaybook(row)]),
   );
   return {
     for: (technology) =>

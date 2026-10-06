@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { requestTurnCancel } from "@/lib/db/chat-turn-queries";
 
 // Next 16: route params are async.
@@ -10,10 +10,10 @@ type Context = { params: Promise<{ id: string }> };
  * shows it as `cancelled` then.
  */
 export async function POST(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const result = await requestTurnCancel(user.id, id);
+  const result = await requestTurnCancel(ctx, id);
   if (result === "inactive")
     return Response.json(
       { error: "This investigation is no longer running" },

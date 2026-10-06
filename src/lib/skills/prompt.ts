@@ -63,8 +63,8 @@ Assuming the skill is relevant, start your response (after investigating) with:
 "I found a skill named **${name}** and used it to troubleshoot:"
 then list each step with ✅ for completed steps and ❌ for steps you could not complete (say why — e.g. which tool is missing).
 For example:
-1. ✅ *Look up the integration* — type snapchat, user 1042
-2. ❌ *Find the cost span* — no span in Tempo for the window (spans expire after ~1 day)`;
+1. ✅ *Check the pods* — 3 of 5 replicas in CrashLoopBackOff, exit code 137
+2. ❌ *Read the slow-query log* — no database toolset is available in this deployment`;
 }
 
 /**

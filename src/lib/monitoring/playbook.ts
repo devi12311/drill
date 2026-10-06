@@ -1,5 +1,10 @@
 import { renderTemplate } from "@/lib/templates";
-import type { AssessmentTarget, ObservationSource, WorkloadTechnology } from "./types";
+import type {
+  AssessmentTarget,
+  CatalogueProvenance,
+  ObservationSource,
+  WorkloadTechnology,
+} from "./types";
 
 /**
  * A PLAYBOOK is a method, not a question.
@@ -66,15 +71,17 @@ export interface Playbook {
  * `observedKeyCounts` group-by over every key of every playbook on each load;
  * the panel now asks for the one method it opens.
  */
-export interface PlaybookSummary {
+export interface PlaybookSummary extends CatalogueProvenance {
   technology: WorkloadTechnology;
   checkCount: number;
   observationCount: number;
   /** When it was last edited; null while it is still the shipped text. */
   editedAt: string | null;
+  /** A workload type with no method yet — the tile offers to write one. */
+  missing: boolean;
 }
 
-export interface PlaybookView extends Playbook {
+export interface PlaybookView extends Playbook, CatalogueProvenance {
   /** The checks this method exists to answer — read-only context for the editor. */
   checkIds: string[];
   /**
@@ -87,6 +94,8 @@ export interface PlaybookView extends Playbook {
   readings: Record<string, number>;
   /** When it was last edited; null while it is still the shipped text. */
   editedAt: string | null;
+  /** The template behind an org's fork, so the screen can show what changed. */
+  template: Playbook | null;
 }
 
 /**

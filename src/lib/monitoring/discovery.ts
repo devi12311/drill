@@ -1,6 +1,6 @@
 import "server-only";
 import { AppsV1Api, KubeConfig } from "@kubernetes/client-node";
-import { detectTechnology } from "./technology";
+import { detectTechnology, type DetectableType } from "./workload-types";
 import type { WorkloadKind, WorkloadTechnology } from "./types";
 
 /**
@@ -118,6 +118,7 @@ interface WorkloadListItem {
 function mapItems(
   items: WorkloadListItem[] | undefined,
   kind: WorkloadKind,
+  types: readonly DetectableType[],
 ): DiscoveredWorkload[] {
   return (items ?? [])
     .filter((item) => item.metadata?.name && item.metadata?.namespace)
@@ -135,7 +136,7 @@ function mapItems(
         containerNames: containers
           .map((c) => c.name)
           .filter((name): name is string => Boolean(name)),
-      });
+      }, types);
       return {
         kind,
         namespace: item.metadata!.namespace!,
@@ -155,6 +156,8 @@ function mapItems(
  */
 export async function discoverWorkloads(
   kubeconfig: string,
+  /** The org's effective workload types — detection is per org (decision 128). */
+  types: readonly DetectableType[],
 ): Promise<DiscoveryResult> {
   const kc = loadKubeconfig(kubeconfig);
   const api = kc.makeApiClient(AppsV1Api);
@@ -176,8 +179,8 @@ export async function discoverWorkloads(
 
   return {
     workloads: [
-      ...mapItems(deployments.items, "deployment"),
-      ...mapItems(statefulSets.items, "statefulset"),
+      ...mapItems(deployments.items, "deployment", types),
+      ...mapItems(statefulSets.items, "statefulset", types),
     ],
     contextName: kc.getCurrentContext(),
     server: kc.getCurrentCluster()?.server ?? "",
@@ -205,7 +208,8 @@ function describeApiError(err: unknown, what: string): Error {
 export async function validateKubeconfig(
   kubeconfig: string,
 ): Promise<{ contextName: string; server: string; workloadCount: number }> {
-  const result = await discoverWorkloads(kubeconfig);
+  // Only the credentials are being proved, so nothing needs detecting.
+  const result = await discoverWorkloads(kubeconfig, []);
   return {
     contextName: result.contextName,
     server: result.server,

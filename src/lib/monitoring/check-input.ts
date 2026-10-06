@@ -4,7 +4,6 @@ import {
   SEVERITIES,
   TARGET_KINDS,
   WORKLOAD_KINDS,
-  WORKLOAD_TECHNOLOGIES,
   validateCheckId,
   type CheckRequirement,
   type MonitorCategory,
@@ -13,6 +12,7 @@ import {
   type WorkloadTechnology,
 } from "./types";
 
+import { CLUSTER_TECHNOLOGY, WORKLOAD_TYPE_SLUG } from "./workload-types";
 /**
  * Request-body parsing for admin-authored checks, shared by the create and
  * update routes so the two cannot drift. Throws with a user-facing message
@@ -67,11 +67,15 @@ function technologyList(
   if (raw === undefined) return fallback ?? [];
   if (!Array.isArray(raw))
     throw new Error(`${field} must be an array of technologies`);
-  return raw
-    .map((t) => (typeof t === "string" ? t.toLowerCase() : ""))
-    .filter((t): t is WorkloadTechnology =>
-      (WORKLOAD_TECHNOLOGIES as readonly string[]).includes(t),
-    );
+  // Any well-formed slug: workload types are data now, and a scope naming a type
+  // that does not exist (or no longer does) simply never matches a workload.
+  return [
+    ...new Set(
+      raw
+        .map((t) => (typeof t === "string" ? t.trim().toLowerCase() : ""))
+        .filter((t) => t === CLUSTER_TECHNOLOGY || WORKLOAD_TYPE_SLUG.test(t)),
+    ),
+  ];
 }
 
 /** Field-by-field, falling back to `existing` so PATCH can be partial. */

@@ -4,6 +4,7 @@ import { users } from "@/lib/db/schema";
 import { hashPassword } from "@/lib/auth/password";
 import { setSession } from "@/lib/auth/session";
 import { resolveRole } from "@/lib/auth/admin";
+import { createOrgWithOwner } from "@/lib/db/org-queries";
 
 export async function POST(request: Request) {
   let body: { username?: string; password?: string };
@@ -37,10 +38,17 @@ export async function POST(request: Request) {
 
   // Env allowlist may grant admin at first sign-up (bootstraps the first admin).
   const role = resolveRole(username, "user");
-  const [user] = await db
-    .insert(users)
-    .values({ username, passwordHash: await hashPassword(password), role })
-    .returning({ id: users.id, username: users.username, role: users.role });
+  const passwordHash = await hashPassword(password);
+  // Every account starts as the owner of its own org; others join an existing
+  // one by invitation. One transaction, so there is never a user with no org.
+  const user = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(users)
+      .values({ username, passwordHash, role })
+      .returning({ id: users.id, username: users.username, role: users.role });
+    await createOrgWithOwner(`${username}'s org`, created.id, tx);
+    return created;
+  });
 
   await setSession(user);
   return Response.json({ id: user.id, username: user.username, role: user.role });

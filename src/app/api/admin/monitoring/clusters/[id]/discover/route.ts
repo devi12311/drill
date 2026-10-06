@@ -1,10 +1,12 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import {
   getClusterSecrets,
   recordDiscoveryError,
   replaceWorkloads,
 } from "@/lib/db/monitoring-queries";
 import { discoverWorkloads } from "@/lib/monitoring/discovery";
+import { detectableTypes } from "@/lib/monitoring/workload-types-live";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
@@ -15,13 +17,15 @@ type Context = { params: Promise<{ id: string }> };
  * stale inventory honestly instead of silently serving old data.
  */
 export async function POST(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
   const cluster = await getClusterSecrets(id);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
 
   try {
-    const discovered = await discoverWorkloads(cluster.kubeconfig);
+    const discovered = await discoverWorkloads(cluster.kubeconfig, await detectableTypes(ctx.orgId));
     const { total, removed } = await replaceWorkloads(id, discovered.workloads);
     return Response.json({
       context: discovered.contextName,

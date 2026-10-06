@@ -73,7 +73,7 @@ function checkName(raw: unknown): string {
   const name = typeof raw === "string" ? raw.trim() : "";
   if (!SKILL_NAME_PATTERN.test(name))
     throw new Error(
-      "name must be 3–64 lowercase letters, digits or hyphens (e.g. cost-problems-investigation)",
+      "name must be 3–64 lowercase letters, digits or hyphens (e.g. checkout-latency-investigation)",
     );
   return name;
 }
@@ -83,7 +83,7 @@ function checkInput(item: unknown, i: number, seen: Set<string>): SkillInput {
   const key = typeof entry.key === "string" ? entry.key.trim() : "";
   if (!INPUT_KEY_PATTERN.test(key))
     throw new Error(
-      `input ${i + 1}: key must be lowercase letters, digits and _ (e.g. integration_id)`,
+      `input ${i + 1}: key must be lowercase letters, digits and _ (e.g. service_name)`,
     );
   if (seen.has(key)) throw new Error(`input key "${key}" is used twice`);
   seen.add(key);

@@ -22,6 +22,7 @@ import {
   type TurnStatus,
 } from "@/lib/chat/types";
 import type { HolmesChatRequest } from "@/lib/holmes/types";
+import { ORG_ROLES, type OrgRole } from "@/lib/orgs/types";
 import {
   SKILL_VISIBILITIES,
   type MessageSkill,
@@ -73,6 +74,75 @@ export const users = pgTable("users", {
 });
 
 /**
+ * The tenant. Everything a team shares — agents, clusters, skills, the knowledge
+ * base — belongs to exactly one org, and no query may cross that line
+ * (docs/DECISIONS.md — "Drill becomes multi-tenant").
+ */
+export const organizations = pgTable("organizations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/**
+ * Who belongs to which org, and as what. Re-read on every request (like
+ * `users.role`), so removing a member or demoting an admin takes effect at once.
+ */
+export const orgMemberships = pgTable(
+  "org_memberships",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ORG_ROLES }).$type<OrgRole>().notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.orgId, t.userId] }),
+    // "Which orgs am I in" — the lookup behind every request.
+    index("org_memberships_user_idx").on(t.userId),
+  ],
+);
+
+/**
+ * A single-use link that adds whoever opens it to an org. Drill sends no email,
+ * so the link IS the invitation: only its sha256 is stored (the raw token is shown
+ * once, at creation), it expires, and accepting it stamps it used.
+ */
+export const orgInvites = pgTable(
+  "org_invites",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ORG_ROLES }).$type<OrgRole>().notNull(),
+    /** Who it is for, in the inviter's words — bookkeeping only, never checked. */
+    label: text("label"),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    expiresAt: timestamp("expires_at").notNull(),
+    acceptedBy: uuid("accepted_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    acceptedAt: timestamp("accepted_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("org_invites_org_idx").on(t.orgId)],
+);
+
+/** Every org-owned row: cascades, because an org's data has no meaning without it. */
+const orgId = () =>
+  uuid("org_id")
+    .notNull()
+    .references(() => organizations.id, { onDelete: "cascade" });
+
+/**
  * Append-only record of privileged admin actions — impersonation start/stop
  * and role changes. Kept for accountability now that admins can act as other
  * users. `actorId` is the real admin; `targetUserId` the affected user (if any).
@@ -87,14 +157,28 @@ export const auditLog = pgTable("audit_log", {
     onDelete: "set null",
   }),
   metadata: jsonb("metadata"),
+  /** The org the action happened in; null for platform-level actions. */
+  orgId: uuid("org_id").references(() => organizations.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/**
+ * A Holmes endpoint the org investigates through. Org-owned: one Holmes serves a
+ * cluster, so every member chats through the same registration and a key is
+ * rotated in one place.
+ */
 export const holmesAgents = pgTable("holmes_agents", {
   id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
+  orgId: orgId(),
+  /**
+   * Who registered it — the only member besides org admins who may edit or remove
+   * it. The column keeps its pre-org name (`user_id`, when agents were personal).
+   */
+  createdBy: uuid("user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
   name: text("name").notNull(),
   url: text("url").notNull(),
   // Stored as plaintext: Drill must replay it verbatim to Holmes on every
@@ -104,8 +188,10 @@ export const holmesAgents = pgTable("holmes_agents", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/** Private to the user who asked, inside the org that owns its agent. */
 export const conversations = pgTable("conversations", {
   id: uuid("id").primaryKey().defaultRandom(),
+  orgId: orgId(),
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -159,6 +245,8 @@ export const chatTurns = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    /** Whose knowledge base and skills the worker hands Holmes for this turn. */
+    orgId: orgId(),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -228,9 +316,10 @@ export const chatTurnEvents = pgTable(
 );
 
 /**
- * Distilled knowledge from resolved investigations. Global: readable and
- * editable by every user (conversations stay private); only the resolver
- * may delete. A conversation has at most one artifact — re-resolving
+ * Distilled knowledge from resolved investigations. Shared across the org:
+ * readable and editable by every member (conversations stay private); only the
+ * resolver may delete. Never visible outside the org — not in the library, the
+ * prompt injection or the search tool. A conversation has at most one artifact — re-resolving
  * upserts on conversation_id.
  *
  * The migration also adds a `search_vector` tsvector generated column +
@@ -239,6 +328,7 @@ export const chatTurnEvents = pgTable(
  */
 export const resolutionArtifacts = pgTable("resolution_artifacts", {
   id: uuid("id").primaryKey().defaultRandom(),
+  orgId: orgId(),
   // set null (not cascade): knowledge must survive conversation deletion.
   conversationId: uuid("conversation_id")
     .unique()
@@ -270,14 +360,15 @@ export const resolutionArtifacts = pgTable("resolution_artifacts", {
  * through the `drill_fetch_skill` frontend tool, run explicitly with its inputs,
  * or — `alwaysOn` — appended to every chat turn's system prompt.
  *
- * `private` skills are seen only by their author. Only an admin can make one
+ * `private` skills are seen only by their author. Only an org admin can make one
  * `shared` (and only a shared one `alwaysOn`): a shared skill steers every
- * user's investigations, which makes it a prompt-injection channel.
+ * member's investigations, which makes it a prompt-injection channel.
  */
 export const skills = pgTable("skills", {
   id: uuid("id").primaryKey().defaultRandom(),
-  /** Slug the model sees and passes back; unique across all visibilities. */
-  name: text("name").notNull().unique(),
+  orgId: orgId(),
+  /** Slug the model sees and passes back; unique in the org across all visibilities. */
+  name: text("name").notNull(),
   description: text("description").notNull(),
   body: text("body").notNull(),
   inputs: jsonb("inputs").$type<SkillInput[]>().notNull().default([]),
@@ -294,7 +385,7 @@ export const skills = pgTable("skills", {
   }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [unique("skills_org_name_unique").on(t.orgId, t.name)]);
 
 /**
  * A Kubernetes cluster under monitoring. Carries TWO credentials for two
@@ -311,7 +402,9 @@ export const skills = pgTable("skills", {
  */
 export const monitoringClusters = pgTable("monitoring_clusters", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
+  /** Everything below a cluster (workloads, jobs, runs, concerns) is scoped through it. */
+  orgId: orgId(),
+  name: text("name").notNull(),
   kubeconfig: text("kubeconfig").notNull(),
   holmesUrl: text("holmes_url").notNull(),
   holmesApiKey: text("holmes_api_key").notNull(),
@@ -325,15 +418,22 @@ export const monitoringClusters = pgTable("monitoring_clusters", {
   discoveryError: text("discovery_error"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [unique("monitoring_clusters_org_name_unique").on(t.orgId, t.name)]);
 
 /**
  * THE RUBRIC, as live data. Holds both the built-in checks (seeded from
  * `BUILTIN_CHECKS` in lib/monitoring/catalogue.ts, which stays the reviewed,
  * cited definition in git) and any custom checks an admin adds.
  *
- * The primary key IS the check ID, and it is immutable once created: concerns
- * reference it by value forever, so renaming one would orphan its history.
+ * TEMPLATES AND ORG COPIES in one table (docs/DECISIONS.md 122, 126). A row with
+ * `org_id` NULL is a template every org inherits; a row with an `org_id` is that
+ * org's copy — a fork of the template with the same `id` (`based_on_version` set),
+ * or a check only that org has (`based_on_version` NULL, no template). An org's
+ * effective rubric is its own row where one exists, else the template.
+ *
+ * `id` is the check's KEY and is immutable once created: concerns reference it by
+ * value forever, so renaming one would orphan its history. It is unique per org
+ * (template rows count as one more "org"), not globally — hence the surrogate `uid`.
  * Deliberately NOT an FK from `monitoring_concerns.check_id` — a deleted check
  * must not cascade away the history it produced. Built-ins can be disabled but
  * never deleted; a custom check is deletable only while no concern references it.
@@ -345,8 +445,13 @@ export const monitoringClusters = pgTable("monitoring_clusters", {
 export const monitoringChecks = pgTable(
   "monitoring_checks",
   {
+    uid: uuid("uid").primaryKey().defaultRandom(),
+    /** Null = a template; set = this org's copy or its own check. */
+    orgId: uuid("org_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
     /** e.g. "SEC.PRIVILEGED", "PERF.OOM_KILLS", "CUSTOM.MY_RULE". Immutable. */
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     category: text("category", { enum: ["security", "performance"] })
       .$type<MonitorCategory>()
       .notNull(),
@@ -393,13 +498,26 @@ export const monitoringChecks = pgTable(
     /** Disabled checks are excluded from prompts and stop being evaluated. */
     enabled: boolean("enabled").notNull().default(true),
     version: integer("version").notNull().default(1),
+    /**
+     * On an org's fork: the template version it was copied from (or last
+     * reviewed against). A template whose `version` is higher has changed since —
+     * the "update available" the catalogue shows. Null on templates and on an
+     * org's own checks.
+     */
+    basedOnVersion: integer("based_on_version"),
     createdBy: uuid("created_by").references(() => users.id, {
       onDelete: "set null",
     }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
-  (t) => [index("monitoring_checks_category_idx").on(t.category, t.enabled)],
+  (t) => [
+    index("monitoring_checks_category_idx").on(t.category, t.enabled),
+    // One row per key per org, the templates (NULL org) counting as one org.
+    unique("monitoring_checks_org_key_unique")
+      .on(t.orgId, t.id)
+      .nullsNotDistinct(),
+  ],
 );
 
 /**
@@ -425,27 +543,78 @@ export const monitoringJobCheckOverrides = pgTable(
 );
 
 /**
+ * WHAT A WORKLOAD CAN BE, as live data (docs/DECISIONS.md 128): PostgreSQL, Redis,
+ * "our Node.js services" — and how discovery recognises each. Templates and org
+ * copies share the table exactly as checks and playbooks do (`org_id` NULL is a
+ * template; an org's row is its fork, or a type only it has). The slug is the key
+ * everything else stores — `monitoring_workloads.technology`, a check's technology
+ * scope, a playbook's `technology` — so it is immutable once created.
+ *
+ * `kubernetes` is not a row: it is the cluster target, never something detected
+ * inside a workload, and stays a code constant.
+ */
+export const monitoringWorkloadTypes = pgTable(
+  "monitoring_workload_types",
+  {
+    uid: uuid("uid").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
+    slug: text("slug").notNull(),
+    label: text("label").notNull(),
+    /** Higher is tried first when several types match one workload. */
+    priority: integer("priority").notNull().default(0),
+    /** Exact app-name label values that identify it. */
+    labelValues: text("label_values").array().notNull().default([]),
+    /** TOKEN patterns over image repositories and container names — never regex. */
+    patterns: text("patterns").array().notNull().default([]),
+    /** A disabled type is not detected and is not offered as an override. */
+    enabled: boolean("enabled").notNull().default(true),
+    /** Shipped with Drill (a template, or an org's fork of one). */
+    builtin: boolean("builtin").notNull().default(false),
+    /** Bumped when a template's rules or label change — what flags org forks. */
+    version: integer("version").notNull().default(1),
+    basedOnVersion: integer("based_on_version"),
+    /** Who last edited it; null on a template still tracking the shipped seed. */
+    editedBy: uuid("edited_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("monitoring_workload_types_org_slug_unique")
+      .on(t.orgId, t.slug)
+      .nullsNotDistinct(),
+  ],
+);
+
+/**
  * THE METHODS, as live data — the playbook half of a technology profile, in the
  * same relationship to `lib/monitoring/profiles/*.ts` that `monitoring_checks`
  * has to `catalogue.ts`: the code definition is the reviewed seed, this table is
  * what a deep run actually reads and what the admin screen edits.
  *
- * The primary key is the technology, and there is exactly one row per profiled
- * technology. Playbooks are editable but never creatable or deletable here: a
- * technology that has no playbook also has no vocabulary entry
- * (`WORKLOAD_TECHNOLOGIES`) and no detection rules, so "add a playbook" is a code
- * change by definition and a half-created row would only misreport coverage.
+ * Templates and org copies share the table exactly as checks do: `org_id` NULL
+ * is the template (one per profiled technology), a row with an `org_id` is that
+ * org's fork of it. Playbooks are still never created from scratch: a technology
+ * with no playbook has no vocabulary entry and no detection rules yet — that
+ * arrives with dynamic workload types (phase 3).
  *
- * There is deliberately no version column: a method is edited and saved, and the
- * text a run was actually given is recorded on the run itself
- * (`monitoring_runs.prompts`, `expected_observations`) rather than reconstructed
- * from a number.
+ * `version` exists for ONE consumer: telling an org its fork is behind the
+ * template. What a run was actually given is still recorded on the run itself
+ * (`monitoring_runs.prompts`, `expected_observations`), not reconstructed from it.
  */
 export const monitoringPlaybooks = pgTable("monitoring_playbooks", {
-  /** One of WORKLOAD_TECHNOLOGIES. Immutable — it is the join to everything. */
+  uid: uuid("uid").primaryKey().defaultRandom(),
+  /** Null = the template; set = this org's fork. */
+  orgId: uuid("org_id").references(() => organizations.id, {
+    onDelete: "cascade",
+  }),
+  /** A workload type slug (or `kubernetes`). Immutable — it is the join to everything. */
   technology: text("technology")
     .$type<WorkloadTechnology>()
-    .primaryKey(),
+    .notNull(),
   /** One paragraph: what this technology dies of, in priority order. */
   framing: text("framing").notNull(),
   /** Where this instance's data lives; `{{namespace}}`/`{{name}}` substituted per target. */
@@ -468,9 +637,17 @@ export const monitoringPlaybooks = pgTable("monitoring_playbooks", {
   editedBy: uuid("edited_by").references(() => users.id, {
     onDelete: "set null",
   }),
+  /** Bumped whenever a TEMPLATE's text changes (an edit, or a refreshed seed). */
+  version: integer("version").notNull().default(1),
+  /** On an org's fork: the template version it was copied from or last reviewed. */
+  basedOnVersion: integer("based_on_version"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [
+  unique("monitoring_playbooks_org_technology_unique")
+    .on(t.orgId, t.technology)
+    .nullsNotDistinct(),
+]);
 
 /**
  * Discovered workload inventory — a CACHE that makes the picker instant and

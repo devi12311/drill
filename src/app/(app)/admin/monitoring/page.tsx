@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
 import { Card } from "@/components/ui/card";
@@ -17,7 +18,8 @@ import { listClusters, type ClusterListRow } from "@/lib/db/monitoring-queries";
  * what `ClusterForm` posts to.
  */
 export default async function MonitoringHomePage() {
-  const clusters = await listClusters();
+  const { orgId } = await monitoringPageContext();
+  const clusters = await listClusters(orgId);
 
   const columns: Column<ClusterListRow>[] = [
     {

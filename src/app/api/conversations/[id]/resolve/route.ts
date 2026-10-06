@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import {
   getAgent,
   getConversation,
@@ -21,8 +21,8 @@ type Context = { params: Promise<{ id: string }> };
  * response_format. Nothing is saved — the review dialog owns saving.
  */
 export async function POST(request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
 
   // Optional free-text account of how the incident was actually resolved
@@ -35,7 +35,7 @@ export async function POST(request: Request, context: Context) {
     // no body / not JSON — resolve without a resolver note
   }
 
-  const conversation = await getConversation(user.id, id);
+  const conversation = await getConversation(ctx, id);
   if (!conversation) {
     return Response.json({ error: "Conversation not found" }, { status: 404 });
   }
@@ -55,7 +55,7 @@ export async function POST(request: Request, context: Context) {
     return Response.json({ draft });
   }
 
-  const agent = await getAgent(user.id, conversation.agentId);
+  const agent = await getAgent(ctx.orgId, conversation.agentId);
   if (!agent) {
     return Response.json({ error: "Agent not found" }, { status: 404 });
   }

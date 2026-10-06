@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
+import { SOURCE_LABEL } from "@/lib/monitoring/catalogue-scope";
 import {
   DefinitionGrid,
   DefinitionTile,
@@ -11,34 +12,29 @@ import {
   SEVERITY_CLASS,
   SEVERITY_LABEL,
   SEVERITY_ORDER,
-  TECHNOLOGY_LABEL,
   bySeverity,
 } from "@/lib/monitoring/ui";
 import {
   CLUSTER_TECHNOLOGY,
-  WORKLOAD_TECHNOLOGIES,
   type CheckListItem,
   type Severity,
-  type WorkloadTechnology,
 } from "@/lib/monitoring/types";
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 
 /** A check with no technology list reaches every workload — its own shelf. */
 const ANY = "any";
 
-/**
- * The cluster first, since it is its own kind of job; then the workload
- * technologies in vocabulary order; "any technology" last, as the catch-all.
- */
-const SHELF_ORDER: string[] = [
-  CLUSTER_TECHNOLOGY,
-  ...WORKLOAD_TECHNOLOGIES.filter((t) => t !== CLUSTER_TECHNOLOGY),
-  ANY,
-];
 
-function shelfLabel(key: string) {
-  return key === ANY
-    ? "Any technology"
-    : (TECHNOLOGY_LABEL[key as WorkloadTechnology] ?? key);
+/**
+ * The one word a tile carries, most actionable first: off, then a template change
+ * the org has not looked at, then where the check comes from (decision 126), then
+ * its version.
+ */
+function tileMarker(check: CheckListItem): string | undefined {
+  if (!check.enabled) return "disabled";
+  if (check.updateAvailable) return "update";
+  if (check.source !== "template") return SOURCE_LABEL[check.source];
+  return check.version > 1 ? `v${check.version}` : undefined;
 }
 
 /** The catalogue's tile for one check — shared by the shelves and the search results. */
@@ -58,13 +54,7 @@ export function CheckTiles({
           title={check.title}
           caption={check.id}
           railClass={SEVERITY_CLASS[check.baseSeverity]}
-          marker={
-            !check.enabled
-              ? "disabled"
-              : check.version > 1
-                ? `v${check.version}`
-                : undefined
-          }
+          marker={tileMarker(check)}
           dimmed={!check.enabled}
           onOpen={onOpen}
         />
@@ -96,7 +86,16 @@ export function TechnologyShelves({
   checks: CheckListItem[];
   onOpen: (id: string) => void;
 }) {
+  const { all, label } = useTechnologies();
+  const shelfLabel = (key: string) => (key === ANY ? "Any technology" : label(key));
   const shelves = useMemo(() => {
+    // The cluster first, since it is its own kind of job; then the org's workload
+    // types in priority order; "any technology" last, as the catch-all.
+    const known = [
+      CLUSTER_TECHNOLOGY,
+      ...all.map((t) => t.slug).filter((t) => t !== CLUSTER_TECHNOLOGY),
+      ANY,
+    ];
     const byShelf = new Map<string, CheckListItem[]>();
     for (const check of checks) {
       for (const key of check.technologies.length > 0
@@ -107,11 +106,11 @@ export function TechnologyShelves({
         else byShelf.set(key, [check]);
       }
     }
-    // Unknown technologies (a custom check naming one the vocabulary lacks)
-    // still get a shelf, after the known ones, rather than vanishing.
+    // Unknown technologies (a check naming a type that no longer exists) still
+    // get a shelf, after the known ones, rather than vanishing.
     const order = [
-      ...SHELF_ORDER,
-      ...[...byShelf.keys()].filter((k) => !SHELF_ORDER.includes(k)).sort(),
+      ...known,
+      ...[...byShelf.keys()].filter((k) => !known.includes(k)).sort(),
     ];
     return order
       .filter((key) => byShelf.has(key))
@@ -119,7 +118,7 @@ export function TechnologyShelves({
         const members = byShelf.get(key)!;
         return { key, members, severities: bySeverity(members, (c) => c.baseSeverity) };
       });
-  }, [checks]);
+  }, [checks, all]);
 
   const [picked, setPicked] = useState<string | null>(null);
   const [severity, setSeverity] = useState<Severity | null>(null);

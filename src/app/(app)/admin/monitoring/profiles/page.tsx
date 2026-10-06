@@ -1,3 +1,4 @@
+import { cataloguePageOwner } from "@/lib/monitoring/access";
 import { PlaybooksBrowser } from "@/components/monitoring/playbooks-browser";
 import { playbookSummaries } from "@/lib/monitoring/playbooks";
 
@@ -13,6 +14,21 @@ import { playbookSummaries } from "@/lib/monitoring/playbooks";
  * nobody reads, so the page shows seven names and the method opens in a panel
  * wide enough to hold it — which the 900px column never was.
  */
-export default async function ProfilesPage() {
-  return <PlaybooksBrowser summaries={await playbookSummaries()} />;
+export default async function ProfilesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ scope?: string }>;
+}) {
+  // The org's effective catalogue by default; platform admins can switch to the
+  // shared templates every org inherits (docs/DECISIONS.md 126).
+  const { owner, scope, canEditTemplates } = await cataloguePageOwner(
+    (await searchParams).scope,
+  );
+  return (
+    <PlaybooksBrowser
+      summaries={await playbookSummaries(owner)}
+      scope={scope}
+      canEditTemplates={canEditTemplates}
+    />
+  );
 }

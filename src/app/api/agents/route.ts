@@ -1,16 +1,16 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { createAgent, listAgents } from "@/lib/db/queries";
 import { validateAgent } from "@/lib/holmes/validate";
 
 export async function GET() {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
-  return Response.json(await listAgents(user.id));
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
+  return Response.json(await listAgents(ctx.orgId));
 }
 
 export async function POST(request: Request) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
 
   let body: { name?: string; url?: string; apiKey?: string };
   try {
@@ -44,6 +44,6 @@ export async function POST(request: Request) {
     );
   }
 
-  const agent = await createAgent(user.id, { name, url, apiKey });
+  const agent = await createAgent(ctx, { name, url, apiKey });
   return Response.json({ ...agent, models });
 }

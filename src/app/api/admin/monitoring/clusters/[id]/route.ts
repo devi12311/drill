@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   deleteCluster,
@@ -9,25 +10,22 @@ import {
   updateCluster,
 } from "@/lib/db/monitoring-queries";
 import { discoverWorkloads } from "@/lib/monitoring/discovery";
+import { detectableTypes } from "@/lib/monitoring/workload-types-live";
 import { validateAgent } from "@/lib/holmes/validate";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
-  /**
-   * All reads fire together, and the existence check happens after.
-   *
-   * They have no data dependency on each other — only the 404 did, and paying
-   * three sequential round-trips to save two cheap queries on the one request
-   * that 404s is the wrong trade. A missing id makes the others return empty.
-   */
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
+  // Ownership is proven above, so the reads have no dependency on each other.
   const [cluster, workloads, jobs] = await Promise.all([
     getClusterSummary(id),
     listWorkloads(id),
-    listJobs(id),
+    listJobs(ctx.orgId, id),
   ]);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json({ cluster, workloads, jobs });
@@ -39,9 +37,10 @@ export async function GET(_request: Request, context: Context) {
  * `PATCH /api/agents/[id]`). Whichever credential is supplied is re-validated.
  */
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
   const existing = await getClusterSecrets(id);
   if (!existing) return Response.json({ error: "Not found" }, { status: 404 });
 
@@ -71,7 +70,7 @@ export async function PATCH(request: Request, context: Context) {
 
   if (kubeconfig !== existing.kubeconfig) {
     try {
-      await discoverWorkloads(kubeconfig);
+      await discoverWorkloads(kubeconfig, await detectableTypes(ctx.orgId));
     } catch (err) {
       return Response.json(
         {
@@ -105,7 +104,8 @@ export async function PATCH(request: Request, context: Context) {
   });
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.cluster.updated",
     metadata: { clusterId: id, name },
   });
@@ -113,14 +113,16 @@ export async function PATCH(request: Request, context: Context) {
 }
 
 export async function DELETE(_request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
   const cluster = await getClusterSummary(id);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
   await deleteCluster(id);
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.cluster.deleted",
     metadata: { clusterId: id, name: cluster.name },
   });

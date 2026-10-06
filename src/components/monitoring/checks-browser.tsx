@@ -9,6 +9,7 @@ import { ConfirmButton } from "@/components/ui/confirm-button";
 import { DialogBody } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 import { CheckForm } from "@/components/monitoring/check-form";
 import {
   CheckTiles,
@@ -31,6 +32,13 @@ import {
   describeScope,
 } from "@/lib/monitoring/ui";
 import { MONITOR_CATEGORIES } from "@/lib/monitoring/types";
+import {
+  SOURCE_LABEL,
+  scopedUrl,
+  type CatalogueScope,
+} from "@/lib/monitoring/catalogue-scope";
+import { CatalogueScopeSwitch } from "@/components/monitoring/catalogue-scope-switch";
+import { CheckTemplateChanges } from "@/components/monitoring/check-template-changes";
 import type {
   CheckListItem,
   CheckRequirement,
@@ -49,7 +57,16 @@ import type {
  * calls `refresh()`, which re-runs the server page and hands this component new
  * props.
  */
-export function ChecksBrowser({ checks }: { checks: CheckListItem[] }) {
+export function ChecksBrowser({
+  checks,
+  scope,
+  canEditTemplates,
+}: {
+  checks: CheckListItem[];
+  /** The org's effective catalogue, or the shared templates (platform admins). */
+  scope: CatalogueScope;
+  canEditTemplates: boolean;
+}) {
   const refresh = useRefreshThenNavigate();
   const [openId, setOpenId] = useDefinitionParam("check");
   const [query, setQuery] = useState("");
@@ -98,9 +115,16 @@ export function ChecksBrowser({ checks }: { checks: CheckListItem[] }) {
   return (
     <div className="space-y-6">
       <AdminPageHeader
-        title="Check catalogue"
-        description="The rubric every assessment answers. Holmes supplies evidence and prose; these checks supply the questions and the severities, which is what makes findings comparable from one run to the next."
+        title={scope === "templates" ? "Check templates" : "Check catalogue"}
+        description={
+          scope === "templates"
+            ? "The shared rubric every organization inherits. An edit here reaches every org that has not customized the check; orgs that have are told the template changed."
+            : "The rubric your assessments answer. Holmes supplies evidence and prose; these checks supply the questions and the severities. Most come from the shared catalogue — editing one gives your organization its own copy."
+        }
       >
+        {canEditTemplates && (
+          <CatalogueScopeSwitch path="/admin/monitoring/checks" scope={scope} />
+        )}
         <Button onClick={() => setOpenId("new")}>
           <Plus className="size-3.5" />
           New check
@@ -152,6 +176,7 @@ export function ChecksBrowser({ checks }: { checks: CheckListItem[] }) {
       <CheckPanel
         key={openId ?? "closed"}
         summary={open}
+        scope={scope}
         creating={creating}
         onOpenId={setOpenId}
         onMutated={() => refresh(null)}
@@ -175,19 +200,28 @@ export function ChecksBrowser({ checks }: { checks: CheckListItem[] }) {
  */
 function CheckPanel({
   summary,
+  scope,
   creating,
   onOpenId,
   onMutated,
 }: {
   summary: CheckListItem | null;
+  scope: CatalogueScope;
   creating: boolean;
   onOpenId: (id: string | null) => void;
   onMutated: () => void;
 }) {
-  const detail = useAdminData<{ check: CheckView; concernCount: number }>(
-    summary ? `/api/admin/monitoring/checks/${summary.id}` : "",
-    [summary?.id],
+  const { label } = useTechnologies();
+  const detail = useAdminData<{
+    check: CheckView;
+    template: CheckView | null;
+    concernCount: number;
+  }>(
+    summary ? scopedUrl(`/api/admin/monitoring/checks/${summary.id}`, scope) : "",
+    [summary?.id, scope],
   );
+  /** In an org's catalogue, editing a template creates the org's own copy. */
+  const forks = scope === "org" && summary?.source === "template";
   const check = summary && detail.data ? detail.data.check : null;
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -220,7 +254,7 @@ function CheckPanel({
     setActionError(null);
     setNotice(null);
     try {
-      const res = await fetch(`/api/admin/monitoring/checks/${target.id}`, {
+      const res = await fetch(scopedUrl(`/api/admin/monitoring/checks/${target.id}`, scope), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !target.enabled }),
@@ -239,11 +273,12 @@ function CheckPanel({
     }
   }
 
+  /** Delete an own check, or reset a customized one to the template. */
   async function remove(target: CheckListItem) {
     setBusy(true);
     setActionError(null);
     try {
-      const res = await fetch(`/api/admin/monitoring/checks/${target.id}`, {
+      const res = await fetch(scopedUrl(`/api/admin/monitoring/checks/${target.id}`, scope), {
         method: "DELETE",
       });
       const body = await res.json();
@@ -252,6 +287,23 @@ function CheckPanel({
       onMutated();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function keepMine(target: CheckListItem) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/admin/monitoring/checks/${target.id}/reviewed`, {
+        method: "POST",
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      onMutated();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Action failed");
     } finally {
       setBusy(false);
     }
@@ -269,8 +321,17 @@ function CheckPanel({
           <>
             <SeverityBadge severity={summary.baseSeverity} />
             <Badge variant="outline" className="text-bone-gray">
-              {summary.builtin ? "built-in" : "custom"}
+              {scope === "templates"
+                ? summary.builtin
+                  ? "built-in"
+                  : "custom"
+                : SOURCE_LABEL[summary.source]}
             </Badge>
+            {summary.updateAvailable && (
+              <span className="text-caption-tracked uppercase text-traffic-yellow">
+                template updated
+              </span>
+            )}
             {summary.version > 1 && (
               <span className="text-caption-tracked text-bone-gray">
                 v{summary.version}
@@ -288,6 +349,7 @@ function CheckPanel({
       {creating || editing ? (
         <CheckForm
           check={check ?? undefined}
+          scope={scope}
           onCancel={leaveEditor}
           onDirtyChange={setDirty}
           onSaved={(saved) => {
@@ -328,6 +390,9 @@ function CheckPanel({
               {actionError && (
                 <p className="text-body-sm text-traffic-red">{actionError}</p>
               )}
+              {detail.data?.template && summary.updateAvailable && (
+                <CheckTemplateChanges mine={check} template={detail.data.template} />
+              )}
 
               <DefinitionBlock label="What Holmes must determine">
                 <p className="max-w-[90ch] text-body-sm text-pale-stone">
@@ -343,7 +408,7 @@ function CheckPanel({
 
               <DefinitionBlock label="Scope">
                 <p className="text-body-sm text-bone-gray">
-                  {describeScope(check)}
+                  {describeScope(check, label)}
                 </p>
                 {check.requires && (
                   <p className="text-body-sm text-bone-gray">
@@ -371,8 +436,16 @@ function CheckPanel({
             </DialogBody>
 
             <ModalFooter>
-              <Button disabled={busy} onClick={() => setEditing(true)}>
-                Edit
+              <Button
+                disabled={busy}
+                onClick={() => setEditing(true)}
+                title={
+                  forks
+                    ? "Gives your organization its own copy; the shared version is unchanged"
+                    : undefined
+                }
+              >
+                {forks ? "Customize" : "Edit"}
               </Button>
               <Button
                 variant="outline"
@@ -381,7 +454,22 @@ function CheckPanel({
               >
                 {summary.enabled ? "Disable" : "Enable"}
               </Button>
-              {!summary.builtin && (
+              {summary.updateAvailable && (
+                <Button variant="outline" disabled={busy} onClick={() => keepMine(summary)}>
+                  Keep my version
+                </Button>
+              )}
+              {scope === "org" && summary.source === "override" && (
+                <ConfirmButton
+                  label="Reset to template"
+                  title={`Reset ${summary.id} to the shared version?`}
+                  description="Your organization's copy is discarded and the check runs exactly as the shared template from the next assessment on. Concerns it raised keep their history."
+                  confirmLabel="Reset"
+                  disabled={busy}
+                  onConfirm={() => remove(summary)}
+                />
+              )}
+              {(scope === "templates" ? !summary.builtin : summary.source === "custom") && (
                 <ConfirmButton
                   label="Delete"
                   title={`Delete ${summary.id}?`}

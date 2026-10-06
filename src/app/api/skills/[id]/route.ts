@@ -1,9 +1,8 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   deleteSkill,
   getSkillView,
-  skillActor,
   SkillNameTaken,
   updateSkill,
   type SkillPatch,
@@ -14,13 +13,13 @@ type Context = { params: Promise<{ id: string }> };
 
 const DRAFT_FIELDS = ["name", "description", "body", "inputs"] as const;
 
-/** Private skills 404 for everyone but their author (and admins). */
+/** Private skills 404 for everyone but their author (and org admins). */
 export async function GET(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   try {
-    const skill = await getSkillView(skillActor(user), id);
+    const skill = await getSkillView(ctx, id);
     if (!skill) return Response.json({ error: "Skill not found" }, { status: 404 });
     return Response.json(skill);
   } catch {
@@ -30,13 +29,12 @@ export async function GET(_request: Request, context: Context) {
 
 /**
  * Edit the draft fields (sent together — validated as a whole, like a create)
- * and/or, admins only, `visibility` and `alwaysOn`.
+ * and/or, org admins only, `visibility` and `alwaysOn`.
  */
 export async function PATCH(request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const actor = skillActor(user);
 
   let patch: SkillPatch;
   try {
@@ -56,27 +54,28 @@ export async function PATCH(request: Request, context: Context) {
   }
 
   try {
-    const result = await updateSkill(actor, id, patch);
+    const result = await updateSkill(ctx, id, patch);
     if (!result.ok) {
       const status = { not_found: 404, forbidden: 403, invalid: 400 }[result.reason];
       const error =
         result.message ??
         (result.reason === "not_found"
           ? "Skill not found"
-          : "Only an admin can edit a shared skill");
+          : "Only an org admin can edit a shared skill");
       return Response.json({ error }, { status });
     }
-    // Sharing decides what every user's investigations are steered by — keep a
+    // Sharing decides what every member's investigations are steered by — keep a
     // record of who decided it, and of admin edits to what is already shared.
     const { before, skill } = result;
     if (
-      actor.isAdmin &&
+      ctx.isOrgAdmin &&
       (before.visibility !== skill.visibility ||
         before.alwaysOn !== skill.alwaysOn ||
         skill.visibility === "shared")
     ) {
       await writeAudit({
-        actorId: actor.id,
+        actorId: ctx.userId,
+        orgId: ctx.orgId,
         action: "skill.update",
         targetUserId: before.createdBy,
         metadata: {
@@ -97,20 +96,20 @@ export async function PATCH(request: Request, context: Context) {
 }
 
 export async function DELETE(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const actor = skillActor(user);
   try {
-    const result = await deleteSkill(actor, id);
+    const result = await deleteSkill(ctx, id);
     if (!result.ok) {
       return result.reason === "not_found"
         ? Response.json({ error: "Skill not found" }, { status: 404 })
-        : Response.json({ error: "Only an admin can delete a shared skill" }, { status: 403 });
+        : Response.json({ error: "Only an org admin can delete a shared skill" }, { status: 403 });
     }
-    if (actor.isAdmin && result.before.visibility === "shared") {
+    if (ctx.isOrgAdmin && result.before.visibility === "shared") {
       await writeAudit({
-        actorId: actor.id,
+        actorId: ctx.userId,
+        orgId: ctx.orgId,
         action: "skill.delete",
         targetUserId: result.before.createdBy,
         metadata: { skillId: id, name: result.before.name },

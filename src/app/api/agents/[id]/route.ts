@@ -1,15 +1,15 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { deleteAgent, getAgent, updateAgent } from "@/lib/db/queries";
 import { validateAgent } from "@/lib/holmes/validate";
 
 type Context = { params: Promise<{ id: string }> };
 
 export async function PATCH(request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
 
-  const existing = await getAgent(user.id, id);
+  const existing = await getAgent(ctx.orgId, id);
   if (!existing) {
     return Response.json({ error: "Agent not found" }, { status: 404 });
   }
@@ -35,17 +35,26 @@ export async function PATCH(request: Request, context: Context) {
     );
   }
 
-  const agent = await updateAgent(user.id, id, { name, url, apiKey });
+  const agent = await updateAgent(ctx, id, { name, url, apiKey });
+  if (!agent) return notYours();
   return Response.json({ ...agent, models });
 }
 
 export async function DELETE(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const deleted = await deleteAgent(user.id, id);
-  if (!deleted) {
+  if (!(await getAgent(ctx.orgId, id))) {
     return Response.json({ error: "Agent not found" }, { status: 404 });
   }
+  if (!(await deleteAgent(ctx, id))) return notYours();
   return Response.json({ ok: true });
+}
+
+/** The agent is the org's, but only its registrant or an org admin may change it. */
+function notYours() {
+  return Response.json(
+    { error: "Only whoever added this agent, or an org admin, can change it" },
+    { status: 403 },
+  );
 }

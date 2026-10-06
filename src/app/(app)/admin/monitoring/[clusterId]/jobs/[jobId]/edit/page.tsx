@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { isUuid } from "@/lib/monitoring/types";
 import { ArrowLeft } from "lucide-react";
 import { AdminPageHeader } from "@/components/admin/page-header";
@@ -20,11 +21,12 @@ export default async function EditJobPage({
 }) {
   const { clusterId, jobId } = await params;
   if (!isUuid(clusterId) || !isUuid(jobId)) notFound();
+  const { orgId } = await monitoringPageContext({ cluster: clusterId }, { job: jobId });
   const [job, overrides, workloads, checks] = await Promise.all([
     getJob(jobId),
     listJobOverrides(jobId),
     listWorkloads(clusterId),
-    checkRubricItems(),
+    checkRubricItems(orgId),
   ]);
   if (!job) notFound();
 

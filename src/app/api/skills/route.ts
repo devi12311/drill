@@ -1,18 +1,17 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import {
   createSkill,
   listSkills,
-  skillActor,
   SkillNameTaken,
 } from "@/lib/db/skill-queries";
 import { validateSkillDraft } from "@/lib/skills/types";
 
-/** GET /api/skills — the skills this user can see (admins: all of them). */
+/** GET /api/skills — the skills this member can see (org admins: all of the org's). */
 export async function GET() {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   try {
-    return Response.json(await listSkills(skillActor(user)));
+    return Response.json(await listSkills(ctx));
   } catch {
     return Response.json({ error: "Database unreachable" }, { status: 503 });
   }
@@ -20,8 +19,8 @@ export async function GET() {
 
 /** POST /api/skills — create a private skill owned by the caller. */
 export async function POST(request: Request) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   let draft;
   try {
     draft = validateSkillDraft(await request.json());
@@ -32,7 +31,7 @@ export async function POST(request: Request) {
     );
   }
   try {
-    return Response.json(await createSkill(skillActor(user), draft), { status: 201 });
+    return Response.json(await createSkill(ctx, draft), { status: 201 });
   } catch (err) {
     if (err instanceof SkillNameTaken)
       return Response.json({ error: err.message }, { status: 409 });

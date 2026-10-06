@@ -1,23 +1,31 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   autoResolveConcernsForDisabledCheck,
   countConcernsForCheck,
-  deleteCheck,
-  getCheckRow,
-  updateCheck,
+  deleteOrgCheck,
+  deleteTemplateCheck,
+  getCatalogueCheck,
+  saveCheck,
+  type CatalogueOwner,
   type CheckRow,
 } from "@/lib/db/monitoring-queries";
+import { catalogueCaller } from "@/lib/monitoring/access";
 import {
   isSemanticChange,
   parseCheckInput,
   type CheckInput,
 } from "@/lib/monitoring/check-input";
-import type { CheckRequirement } from "@/lib/monitoring/types";
-import type { TargetKind, WorkloadTechnology } from "@/lib/monitoring/types";
+import { ensureBuiltinChecks, toCheckView } from "@/lib/monitoring/checks";
+import type {
+  CheckRequirement,
+  TargetKind,
+  WorkloadTechnology,
+} from "@/lib/monitoring/types";
 
 // Next 16: route params are async.
 type Context = { params: Promise<{ id: string }> };
+
+const notFound = () => Response.json({ error: "Not found" }, { status: 404 });
 
 function toInput(row: CheckRow): CheckInput {
   return {
@@ -36,30 +44,45 @@ function toInput(row: CheckRow): CheckInput {
   };
 }
 
-export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
-  const { id } = await context.params;
-  // Independent reads, and this route is now on the panel-open path.
-  const [check, concernCount] = await Promise.all([
-    getCheckRow(id),
-    countConcernsForCheck(id),
-  ]);
-  if (!check) return Response.json({ error: "Not found" }, { status: 404 });
-  return Response.json({ check, concernCount });
+async function load(owner: CatalogueOwner, context: Context) {
+  await ensureBuiltinChecks();
+  return getCatalogueCheck(owner, (await context.params).id);
+}
+
+/** Where a disable stops the check: one org, or every org inheriting the template. */
+const disabledScope = (owner: CatalogueOwner) =>
+  owner === null ? ({ template: true } as const) : { orgId: owner };
+
+/**
+ * One check as the caller's catalogue has it. An org's fork also carries the
+ * template it came from, so the panel can show what changed upstream.
+ */
+export async function GET(request: Request, context: Context) {
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const row = await load(caller.owner, context);
+  if (!row) return notFound();
+  return Response.json({
+    check: toCheckView(row),
+    template: row.template ? toCheckView(row.template) : null,
+    concernCount: await countConcernsForCheck(row.id, caller.owner),
+  });
 }
 
 /**
- * Edit a check. The ID is never editable (concerns reference it by value), and
- * a change to what the check MEANS bumps its version so history stays readable.
- * Disabling it auto-resolves its open concerns — nothing else can close them,
- * because reconciliation never touches a concern whose check did not run.
+ * Edit a check. In an org's catalogue the first edit of a template FORKS it into
+ * the org's own copy (decision 126); in the templates it changes what every org
+ * without a fork runs. The ID is never editable (concerns reference it by value),
+ * a change to what the check MEANS bumps its version so history stays readable,
+ * and disabling auto-resolves the open concerns that can no longer be re-checked.
  */
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
-  const { id } = await context.params;
-  const existing = await getCheckRow(id);
-  if (!existing) return Response.json({ error: "Not found" }, { status: 404 });
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const { ctx, owner } = caller;
+  const existing = await load(owner, context);
+  if (!existing) return notFound();
+  const id = existing.id;
 
   let body: Record<string, unknown>;
   try {
@@ -89,53 +112,73 @@ export async function PATCH(request: Request, context: Context) {
   }
 
   const bumped = isSemanticChange(before, after);
-  const check = await updateCheck(id, {
-    ...after,
-    ...(bumped ? { version: existing.version + 1 } : {}),
-  });
-  if (!check) return Response.json({ error: "Not found" }, { status: 404 });
+  const saved = await saveCheck(
+    owner,
+    existing,
+    { ...after, ...(bumped ? { version: existing.version + 1 } : {}) },
+    ctx.userId,
+  );
 
   let autoResolved = 0;
   if (before.enabled && !after.enabled)
-    autoResolved = await autoResolveConcernsForDisabledCheck(id);
+    autoResolved = await autoResolveConcernsForDisabledCheck(id, disabledScope(owner));
 
   await writeAudit({
-    actorId: actor.id,
-    action: after.enabled === false && before.enabled
-      ? "monitoring.check.disabled"
-      : "monitoring.check.updated",
+    actorId: ctx.userId,
+    orgId: owner,
+    action:
+      after.enabled === false && before.enabled
+        ? "monitoring.check.disabled"
+        : "monitoring.check.updated",
     metadata: {
       checkId: id,
+      scope: owner === null ? "template" : "org",
+      forked: owner !== null && existing.source === "template" ? true : undefined,
       builtin: existing.builtin,
-      versionBumped: bumped ? check.version : undefined,
+      versionBumped: bumped ? saved.version : undefined,
       autoResolved: autoResolved || undefined,
     },
   });
-  return Response.json({ check, autoResolved });
+  return Response.json({ check: toCheckView(saved), autoResolved });
 }
 
 /**
- * Delete a custom check. Built-ins are disable-only, and any check with concern
- * history is refused — the history references the ID by value and would be
- * orphaned. Disabling is always the safe alternative.
+ * In an org's catalogue: reset a customized template (drop the org's copy) or
+ * delete the org's own check. In the templates: delete a custom template. A
+ * built-in template is disable-only, and deleting a check that still has concern
+ * history is refused — the history references the ID by value.
  */
-export async function DELETE(_request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
-  const { id } = await context.params;
-  const existing = await getCheckRow(id);
-  if (!existing) return Response.json({ error: "Not found" }, { status: 404 });
+export async function DELETE(request: Request, context: Context) {
+  const caller = await catalogueCaller(request);
+  if (caller instanceof Response) return caller;
+  const { ctx, owner } = caller;
+  const existing = await load(owner, context);
+  if (!existing) return notFound();
+  const id = existing.id;
 
-  if (existing.builtin)
+  if (existing.source === "override") {
+    await deleteOrgCheck(owner!, id);
+    await writeAudit({
+      actorId: ctx.userId,
+      orgId: owner,
+      action: "monitoring.check.reset",
+      metadata: { checkId: id },
+    });
+    return Response.json({ ok: true, reset: true });
+  }
+
+  if (existing.builtin || (owner !== null && existing.source === "template"))
     return Response.json(
       {
         error:
-          "Built-in checks cannot be deleted, only disabled — they are re-seeded on every start.",
+          owner === null
+            ? "Built-in checks cannot be deleted, only disabled — they are re-seeded on every start."
+            : "This check comes from the shared catalogue. Disable it for your organization instead.",
       },
       { status: 409 },
     );
 
-  const concernCount = await countConcernsForCheck(id);
+  const concernCount = await countConcernsForCheck(id, owner);
   if (concernCount > 0)
     return Response.json(
       {
@@ -144,11 +187,13 @@ export async function DELETE(_request: Request, context: Context) {
       { status: 409 },
     );
 
-  await deleteCheck(id);
+  if (owner === null) await deleteTemplateCheck(id);
+  else await deleteOrgCheck(owner, id);
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: owner,
     action: "monitoring.check.deleted",
-    metadata: { checkId: id, title: existing.title },
+    metadata: { checkId: id, title: existing.title, scope: owner === null ? "template" : "org" },
   });
   return Response.json({ ok: true });
 }

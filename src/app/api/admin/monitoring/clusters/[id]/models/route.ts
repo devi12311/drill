@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { getClusterSecrets } from "@/lib/db/monitoring-queries";
 import { servedModels } from "@/lib/holmes/validate";
 
@@ -11,8 +12,10 @@ type Context = { params: Promise<{ id: string }> };
  * worse than offering none.
  */
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
   const cluster = await getClusterSecrets(id);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
   try {

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { notFound } from "next/navigation";
 import { isUuid } from "@/lib/monitoring/types";
 import { Gauge, Radar, ShieldCheck } from "lucide-react";
@@ -55,11 +56,12 @@ export default async function ClusterPage({
 }) {
   const { clusterId } = await params;
   if (!isUuid(clusterId)) notFound();
+  const ctx = await monitoringPageContext({ cluster: clusterId });
   const { q } = await searchParams;
   const [cluster, inventory, jobs] = await Promise.all([
     getClusterSummary(clusterId),
     listWorkloadPage(clusterId, { search: q, limit: INVENTORY_PAGE }),
-    listJobs(clusterId),
+    listJobs(ctx.orgId, clusterId),
   ]);
   if (!cluster) notFound();
 

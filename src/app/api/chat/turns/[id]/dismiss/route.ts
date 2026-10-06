@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { dismissTurn } from "@/lib/db/chat-turn-queries";
 
 // Next 16: route params are async.
@@ -6,10 +6,10 @@ type Context = { params: Promise<{ id: string }> };
 
 /** Keep a stopped turn's partial results in the transcript and close it. */
 export async function POST(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const result = await dismissTurn(user.id, id);
+  const result = await dismissTurn(ctx, id);
   if (result === "missing")
     return Response.json({ error: "Not found" }, { status: 404 });
   if (result === "active")

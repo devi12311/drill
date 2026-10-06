@@ -8,7 +8,7 @@ import { useSkills } from "@/components/skills/use-skills";
 
 /**
  * The skills library: procedures Holmes follows. Everyone writes private ones;
- * admins share them (and mark standing team instructions always-on).
+ * org admins share them (and mark standing team instructions always-on).
  */
 export default function SkillsPage() {
   const { skills, error } = useSkills();
@@ -25,7 +25,7 @@ export default function SkillsPage() {
             <p className="mt-1 max-w-[62ch] text-body text-pale-stone">
               Step-by-step procedures Holmes follows. It picks a matching skill
               on its own, or you run one directly from the composer with its
-              inputs. New skills are private to you; an admin can share them.
+              inputs. New skills are private to you; an org admin can share them with the org.
             </p>
           </div>
           <Button asChild variant="secondary" className="shrink-0 gap-2">

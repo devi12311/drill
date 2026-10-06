@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   autoResolveConcernsForDisabledCheck,
@@ -21,8 +22,10 @@ import { nextRunAfter, normaliseSchedule } from "@/lib/monitoring/schedule";
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { job: id }))) return monitoringNotFound();
   /**
    * All reads fire together, and the existence check happens after.
    *
@@ -40,9 +43,10 @@ export async function GET(_request: Request, context: Context) {
 }
 
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { job: id }))) return monitoringNotFound();
   const existing = await getJob(id);
   if (!existing) return Response.json({ error: "Not found" }, { status: 404 });
 
@@ -109,13 +113,14 @@ export async function PATCH(request: Request, context: Context) {
       if (!override.enabled && !before.has(override.checkId))
         autoResolved += await autoResolveConcernsForDisabledCheck(
           override.checkId,
-          id,
+          { jobId: id },
         );
     }
   }
 
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.job.updated",
     metadata: {
       jobId: id,
@@ -130,14 +135,16 @@ export async function PATCH(request: Request, context: Context) {
 }
 
 export async function DELETE(_request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { job: id }))) return monitoringNotFound();
   const job = await getJob(id);
   if (!job) return Response.json({ error: "Not found" }, { status: 404 });
   await deleteJob(id);
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.job.deleted",
     metadata: { jobId: id, name: job.name, clusterId: job.clusterId },
   });

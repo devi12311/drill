@@ -7,7 +7,6 @@ import type {
   RunStatus,
   Severity,
   TargetKind,
-  WorkloadTechnology,
 } from "./types";
 
 /**
@@ -107,16 +106,6 @@ export const CATEGORY_LABEL: Record<MonitorCategory, string> = {
   performance: "Performance & reliability",
 };
 
-export const TECHNOLOGY_LABEL: Record<WorkloadTechnology, string> = {
-  postgresql: "PostgreSQL",
-  mysql: "MySQL",
-  mongodb: "MongoDB",
-  clickhouse: "ClickHouse",
-  rabbitmq: "RabbitMQ",
-  nodejs: "Node.js",
-  kubernetes: "Kubernetes cluster",
-};
-
 export const TARGET_KIND_LABEL: Record<TargetKind, string> = {
   deployment: "Deployments",
   statefulset: "StatefulSets",
@@ -136,13 +125,16 @@ export const TARGET_KIND_LABEL: Record<TargetKind, string> = {
  * list reaches workloads whose technology was never identified — neither is
  * readable from a grid of ticked boxes.
  */
-export function describeScope(scope: {
-  appliesTo: readonly string[];
-  appliesToTechnologies: readonly string[];
-  excludesTechnologies: readonly string[];
-}): string {
-  const technologies = (list: readonly string[]) =>
-    list.map((t) => TECHNOLOGY_LABEL[t as WorkloadTechnology] ?? t).join(", ");
+export function describeScope(
+  scope: {
+    appliesTo: readonly string[];
+    appliesToTechnologies: readonly string[];
+    excludesTechnologies: readonly string[];
+  },
+  /** Display name of a technology slug — the org's types (`useTechnologies`). */
+  label: (slug: string) => string = (slug) => slug,
+): string {
+  const technologies = (list: readonly string[]) => list.map(label).join(", ");
 
   const parts = [
     scope.appliesTo.length === 0

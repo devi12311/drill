@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 import { useMemo, useState } from "react";
 import { useAdminData } from "@/lib/admin/use-admin-data";
 import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
@@ -19,7 +20,6 @@ import {
   DEPTH_BLURB,
   DEPTH_LABEL,
   SCHEDULE_PRESETS,
-  TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
 import {
   CLUSTER_TARGET,
@@ -120,6 +120,7 @@ export function JobForm({
   /** Omitted to create; supplied to edit that job in place. */
   job?: EditableJob;
 }) {
+  const { label } = useTechnologies();
   const refreshThenNavigate = useRefreshThenNavigate();
   /**
    * The model list is the ONE thing this form still fetches from the browser.
@@ -495,7 +496,7 @@ export function JobForm({
             {unprofiled
               .map(
                 (w) =>
-                  `${w.name}${w.technology ? ` (${TECHNOLOGY_LABEL[w.technology]})` : ""}`,
+                  `${w.name}${w.technology ? ` (${label(w.technology)})` : ""}`,
               )
               .join(", ")}
             . {unprofiled.length === 1 ? "It" : "They"} will still be assessed,

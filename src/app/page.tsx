@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { getSessionUser } from "@/lib/auth/session";
+import { requireSessionUser } from "@/lib/auth/session";
 import { ADMIN_HOME, CHAT_HOME } from "@/lib/routes";
 
 /**
@@ -10,7 +10,6 @@ import { ADMIN_HOME, CHAT_HOME } from "@/lib/routes";
  * "impersonate" correctly drops the admin into that user's chat.
  */
 export default async function RootRoute() {
-  const user = await getSessionUser();
-  if (!user) redirect("/login");
+  const user = await requireSessionUser();
   redirect(user.isAdmin ? ADMIN_HOME : CHAT_HOME);
 }

@@ -4,9 +4,9 @@ import { useState } from "react";
 import { Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
-import { WORKLOAD_TECHNOLOGY_OPTIONS } from "@/lib/monitoring/types";
 import type { WorkloadKind, WorkloadTechnology } from "@/lib/monitoring/types";
-import { SELECT_CLASS, TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
+import { SELECT_CLASS } from "@/lib/monitoring/ui";
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 
 /**
  * One workload's technology: text until you click it.
@@ -37,6 +37,7 @@ export function TechnologyCell({
   };
 }) {
   const refresh = useRefreshThenNavigate();
+  const { assignable, label } = useTechnologies();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,9 +85,9 @@ export function TechnologyCell({
         <option value="" className="bg-popover">
           — none —
         </option>
-        {WORKLOAD_TECHNOLOGY_OPTIONS.map((option) => (
-          <option key={option} value={option} className="bg-popover">
-            {TECHNOLOGY_LABEL[option]}
+        {assignable.map((option) => (
+          <option key={option.slug} value={option.slug} className="bg-popover">
+            {option.label}
           </option>
         ))}
       </select>
@@ -101,9 +102,7 @@ export function TechnologyCell({
     >
       <span className="space-y-0.5">
         <span className="block text-pale-stone group-hover/tech:text-warm-off-white">
-          {workload.technology
-            ? TECHNOLOGY_LABEL[workload.technology]
-            : "— none —"}
+          {workload.technology ? label(workload.technology) : "— none —"}
         </span>
         {/* Why we think so, or that a human said so — a guess you cannot
             interrogate is a guess you cannot correct with confidence. */}

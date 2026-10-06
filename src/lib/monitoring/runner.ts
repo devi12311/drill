@@ -178,13 +178,13 @@ async function prepare(
   // this job actually cares about, and reconciliation uses the very same values.
   // Resolved ONCE here: a deep run re-filters it per workload, which is a different
   // view of the same data rather than a reason to re-query.
-  const rubric = await jobRubricResolver(jobId, job.type);
+  const rubric = await jobRubricResolver(jobId, job.type, cluster.orgId);
   const deep = job.depth === "deep";
   // The methods, resolved ONCE here for the same reasons as the rubric — and one
   // more: they are editable live, so re-reading them per workload would let an
   // edit land mid-run and have two workloads in the same run measured by two
   // different methods. Posture runs carry no method at all.
-  const playbooks = deep ? await playbookResolver() : NO_PLAYBOOKS;
+  const playbooks = deep ? await playbookResolver(cluster.orgId) : NO_PLAYBOOKS;
   const kinds = [...new Set(targets.map((t) => t.kind))];
   const technologies = [
     ...new Set(targets.map((t) => t.technology).filter((t) => t !== null)),

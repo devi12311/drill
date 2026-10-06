@@ -1,16 +1,16 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { deleteArtifact, getArtifact, updateArtifact } from "@/lib/db/queries";
 import { validateDraft } from "@/lib/artifacts/types";
 
 type Context = { params: Promise<{ id: string }> };
 
-/** Artifacts are global knowledge — readable by any authed user. */
+/** Artifacts are the org's shared knowledge — readable by any member. */
 export async function GET(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   try {
-    const artifact = await getArtifact(id);
+    const artifact = await getArtifact(ctx.orgId, id);
     if (!artifact) {
       return Response.json({ error: "Artifact not found" }, { status: 404 });
     }
@@ -20,10 +20,10 @@ export async function GET(_request: Request, context: Context) {
   }
 }
 
-/** Any authed user may correct/extend an artifact; edits are attributed. */
+/** Any member may correct/extend an artifact; edits are attributed. */
 export async function PATCH(request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   let draft;
   try {
@@ -33,7 +33,7 @@ export async function PATCH(request: Request, context: Context) {
     return Response.json({ error: message }, { status: 400 });
   }
   try {
-    const artifact = await updateArtifact(id, user.id, draft);
+    const artifact = await updateArtifact(ctx, id, draft);
     if (!artifact) {
       return Response.json({ error: "Artifact not found" }, { status: 404 });
     }
@@ -44,15 +44,15 @@ export async function PATCH(request: Request, context: Context) {
 }
 
 /**
- * Unresolve: resolver-only (403 otherwise — artifacts are app-public, so
+ * Unresolve: resolver-only (403 otherwise — artifacts are org-public, so
  * no 404 masking). Flips the linked conversation back to open.
  */
 export async function DELETE(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   try {
-    const result = await deleteArtifact(id, user.id);
+    const result = await deleteArtifact(ctx, id);
     if (result === "not_found") {
       return Response.json({ error: "Artifact not found" }, { status: 404 });
     }

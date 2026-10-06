@@ -3,9 +3,9 @@ import type { NextRequest } from "next/server";
 import { verifySession, verifyImpersonation } from "@/lib/auth/jwt";
 import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 import { IMPERSONATION_COOKIE } from "@/lib/auth/impersonation-cookie";
-import { isAdminPath, isInternalApiPath } from "@/lib/routes";
+import { isInternalApiPath, loginUrl, LOGIN_PATH } from "@/lib/routes";
 
-const PUBLIC_PATHS = ["/login", "/register"];
+const PUBLIC_PATHS = [LOGIN_PATH, "/register"];
 const ADMIN_API_PREFIX = "/api/admin/";
 
 export async function proxy(request: NextRequest) {
@@ -30,19 +30,18 @@ export async function proxy(request: NextRequest) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    return NextResponse.redirect(new URL("/login", request.url));
+    // Keep where they were going (an invite link, a shared conversation).
+    const back = pathname + request.nextUrl.search;
+    return NextResponse.redirect(
+      new URL(pathname === "/" ? LOGIN_PATH : loginUrl(back), request.url),
+    );
   }
 
   const isApi = pathname.startsWith("/api/");
-  const isAdminSurface =
-    isAdminPath(pathname) || pathname.startsWith(ADMIN_API_PREFIX);
-
-  // Admin guard (edge check off the JWT role claim; handlers re-check via
-  // requireAdmin/getAdminActor for defense in depth).
-  if (isAdminSurface && session.role !== "admin") {
-    if (isApi) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    return NextResponse.redirect(new URL("/", request.url));
-  }
+  // No admin guard here any more: the console is also open to org owners/admins,
+  // and an org role is deliberately not in the JWT (it is re-read per request).
+  // The admin layout and every /api/admin handler gate it themselves
+  // (getConsoleContext / getAdminActor) — docs/DECISIONS.md 125.
 
   // Read-only impersonation choke point: while an admin is impersonating, block
   // every mutating request to the impersonated user's surface in one place — so

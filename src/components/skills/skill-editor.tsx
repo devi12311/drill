@@ -110,7 +110,7 @@ function InputRows({
             <Input
               value={input.key}
               onChange={(e) => set(i, { key: toInputKey(e.target.value) })}
-              placeholder="integration_id"
+              placeholder="service_name"
               aria-label={`Input ${i + 1} key`}
               aria-invalid={errors[i] ? true : undefined}
               aria-describedby={errors[i] ? `skill-input-${i}-error` : undefined}
@@ -120,7 +120,7 @@ function InputRows({
             <Input
               value={input.label}
               onChange={(e) => set(i, { label: e.target.value })}
-              placeholder="Integration id"
+              placeholder="Service name"
               aria-label={`Input ${i + 1} label`}
               disabled={disabled}
               className="min-w-0 flex-1"
@@ -238,8 +238,8 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
   const [scopeStatus, setScopeStatus] = useState<"saving" | "saved" | null>(null);
   const [scopeError, setScopeError] = useState<string | null>(null);
   const readOnly = skill !== null && !skill.editable;
-  // Sharing is an admin's call, and needs a saved skill to act on.
-  const canShare = user.isAdmin && skill !== null;
+  // Sharing is an org admin's call, and needs a saved skill to act on.
+  const canShare = user.isOrgAdmin && skill !== null;
 
   const problems = useMemo(() => skillDraftProblems(draft), [draft]);
   const blocked = hasProblems(problems);
@@ -357,7 +357,7 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
 
       {readOnly && (
         <p className="rounded-lg border border-border bg-smoked-onyx px-4 py-3 text-body-sm text-pale-stone">
-          This skill is shared with everyone, so only an admin can change it.
+          This skill is shared with your whole org, so only an org admin can change it.
         </p>
       )}
 
@@ -384,7 +384,7 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
               value={draft.name}
               onChange={(e) => update({ name: toSkillName(e.target.value) })}
               onBlur={visit("name")}
-              placeholder="cost-problems-investigation"
+              placeholder="checkout-latency-investigation"
               disabled={readOnly}
               className="font-mono text-[13px]"
             />
@@ -472,7 +472,7 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
       {canShare && (
         <FieldGroup
           title="Sharing"
-          purpose="Admin only, and saved as soon as you tick a box — not with the form. A shared skill reaches every user's investigations; always-on puts its whole procedure in every chat turn's system prompt."
+          purpose="Org admins only, and saved as soon as you tick a box — not with the form. A shared skill reaches every member's investigations; always-on puts its whole procedure in every chat turn's system prompt."
         >
           <label className="flex items-center gap-2.5 text-body-sm text-pale-stone">
             <Checkbox

@@ -1,6 +1,7 @@
 import "server-only";
 import { runSearchTool, SEARCH_TOOL_DEF } from "@/lib/artifacts/search";
 import { FETCH_SKILL_TOOL_DEF, runFetchSkill } from "@/lib/skills/tool";
+import type { Scope } from "@/lib/db/queries";
 import type { FrontendToolDef, ToolCall } from "./types";
 
 /**
@@ -10,9 +11,7 @@ import type { FrontendToolDef, ToolCall } from "./types";
  */
 
 /** Who the investigation runs for — a tool may only show them what they may see. */
-export interface FrontendToolContext {
-  userId: string;
-}
+export type FrontendToolContext = Scope;
 
 export interface FrontendToolOutcome {
   /** Handed back to Holmes verbatim; Holmes requires a string. */
@@ -33,7 +32,10 @@ const TOOLS: readonly FrontendTool[] = [
   {
     def: SEARCH_TOOL_DEF,
     toolset: "drill-knowledge",
-    run: async (args) => ({ data: await runSearchTool(args), status: "success" }),
+    run: async (args, ctx) => ({
+      data: await runSearchTool(args, ctx.orgId),
+      status: "success",
+    }),
   },
   { def: FETCH_SKILL_TOOL_DEF, toolset: "drill-skills", run: runFetchSkill },
 ];

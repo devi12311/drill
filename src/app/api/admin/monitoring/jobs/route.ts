@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   createJob,
@@ -15,8 +16,8 @@ import {
 import { MONITOR_CATEGORIES, type MonitorCategory } from "@/lib/monitoring/types";
 
 export async function POST(request: Request) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
 
   let body: Record<string, unknown>;
   try {
@@ -42,7 +43,9 @@ export async function POST(request: Request) {
       { error: `type must be one of: ${MONITOR_CATEGORIES.join(", ")}` },
       { status: 400 },
     );
-  const cluster = await getClusterSecrets(clusterId);
+  const cluster =
+    (await ownsMonitoring(ctx, { cluster: clusterId })) &&
+    (await getClusterSecrets(clusterId));
   if (!cluster)
     return Response.json({ error: "Cluster not found" }, { status: 404 });
 
@@ -89,13 +92,14 @@ export async function POST(request: Request) {
       schedule,
       enabled,
       nextRunAt: enabled ? nextRunAfter(schedule) : null,
-      createdBy: actor.id,
+      createdBy: ctx.userId,
     },
     targets,
   );
   if (overrides.length > 0) await replaceJobOverrides(job.id, overrides);
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.job.created",
     metadata: {
       jobId: job.id,

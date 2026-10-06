@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { openTurn } from "@/lib/db/chat-turn-queries";
 import {
   createConversation,
@@ -48,8 +48,8 @@ function describeDecisions(
  * turn already running in the conversation, for the client to attach to.
  */
 export async function POST(request: Request) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
 
   let body: {
     ask?: string;
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
   if (skillId) {
     let skill;
     try {
-      skill = await getUsableSkill(user.id, { id: skillId });
+      skill = await getUsableSkill(ctx, { id: skillId });
     } catch (err) {
       return databaseUnreachable(err);
     }
@@ -122,7 +122,7 @@ export async function POST(request: Request) {
   let paused: HolmesChatResponse | null = null;
   let agent: Awaited<ReturnType<typeof getAgent>>;
   try {
-    agent = await getAgent(user.id, body.agent_id);
+    agent = await getAgent(ctx.orgId, body.agent_id);
     if (!agent) {
       return Response.json({ error: "Agent not found" }, { status: 404 });
     }
@@ -141,7 +141,7 @@ export async function POST(request: Request) {
       }
     }
     if (body.conversation_id) {
-      const conversation = await getConversation(user.id, body.conversation_id);
+      const conversation = await getConversation(ctx, body.conversation_id);
       if (!conversation || conversation.agentId !== agent.id) {
         return Response.json(
           { error: "Conversation not found" },
@@ -170,12 +170,7 @@ export async function POST(request: Request) {
       }
     } else {
       conversationId = (
-        await createConversation({
-          userId: user.id,
-          agentId: agent.id,
-          ask: userLine,
-          model,
-        })
+        await createConversation(ctx, { agentId: agent.id, ask: userLine, model })
       ).id;
     }
   } catch (err) {
@@ -200,15 +195,15 @@ export async function POST(request: Request) {
       holmesReq,
       // The typed text, not the rendered skill: past resolutions are matched on
       // what the user described.
-      await buildHolmesExtras({ ask: paused ? null : typed || userLine, userId: user.id }),
+      await buildHolmesExtras({ ask: paused ? null : typed || userLine, scope: ctx }),
     );
   }
 
   const note = paused ? describeDecisions(paused, decisions!) : undefined;
   try {
     const result = await openTurn({
+      scope: ctx,
       conversationId,
-      userId: user.id,
       agentId: agent.id,
       model,
       kind: paused ? "decision" : "ask",

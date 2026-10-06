@@ -4,6 +4,7 @@ import {
   RELEVANCE_FLOOR,
   searchArtifacts,
 } from "@/lib/artifacts/search";
+import type { Scope } from "@/lib/db/queries";
 import { usableSkills } from "@/lib/db/skill-queries";
 import { FRONTEND_TOOL_DEFS } from "@/lib/holmes/frontend-tools";
 import type { HolmesChatRequest } from "@/lib/holmes/types";
@@ -21,7 +22,7 @@ import { alwaysOnBlock, catalogBlock } from "@/lib/skills/prompt";
 export async function buildHolmesExtras(input: {
   /** The question searched against past resolutions; absent on a decision. */
   ask: string | null;
-  userId: string;
+  scope: Scope;
 }): Promise<Pick<HolmesChatRequest, "frontend_tools" | "additional_system_prompt" | "enable_tool_approval">> {
   const extras = {
     enable_tool_approval: true,
@@ -32,11 +33,11 @@ export async function buildHolmesExtras(input: {
   if (input.ask == null) return extras;
 
   const [knowledge, skills] = await Promise.all([
-    searchArtifacts(input.ask, { limit: 3 })
+    searchArtifacts(input.ask, { orgId: input.scope.orgId, limit: 3 })
       .then((hits) => hits.filter((h) => h.score >= RELEVANCE_FLOOR))
       .then((hits) => (hits.length ? buildInjectionPrompt(hits) : null))
       .catch(() => null),
-    usableSkills(input.userId)
+    usableSkills(input.scope)
       .then((rows) => {
         const standing = rows.filter((s) => s.alwaysOn);
         const listed = rows.filter((s) => !s.alwaysOn);

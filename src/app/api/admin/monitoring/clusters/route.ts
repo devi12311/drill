@@ -1,16 +1,19 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
 import { writeAudit } from "@/lib/db/admin-queries";
+import { isUniqueViolation } from "@/lib/db";
 import {
   createCluster,
   listClusters,
   replaceWorkloads,
 } from "@/lib/db/monitoring-queries";
 import { discoverWorkloads } from "@/lib/monitoring/discovery";
+import { detectableTypes } from "@/lib/monitoring/workload-types-live";
 import { validateAgent } from "@/lib/holmes/validate";
 
 export async function GET() {
-  if (!(await getAdminActor())) return forbidden();
-  return Response.json({ clusters: await listClusters() });
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
+  return Response.json({ clusters: await listClusters(ctx.orgId) });
 }
 
 /**
@@ -19,8 +22,8 @@ export async function GET() {
  * discovery pass) and the Holmes endpoint by listing its models.
  */
 export async function POST(request: Request) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
 
   let body: {
     name?: string;
@@ -61,7 +64,7 @@ export async function POST(request: Request) {
    * reported error does not depend on which call happened to lose the race.
    */
   const [discovery, agent] = await Promise.allSettled([
-    discoverWorkloads(kubeconfig),
+    discoverWorkloads(kubeconfig, await detectableTypes(ctx.orgId)),
     validateAgent(holmesUrl, holmesApiKey),
   ]);
   if (discovery.status === "rejected") {
@@ -90,15 +93,16 @@ export async function POST(request: Request) {
   let cluster;
   try {
     cluster = await createCluster({
+      orgId: ctx.orgId,
       name,
       kubeconfig,
       holmesUrl,
       holmesApiKey,
-      createdBy: actor.id,
+      createdBy: ctx.userId,
     });
   } catch (err) {
-    // The only constraint a caller can hit is the unique name.
-    if (err instanceof Error && err.message.includes("monitoring_clusters_name"))
+    // The only constraint a caller can hit is the org-unique name.
+    if (isUniqueViolation(err))
       return Response.json(
         { error: `A cluster named "${name}" already exists`, field: "name" },
         { status: 409 },
@@ -108,7 +112,8 @@ export async function POST(request: Request) {
 
   await replaceWorkloads(cluster.id, discovered.workloads);
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.cluster.created",
     metadata: {
       clusterId: cluster.id,

@@ -12,8 +12,9 @@ import { ADMIN_HOME, CHAT_HOME, isAdminPath } from "@/lib/routes";
  * toggle. Admins land in admin mode (see `app/page.tsx`) and use this to reach
  * the chat, so it is the only switch between the two halves of the app.
  *
- * Gated on `actorIsAdmin`, not `isAdmin`: an admin impersonating a regular user
- * must keep the way back to the panel.
+ * Shown to anyone the console admits: platform admins (`actorIsAdmin`, not
+ * `isAdmin` — an admin impersonating a regular user must keep the way back) and
+ * the owners/admins of the active org (`isOrgAdmin`).
  *
  * Ctrl+K (⌘K on macOS) flips the mode too — same gate, same target as the button.
  *
@@ -25,7 +26,7 @@ export function ModeSwitch() {
   const { user } = useSession();
   const pathname = usePathname();
   const router = useRouter();
-  const allowed = user.actorIsAdmin;
+  const allowed = user.actorIsAdmin || user.isOrgAdmin;
   const inAdmin = isAdminPath(pathname);
   const target = inAdmin ? CHAT_HOME : ADMIN_HOME;
 

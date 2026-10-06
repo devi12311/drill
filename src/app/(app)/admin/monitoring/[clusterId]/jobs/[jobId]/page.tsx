@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { isUuid } from "@/lib/monitoring/types";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { DataTable, type Column } from "@/components/admin/data-table";
@@ -41,13 +42,14 @@ export default async function JobPage({
 }) {
   const { clusterId, jobId } = await params;
   if (!isUuid(clusterId) || !isUuid(jobId)) notFound();
+  const { orgId } = await monitoringPageContext({ cluster: clusterId }, { job: jobId });
   const showAll = (await searchParams).status === "all";
 
   const [job, concerns, runs, catalogue, activeRunId] = await Promise.all([
     getJob(jobId),
     listConcerns(jobId, showAll ? {} : { statuses: ["open"] }),
     listRuns(jobId, 20),
-    checkSummaries(),
+    checkSummaries(orgId),
     activeRun(jobId),
   ]);
   if (!job) notFound();

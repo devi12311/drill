@@ -37,12 +37,12 @@ export const KUBERNETES_PLAYBOOK: Playbook = {
   framing:
     "A Kubernetes cluster almost never dies of high CPU. It dies of etcd disk latency, which makes every component above it look broken at once; of a resource-request model that has drifted from reality, so the scheduler either cannot place work at all or packs it until neighbours throttle and evict each other; of one shared dependency that every pod needs and nobody monitors — DNS, an admission webhook, the CNI dataplane; and of node saturation Kubernetes does not model, because it schedules on CPU and memory requests and is blind to disk I/O, conntrack, steal time and kernel limits. Investigate downward from the control plane, since everything above inherits its latency, then outward to nodes, scheduling and the shared services. Before any of that, establish what can actually be measured here: a cluster whose etcd and scheduler scrape targets are down cannot be assessed, and saying so is the finding rather than a caveat.",
   dataSources: [
-    "Metrics: PromQL against the kube-prometheus-stack Prometheus in the observability namespace, via the prometheus toolset. Expect series from the apiserver, etcd, the scheduler, the controller-manager, kubelet and cAdvisor, node-exporter, kube-state-metrics and CoreDNS — but verify each with `up` by job before using it. Several of these scrape targets fail silently in real clusters, and a missing target is not the same as a healthy one.",
+    "Metrics: PromQL against the cluster's Prometheus via the prometheus toolset. Expect series from the apiserver, etcd, the scheduler, the controller-manager, kubelet and cAdvisor, node-exporter, kube-state-metrics and CoreDNS — but verify each with `up` by job before using it. Several of these scrape targets fail silently in real clusters, and a missing target is not the same as a healthy one.",
     "Kubernetes API: the kubernetes toolset, with cluster-wide read-only access. Nodes and their conditions, capacity and allocatable; pods across all namespaces with their phases, QoS classes and resource requests; events cluster-wide sorted by time; Deployments, StatefulSets and DaemonSets; PodDisruptionBudgets; ResourceQuotas and LimitRanges; HorizontalPodAutoscalers; PriorityClasses; ValidatingWebhookConfigurations and MutatingWebhookConfigurations; StorageClasses, PersistentVolumes and PersistentVolumeClaims; and `kubectl version` for the server and node versions.",
-    "Control-plane logs: on this cluster the apiserver, etcd, scheduler and controller-manager run as static pods in kube-system, so their logs ARE pod logs and are readable through the kubernetes logs toolset. The node's systemd journal is NOT reachable — there is no node shell, only a shell inside the agent's own pod — so kubelet and containerd faults must be judged from metrics and events, and you must say so rather than implying you read their logs.",
-    "Cluster-service logs: Loki through the Grafana datasource proxy, for CoreDNS, Calico and other cluster components over a longer window than pod logs retain. Available labels are app, component, container, filename, job, level, namespace, node_name, pod and stream — there is no service label, so select by namespace and pod prefix. Loki holds pod logs only.",
-    "Node facts: node-exporter series for CPU steal, load and PSI pressure, disk utilisation and latency, filesystem and inode fill, conntrack occupancy, file descriptors and network drops — plus the Node objects' own capacity, allocatable, labels, taints and conditions. `kubectl top` needs metrics-server, whose presence is not guaranteed here; check before relying on it, and fall back to cAdvisor series.",
-    "Cluster conventions: the DNS domain is k8s-clickflare, not cluster.local, so any fully-qualified name in a query must use it. The CNI is Calico. Node hardware is deliberately mixed — bare metal alongside Hetzner Cloud instances — which makes CPU steal and node heterogeneity real concerns here rather than textbook ones.",
+    "Control-plane logs: on self-managed (kubeadm-style) clusters the apiserver, etcd, scheduler and controller-manager run as static pods in kube-system, so their logs ARE pod logs; on a managed control plane they are usually not visible at all — find out which. The node's systemd journal is normally NOT reachable from the agent, so kubelet and containerd faults must be judged from metrics and events, and you must say so rather than implying you read their logs.",
+    "Cluster-service logs: Loki, if the cluster has it, for CoreDNS, the CNI and other cluster components over a longer window than pod logs retain. List its labels before querying; where there is no service label, select by namespace and pod prefix.",
+    "Node facts: node-exporter series for CPU steal, load and PSI pressure, disk utilisation and latency, filesystem and inode fill, conntrack occupancy, file descriptors and network drops — plus the Node objects' own capacity, allocatable, labels, taints and conditions. `kubectl top` needs metrics-server, whose presence is not guaranteed; check before relying on it, and fall back to cAdvisor series.",
+    "Cluster conventions: discover them rather than assuming the defaults. The DNS domain is not always cluster.local — read it from a pod's resolv.conf search path or a Service's FQDN before writing any fully-qualified name. Identify the CNI from its kube-system DaemonSet. Count the node classes: mixed hardware (bare metal beside cloud instances, or several instance types) makes CPU steal and node heterogeneity real concerns rather than textbook ones.",
     "Everything available to you is read-only. Report what you measured and what should change; never attempt a write, a defragmentation, a drain or a restart.",
   ],
   method: [
@@ -57,11 +57,11 @@ export const KUBERNETES_PLAYBOOK: Playbook = {
     "Check node health over the window, not just now: NotReady transitions, MemoryPressure, DiskPressure and PIDPressure conditions, PLEG relist p99 against 3 s, and the container-runtime operation error rate. State plainly that the kubelet's own logs were not available to you.",
     "Measure what the workloads are collectively experiencing, since that is the cluster's output: the clusterwide CFS throttled-period ratio, OOMKills, evictions, restarts and pods in CrashLoopBackOff. For each, name the namespaces and workloads that dominate the number and their share of it. An aggregate with no culprit is not actionable.",
     "Examine DNS, which every other measurement in the cluster silently depends on. Measure CoreDNS request p99, the SERVFAIL and NXDOMAIN rates, the cache hit ratio and upstream forward health and latency. Then judge its capacity: replica count and placement against cluster size and query rate, whether all replicas sit on one node, whether NodeLocal DNSCache exists, and whether the default ndots setting is amplifying every external lookup into several failed ones.",
-    "Examine the network dataplane. Measure kube-proxy rule-sync duration and how stale the last sync is, judged against the number of Services and endpoints and the proxy mode in use. Measure the Calico dataplane's apply time and error counters, the free address count in each node's IPAM block — exhaustion presents as pods stuck ContainerCreating, not as a network error — and whether MTU is consistent across nodes.",
+    "Examine the network dataplane. Measure kube-proxy rule-sync duration and how stale the last sync is, judged against the number of Services and endpoints and the proxy mode in use. Measure the CNI dataplane's apply time and error counters (Calico's felix exposes them; other CNIs may not), the free address count in each node's IPAM block — exhaustion presents as pods stuck ContainerCreating, not as a network error — and whether MTU is consistent across nodes.",
     "Examine storage: PersistentVolumeClaim space and inode utilisation with the worst offenders named, claims stuck Pending, volume attach and detach latency, and multi-attach or mount failures in events.",
     "Assess whether the cluster can survive losing a node on purpose, which is what every upgrade requires. Find cluster-critical components running a single replica or with every replica on one node; PodDisruptionBudgets that permit zero disruptions and therefore block drains indefinitely; multi-replica workloads with no topology spread or anti-affinity; missing or absent priority classes, which leaves eviction order arbitrary and preemption unpredictable; namespaces sitting at their quota; and HorizontalPodAutoscalers pinned at maximum or unable to read their metrics.",
     "Assess decay, which is never urgent and always compounding: whether any kubelet is outside the supported version skew or the cluster is past upstream support, how many terminated and evicted pods were never garbage collected, the cluster event rate, and which resources have object counts large enough to matter to etcd.",
-    "Finally, state what you could not measure and why. On this cluster the node systemd journal is unreachable, so a kubelet or container-runtime fault is visible in metrics and events but not in its own logs; and any scrape target that was down in step 1 leaves a real hole. A run that names its blind spots is worth more than one that reads as complete.",
+    "Finally, state what you could not measure and why. Where the node systemd journal is unreachable, a kubelet or container-runtime fault is visible in metrics and events but not in its own logs; and any scrape target that was down in step 1 leaves a real hole. A run that names its blind spots is worth more than one that reads as complete.",
   ],
   observations: [
     // --- what could be measured at all: the honesty layer, read first on the run page
@@ -133,7 +133,7 @@ export const KUBERNETES_PLAYBOOK: Playbook = {
     { key: "dns.replicas", source: "manifest", unit: "count", how: "CoreDNS replicas ready, and how many distinct nodes they sit on" },
     { key: "net.kube_proxy_sync_p99_seconds", source: "metrics", unit: "seconds", how: "p99 proxy rule-sync duration, with the proxy mode in use" },
     { key: "net.service_count", source: "manifest", unit: "count", how: "Services and total endpoints — the input that makes rule syncing expensive" },
-    { key: "net.cni_dataplane_p99_seconds", source: "metrics", unit: "seconds", how: "Calico dataplane apply time p99; empty when felix metrics are not scraped" },
+    { key: "net.cni_dataplane_p99_seconds", source: "metrics", unit: "seconds", how: "CNI dataplane apply time p99 (Calico felix, for example); empty when the CNI exposes no such metric" },
     { key: "net.node_ip_free_min", source: "metrics", unit: "count", how: "fewest free pod IPs in any node's IPAM block" },
     // --- storage
     { key: "storage.worst_pvc_used_pct", source: "metrics", unit: "%", how: "fullest PersistentVolumeClaim by space, named, with inode usage if worse" },
@@ -162,7 +162,7 @@ export const KUBERNETES_CHECKS: readonly MonitorCheck[] = [
     evidence:
       "The `up` value per job, which components returned no series at all, the retention window you measured, and the list of checks left unjudgeable.",
     reference:
-      "kube-prometheus-stack control-plane ServiceMonitors · HOLMES_KNOWLEDGE_BASE.md §7.2 (a toolset marked healthy at boot is not a working query)",
+      "kube-prometheus-stack control-plane ServiceMonitors · Prometheus docs: the `up` metric",
     appliesTo: ["cluster"],
     appliesToTechnologies: ["kubernetes"],
   },
@@ -458,10 +458,10 @@ export const KUBERNETES_CHECKS: readonly MonitorCheck[] = [
     title: "Unlabelled mixed node classes in one schedulable pool",
     baseSeverity: "medium",
     question:
-      "Are nodes of materially different CPU, memory or disk class schedulable for the same workloads without labels, taints or affinity separating them? The same pod then performs differently depending on where it lands, and the slowest node sets the pace for anything replicated across them. This cluster has already been hurt by exactly this once.",
+      "Are nodes of materially different CPU, memory or disk class schedulable for the same workloads without labels, taints or affinity separating them? The same pod then performs differently depending on where it lands, and the slowest node sets the pace for anything replicated across them.",
     evidence:
       "Node classes with their CPU, memory and disk specifications, the labels and taints present, and any workload with replicas spread across classes together with the performance difference measured between them.",
-    reference: "Kubernetes docs: assigning pods to nodes · docs/CLICKHOUSE_PLAYBOOK_INPUT.md §1 (slow Hetzner Cloud nodes were a measured bottleneck)",
+    reference: "Kubernetes docs: assigning pods to nodes · well-known labels (node.kubernetes.io/instance-type)",
     appliesTo: ["cluster"],
     appliesToTechnologies: ["kubernetes"],
   },
@@ -547,7 +547,7 @@ export const KUBERNETES_CHECKS: readonly MonitorCheck[] = [
       "Is the CNI dataplane applying changes promptly and without errors, does every node have free pod IP addresses in its IPAM block, and is MTU consistent across nodes? IP exhaustion presents as pods stuck ContainerCreating rather than as a network error, and an MTU mismatch presents as large transfers failing while pings succeed — the sort of fault that gets blamed on a database for weeks.",
     evidence:
       "Dataplane apply duration and error counters, free addresses per node block, MTU per node, pods stuck in ContainerCreating with their events, and TCP retransmission or drop rates. Say so if the CNI exposes no metrics here.",
-    reference: "Calico documentation: felix metrics and IPAM · docs/CLICKHOUSE_PLAYBOOK_INPUT.md §3.8 (replication failures previously attributed to Calico)",
+    reference: "Calico documentation: felix metrics and IPAM · Kubernetes docs: cluster networking",
     appliesTo: ["cluster"],
     appliesToTechnologies: ["kubernetes"],
     requires: "prometheus",

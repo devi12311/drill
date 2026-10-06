@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { getRunPrompt } from "@/lib/db/monitoring-queries";
 
 // Next 16: route params are async.
@@ -12,8 +13,10 @@ type Context = { params: Promise<{ id: string; index: string }> };
  * elements ask for when they are actually opened.
  */
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id, index } = await context.params;
+  if (!(await ownsMonitoring(ctx, { run: id }))) return monitoringNotFound();
   const position = Number(index);
   if (!Number.isInteger(position) || position < 0)
     return Response.json({ error: "Not found" }, { status: 404 });

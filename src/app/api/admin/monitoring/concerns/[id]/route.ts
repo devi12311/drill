@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   getConcern,
@@ -30,17 +31,20 @@ const ACTIONS = {
 type Action = keyof typeof ACTIONS;
 
 export async function GET(_request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { concern: id }))) return monitoringNotFound();
   const concern = await getConcern(id);
   if (!concern) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json({ concern, history: await getConcernHistory(id) });
 }
 
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { concern: id }))) return monitoringNotFound();
   const concern = await getConcern(id);
   if (!concern) return Response.json({ error: "Not found" }, { status: 404 });
 
@@ -81,7 +85,7 @@ export async function PATCH(request: Request, context: Context) {
     status: spec.status,
     dismissalReason: action === "reopen" ? null : action,
     dismissalComment: action === "reopen" ? null : comment || null,
-    dismissedBy: action === "reopen" ? null : actor.id,
+    dismissedBy: action === "reopen" ? null : ctx.userId,
     mutedUntil,
     // A human decision restarts the auto-resolve countdown; otherwise a
     // reopened concern would auto-resolve on the very next absent run.
@@ -98,7 +102,8 @@ export async function PATCH(request: Request, context: Context) {
   if (!updated) return Response.json({ error: "Not found" }, { status: 404 });
 
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: `monitoring.concern.${action}`,
     metadata: {
       concernId: id,

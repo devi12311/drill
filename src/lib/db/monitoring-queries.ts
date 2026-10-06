@@ -10,11 +10,14 @@ import {
   isNull,
   lt,
   lte,
+  notInArray,
   or,
   sql,
   TransactionRollbackError,
+  type SQL,
 } from "drizzle-orm";
 import { db } from "./index";
+import { openSecret, sealSecret } from "@/lib/secrets";
 import {
   monitoringChecks,
   monitoringClusters,
@@ -27,19 +30,17 @@ import {
   monitoringRunFindings,
   monitoringRunTargets,
   monitoringRuns,
+  monitoringWorkloadTypes,
   monitoringWorkloads,
 } from "./schema";
-import { PROFILED_TECHNOLOGIES } from "@/lib/monitoring/profiles";
 import {
   ACTIVE_RUN_STATUSES,
   CLUSTER_TECHNOLOGY,
   DISMISSED_STATUSES,
   isClusterTarget,
+  isUuid,
 } from "@/lib/monitoring/types";
-import type {
-  ExpectedObservations,
-  ObservationSpec,
-} from "@/lib/monitoring/playbook";
+import type { ExpectedObservations } from "@/lib/monitoring/playbook";
 import type { EffectiveCheck } from "@/lib/monitoring/checks";
 import type {
   AssessmentOutcome,
@@ -59,6 +60,7 @@ import type {
   TargetKind,
   WorkloadKind,
   WorkloadTechnology,
+  CatalogueSource,
 } from "@/lib/monitoring/types";
 
 /**
@@ -66,55 +68,172 @@ import type {
  * `queries.ts` (which stays pristine) and from `admin-queries.ts` (analytics),
  * following the precedent in docs/DECISIONS.md.
  *
- * Monitoring rows are GLOBAL admin infrastructure — nothing here is scoped by
- * user, and every caller is behind `requireAdmin()`.
+ * Clusters belong to an org, and everything else (workloads, jobs, runs,
+ * concerns, observations) hangs off a cluster. Lists take an `orgId`; by-id reads
+ * do not, because every caller first proves the id is the org's with
+ * `monitoringOrgOf` — the one gate, instead of an org join in ~60 queries. The
+ * check catalogue and playbooks are still global (platform-admin only) until
+ * they become per-org templates.
  */
+
+// ---- Org ownership ----
+
+/** Something a monitoring route is addressed by. */
+export type MonitoringRef =
+  | { cluster: string }
+  | { job: string }
+  | { run: string }
+  | { concern: string };
+
+/**
+ * The org that owns a monitoring entity, found by walking up to its cluster —
+ * null when it does not exist (or the id is not even a uuid, which would be a
+ * Postgres cast error rather than "absent").
+ */
+export async function monitoringOrgOf(ref: MonitoringRef): Promise<string | null> {
+  const id = Object.values(ref)[0];
+  if (!isUuid(id)) return null;
+  const owner = (jobId: SQL) =>
+    db
+      .select({ orgId: monitoringClusters.orgId })
+      .from(monitoringJobs)
+      .innerJoin(monitoringClusters, eq(monitoringClusters.id, monitoringJobs.clusterId))
+      .where(eq(monitoringJobs.id, jobId));
+  let rows: { orgId: string }[];
+  if ("cluster" in ref) {
+    rows = await db
+      .select({ orgId: monitoringClusters.orgId })
+      .from(monitoringClusters)
+      .where(eq(monitoringClusters.id, id));
+  } else if ("job" in ref) {
+    rows = await owner(sql`${id}::uuid`);
+  } else if ("run" in ref) {
+    rows = await owner(
+      sql`(select ${monitoringRuns.jobId} from ${monitoringRuns} where ${monitoringRuns.id} = ${id})`,
+    );
+  } else {
+    rows = await owner(
+      sql`(select ${monitoringConcerns.jobId} from ${monitoringConcerns} where ${monitoringConcerns.id} = ${id})`,
+    );
+  }
+  return rows[0]?.orgId ?? null;
+}
 
 // ---- Check catalogue (the live rubric) ----
 
-export interface CheckRow {
-  id: string;
-  category: MonitorCategory;
-  title: string;
-  question: string;
-  evidence: string;
-  reference: string;
-  baseSeverity: Severity;
-  appliesTo: string[];
-  appliesToTechnologies: string[];
-  excludesTechnologies: string[];
-  requires: string | null;
-  resolveAfterAbsentRuns: number;
-  builtin: boolean;
-  enabled: boolean;
-  version: number;
-  createdAt: Date;
-  updatedAt: Date;
-}
+/**
+ * Whose catalogue a read or write addresses: an org (its effective rubric, edits
+ * fork the template) or `null` — the templates themselves, platform admins only.
+ */
+export type CatalogueOwner = string | null;
 
-export async function listAllChecks(): Promise<CheckRow[]> {
-  return db
-    .select()
-    .from(monitoringChecks)
-    .orderBy(asc(monitoringChecks.category), asc(monitoringChecks.id));
-}
+/** The ids of every job on one org's clusters — how concerns and readings find their org. */
+const jobsOfOrg = (orgId: string) =>
+  db
+    .select({ id: monitoringJobs.id })
+    .from(monitoringJobs)
+    .innerJoin(monitoringClusters, eq(monitoringClusters.id, monitoringJobs.clusterId))
+    .where(eq(monitoringClusters.orgId, orgId));
 
-export async function getCheckRow(id: string): Promise<CheckRow | null> {
-  const [row] = await db
-    .select()
-    .from(monitoringChecks)
-    .where(eq(monitoringChecks.id, id))
-    .limit(1);
-  return row ?? null;
+/** What the org sees, and the template behind it (null for an org's own check). */
+const templatesAndOrg = (
+  column:
+    | typeof monitoringChecks.orgId
+    | typeof monitoringPlaybooks.orgId
+    | typeof monitoringWorkloadTypes.orgId,
+  owner: CatalogueOwner,
+) => (owner === null ? isNull(column) : or(isNull(column), eq(column, owner)));
+
+export type CheckRow = typeof monitoringChecks.$inferSelect;
+
+export interface CatalogueCheck extends CheckRow {
+  source: CatalogueSource;
+  /** The template moved on since this org's fork was made or last reviewed. */
+  updateAvailable: boolean;
+  /** The template's current version, when there is one. */
+  templateVersion: number | null;
+  /** The template behind an org's fork — what the panel diffs against. */
+  template: CheckRow | null;
 }
 
 /**
- * Seed the built-in rubric. `onConflictDoNothing` is the whole point: an admin
- * who retunes or disables a built-in must never have that edit reverted by the
- * next process start.
+ * Overlay an org's rows on the templates, key by key: the org's row wins where
+ * one exists. One function for checks and playbooks, so "effective" means the
+ * same thing for both.
+ */
+export function overlay<
+  R extends { orgId: string | null; version: number; basedOnVersion: number | null },
+>(
+  rows: R[],
+  keyOf: (row: R) => string,
+): (R & { source: CatalogueSource; updateAvailable: boolean; templateVersion: number | null; template: R | null })[] {
+  const templates = new Map<string, R>();
+  const own = new Map<string, R>();
+  for (const row of rows) (row.orgId === null ? templates : own).set(keyOf(row), row);
+  const keys = new Set([...templates.keys(), ...own.keys()]);
+  return [...keys].map((key) => {
+    const template = templates.get(key) ?? null;
+    const mine = own.get(key);
+    const row = mine ?? template!;
+    return {
+      ...row,
+      source: !mine ? "template" : template ? "override" : "custom",
+      updateAvailable: Boolean(
+        mine && template && template.version > (mine.basedOnVersion ?? 0),
+      ),
+      templateVersion: template?.version ?? null,
+      template: mine ? template : null,
+    };
+  });
+}
+
+/** The effective catalogue for an org (or the templates alone, for `null`). */
+export async function listCatalogueChecks(
+  owner: CatalogueOwner,
+): Promise<CatalogueCheck[]> {
+  const rows = await db
+    .select()
+    .from(monitoringChecks)
+    .where(templatesAndOrg(monitoringChecks.orgId, owner))
+    .orderBy(asc(monitoringChecks.category), asc(monitoringChecks.id));
+  return overlay(rows, (r) => r.id).sort((a, b) =>
+      a.category === b.category
+        ? a.id.localeCompare(b.id)
+        : a.category.localeCompare(b.category),
+    );
+}
+
+/** One effective check, plus the template behind an org's fork (for the diff). */
+export async function getCatalogueCheck(
+  owner: CatalogueOwner,
+  id: string,
+): Promise<CatalogueCheck | null> {
+  const rows = await db
+    .select()
+    .from(monitoringChecks)
+    .where(
+      and(eq(monitoringChecks.id, id), templatesAndOrg(monitoringChecks.orgId, owner)),
+    );
+  return overlay(rows, (r) => r.id)[0] ?? null;
+}
+
+/**
+ * Seed the built-in TEMPLATES. Insert-if-missing — a platform admin's retune of a
+ * template must survive every restart. The `(org_id, id)` unique constraint is
+ * NULLS NOT DISTINCT, so a template that already exists is a conflict.
  */
 export async function seedBuiltinChecks(
-  rows: Omit<CheckRow, "createdAt" | "updatedAt" | "version" | "enabled">[],
+  rows: Omit<
+    CheckRow,
+    | "uid"
+    | "orgId"
+    | "basedOnVersion"
+    | "createdBy"
+    | "createdAt"
+    | "updatedAt"
+    | "version"
+    | "enabled"
+  >[],
 ): Promise<number> {
   if (rows.length === 0) return 0;
   const inserted = await db
@@ -125,43 +244,119 @@ export async function seedBuiltinChecks(
   return inserted.length;
 }
 
+export type CheckFields = Omit<
+  CheckRow,
+  "uid" | "orgId" | "id" | "basedOnVersion" | "builtin" | "createdBy" | "createdAt" | "updatedAt"
+>;
+
+/** A new check: a template (owner `null`) or an org's own check. */
 export async function createCheck(
-  input: Omit<CheckRow, "createdAt" | "updatedAt" | "version" | "builtin">,
+  owner: CatalogueOwner,
+  input: Omit<CheckFields, "version"> & { id: string },
   createdBy: string,
 ): Promise<CheckRow> {
   const [row] = await db
     .insert(monitoringChecks)
-    .values({ ...input, builtin: false, createdBy })
+    .values({ ...input, orgId: owner, builtin: false, createdBy })
     .returning();
   return row;
 }
 
-export async function updateCheck(
-  id: string,
-  fields: Partial<Omit<CheckRow, "id" | "builtin" | "createdAt" | "updatedAt">>,
-): Promise<CheckRow | null> {
+/**
+ * Write a check as `owner` sees it. A template edit (owner `null`) or an edit to
+ * an org's existing row updates in place; an org editing a template it has not
+ * forked yet gets its own copy, remembering the template version it started from.
+ */
+export async function saveCheck(
+  owner: CatalogueOwner,
+  current: CatalogueCheck,
+  fields: Partial<CheckFields>,
+  actorId: string,
+): Promise<CheckRow> {
+  if (owner !== null && current.orgId === null) {
+    const [row] = await db
+      .insert(monitoringChecks)
+      .values({
+        id: current.id,
+        builtin: current.builtin,
+        category: current.category,
+        title: current.title,
+        question: current.question,
+        evidence: current.evidence,
+        reference: current.reference,
+        baseSeverity: current.baseSeverity,
+        appliesTo: current.appliesTo,
+        appliesToTechnologies: current.appliesToTechnologies,
+        excludesTechnologies: current.excludesTechnologies,
+        requires: current.requires,
+        resolveAfterAbsentRuns: current.resolveAfterAbsentRuns,
+        enabled: current.enabled,
+        version: current.version,
+        ...fields,
+        orgId: owner,
+        basedOnVersion: current.version,
+        createdBy: actorId,
+      })
+      .returning();
+    return row;
+  }
   const [row] = await db
     .update(monitoringChecks)
     .set({ ...fields, updatedAt: new Date() })
-    .where(eq(monitoringChecks.id, id))
+    .where(eq(monitoringChecks.uid, current.uid))
     .returning();
-  return row ?? null;
+  return row;
 }
 
-export async function deleteCheck(id: string): Promise<boolean> {
+/**
+ * Drop an org's own row for a key: for a fork that is "reset to template", for an
+ * org's own check it is a delete. Templates are never deleted through here.
+ */
+export async function deleteOrgCheck(orgId: string, id: string): Promise<boolean> {
   const rows = await db
     .delete(monitoringChecks)
-    .where(eq(monitoringChecks.id, id))
-    .returning({ id: monitoringChecks.id });
+    .where(and(eq(monitoringChecks.orgId, orgId), eq(monitoringChecks.id, id)))
+    .returning({ uid: monitoringChecks.uid });
   return rows.length > 0;
 }
 
+/** Delete a custom TEMPLATE (built-in templates are disable-only). */
+export async function deleteTemplateCheck(id: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringChecks)
+    .where(
+      and(isNull(monitoringChecks.orgId), eq(monitoringChecks.id, id), eq(monitoringChecks.builtin, false)),
+    )
+    .returning({ uid: monitoringChecks.uid });
+  return rows.length > 0;
+}
+
+/** "I have seen the template's change": the fork stops being flagged as behind. */
+export async function markCheckReviewed(
+  orgId: string,
+  id: string,
+  templateVersion: number,
+): Promise<void> {
+  await db
+    .update(monitoringChecks)
+    .set({ basedOnVersion: templateVersion })
+    .where(and(eq(monitoringChecks.orgId, orgId), eq(monitoringChecks.id, id)));
+}
+
+/** Concerns raised by jobs on this org's clusters (or on every org's, for `null`). */
+function concernsOf(owner: CatalogueOwner) {
+  return owner === null ? undefined : inArray(monitoringConcerns.jobId, jobsOfOrg(owner));
+}
+
 /** Concern history referencing a check — what makes deletion unsafe. */
-export async function countConcernsForCheck(checkId: string): Promise<number> {
+export async function countConcernsForCheck(
+  checkId: string,
+  owner: CatalogueOwner,
+): Promise<number> {
   const [row] = await db
     .select({ n: count() })
     .from(monitoringConcerns)
-    .where(eq(monitoringConcerns.checkId, checkId));
+    .where(and(eq(monitoringConcerns.checkId, checkId), concernsOf(owner)));
   return row?.n ?? 0;
 }
 
@@ -169,12 +364,34 @@ export async function countConcernsForCheck(checkId: string): Promise<number> {
  * Close concerns for a check that has just stopped being evaluated. Without
  * this they would sit open forever: reconciliation deliberately never touches a
  * concern whose check did not run, so nothing else can ever close them.
- * Scoped to one job when the check was disabled per-job rather than globally.
+ *
+ * Scoped to where the check stopped: one job (a per-job override), one org (its
+ * copy was disabled), or — a template disabled — every org still inheriting it,
+ * which excludes orgs whose own copy keeps it running.
  */
 export async function autoResolveConcernsForDisabledCheck(
   checkId: string,
-  jobId?: string,
+  scope: { jobId: string } | { orgId: string } | { template: true },
 ): Promise<number> {
+  const where =
+    "jobId" in scope
+      ? eq(monitoringConcerns.jobId, scope.jobId)
+      : "orgId" in scope
+        ? concernsOf(scope.orgId)
+        : notInArray(
+            monitoringConcerns.jobId,
+            db
+              .select({ id: monitoringJobs.id })
+              .from(monitoringJobs)
+              .innerJoin(monitoringClusters, eq(monitoringClusters.id, monitoringJobs.clusterId))
+              .innerJoin(
+                monitoringChecks,
+                and(
+                  eq(monitoringChecks.orgId, monitoringClusters.orgId),
+                  eq(monitoringChecks.id, checkId),
+                ),
+              ),
+          );
   const rows = await db
     .update(monitoringConcerns)
     .set({
@@ -187,7 +404,7 @@ export async function autoResolveConcernsForDisabledCheck(
       and(
         eq(monitoringConcerns.checkId, checkId),
         eq(monitoringConcerns.status, "open"),
-        ...(jobId ? [eq(monitoringConcerns.jobId, jobId)] : []),
+        where,
       ),
     )
     .returning({ id: monitoringConcerns.id });
@@ -198,82 +415,333 @@ export async function autoResolveConcernsForDisabledCheck(
 
 // ---- Playbooks (the live methods) ----
 
-export interface PlaybookRow {
-  technology: WorkloadTechnology;
-  framing: string;
-  dataSources: string[];
-  method: string[];
-  observations: ObservationSpec[];
-  editedBy: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
+export type PlaybookRow = typeof monitoringPlaybooks.$inferSelect;
 
-export async function listPlaybookRows(): Promise<PlaybookRow[]> {
-  return db
+export type CataloguePlaybook = PlaybookRow & {
+  source: CatalogueSource;
+  updateAvailable: boolean;
+  templateVersion: number | null;
+  /** The template behind an org's fork — what "update available" compares to. */
+  template: PlaybookRow | null;
+};
+
+/** The effective methods for an org (or the templates alone, for `null`). */
+export async function listCataloguePlaybooks(
+  owner: CatalogueOwner,
+): Promise<CataloguePlaybook[]> {
+  const rows = await db
     .select()
     .from(monitoringPlaybooks)
-    .orderBy(asc(monitoringPlaybooks.technology));
+    .where(templatesAndOrg(monitoringPlaybooks.orgId, owner));
+  return overlay(rows, (r) => r.technology).sort((a, b) =>
+    a.technology.localeCompare(b.technology),
+  );
 }
 
-export async function getPlaybookRow(
+export async function getCataloguePlaybook(
+  owner: CatalogueOwner,
   technology: WorkloadTechnology,
-): Promise<PlaybookRow | null> {
-  const [row] = await db
+): Promise<CataloguePlaybook | null> {
+  const rows = await db
     .select()
     .from(monitoringPlaybooks)
-    .where(eq(monitoringPlaybooks.technology, technology))
-    .limit(1);
-  return row ?? null;
+    .where(
+      and(
+        eq(monitoringPlaybooks.technology, technology),
+        templatesAndOrg(monitoringPlaybooks.orgId, owner),
+      ),
+    );
+  return overlay(rows, (r) => r.technology)[0] ?? null;
 }
 
 /**
- * Seed the shipped methods: insert what is missing, and refresh what nobody has
- * edited.
+ * Seed the shipped methods as TEMPLATES: insert what is missing, and refresh a
+ * template nobody has edited — bumping its version only when the text actually
+ * changed, so every org's fork is told about a real change and not about a boot.
  *
  * Deliberately unlike `seedBuiltinChecks`, which is insert-only. A check has an
  * identity a run's history hangs off, so overwriting one silently rewrites what a
- * past finding meant; a playbook is only instructions for the next run, and the
- * editor offers no "adopt the shipped text" button, so insert-only would strand
- * every installed database on the text it first saw. `edited_by IS NULL` is the
- * whole rule: an operator's edit always wins, a pristine row always tracks git.
+ * past finding meant; a playbook is only instructions for the next run.
+ * `edited_by IS NULL` is the rule: a platform admin's edit always wins, a pristine
+ * template always tracks git. Org forks are never touched.
  */
 export async function seedPlaybooks(
-  rows: Omit<PlaybookRow, "editedBy" | "createdAt" | "updatedAt">[],
+  rows: Pick<
+    PlaybookRow,
+    "technology" | "framing" | "dataSources" | "method" | "observations"
+  >[],
 ): Promise<number> {
   if (rows.length === 0) return 0;
+  const changed = sql`(${monitoringPlaybooks.framing}, ${monitoringPlaybooks.dataSources}, ${monitoringPlaybooks.method}, ${monitoringPlaybooks.observations})
+    is distinct from (excluded.framing, excluded.data_sources, excluded.method, excluded.observations)`;
   const written = await db
     .insert(monitoringPlaybooks)
     .values(rows)
     .onConflictDoUpdate({
-      target: monitoringPlaybooks.technology,
+      target: [monitoringPlaybooks.orgId, monitoringPlaybooks.technology],
       set: {
         framing: sql`excluded.framing`,
         dataSources: sql`excluded.data_sources`,
         method: sql`excluded.method`,
         observations: sql`excluded.observations`,
+        version: sql`${monitoringPlaybooks.version} + 1`,
         updatedAt: new Date(),
       },
-      setWhere: isNull(monitoringPlaybooks.editedBy),
+      setWhere: and(isNull(monitoringPlaybooks.editedBy), changed),
     })
     .returning({ technology: monitoringPlaybooks.technology });
   return written.length;
 }
 
-/** Write an edited method. */
-export async function updatePlaybook(
+export type PlaybookFields = Pick<
+  PlaybookRow,
+  "framing" | "dataSources" | "method" | "observations"
+>;
+
+/**
+ * Write a method as `owner` sees it. A template edit bumps its version (so org
+ * forks hear about it); an org editing the template gets its own fork; and a type
+ * that has no method yet (`current` null — a new workload type) gets its first.
+ */
+export async function savePlaybook(
+  owner: CatalogueOwner,
   technology: WorkloadTechnology,
-  fields: Pick<
-    PlaybookRow,
-    "framing" | "dataSources" | "method" | "observations"
-  > & { editedBy: string | null },
-): Promise<PlaybookRow | null> {
+  current: CataloguePlaybook | null,
+  fields: PlaybookFields,
+  actorId: string,
+): Promise<PlaybookRow> {
+  if (!current) {
+    const [row] = await db
+      .insert(monitoringPlaybooks)
+      .values({ ...fields, technology, orgId: owner, editedBy: actorId })
+      .returning();
+    return row;
+  }
+  if (owner !== null && current.orgId === null) {
+    const [row] = await db
+      .insert(monitoringPlaybooks)
+      .values({
+        ...fields,
+        technology: current.technology,
+        orgId: owner,
+        editedBy: actorId,
+        basedOnVersion: current.version,
+      })
+      .returning();
+    return row;
+  }
   const [row] = await db
     .update(monitoringPlaybooks)
-    .set({ ...fields, updatedAt: new Date() })
-    .where(eq(monitoringPlaybooks.technology, technology))
+    .set({
+      ...fields,
+      editedBy: actorId,
+      ...(owner === null && { version: sql`${monitoringPlaybooks.version} + 1` }),
+      updatedAt: new Date(),
+    })
+    .where(eq(monitoringPlaybooks.uid, current.uid))
     .returning();
-  return row ?? null;
+  return row;
+}
+
+/** Reset to template: drop the org's fork. */
+export async function deleteOrgPlaybook(
+  orgId: string,
+  technology: WorkloadTechnology,
+): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringPlaybooks)
+    .where(
+      and(eq(monitoringPlaybooks.orgId, orgId), eq(monitoringPlaybooks.technology, technology)),
+    )
+    .returning({ uid: monitoringPlaybooks.uid });
+  return rows.length > 0;
+}
+
+export async function markPlaybookReviewed(
+  orgId: string,
+  technology: WorkloadTechnology,
+  templateVersion: number,
+): Promise<void> {
+  await db
+    .update(monitoringPlaybooks)
+    .set({ basedOnVersion: templateVersion })
+    .where(
+      and(eq(monitoringPlaybooks.orgId, orgId), eq(monitoringPlaybooks.technology, technology)),
+    );
+}
+
+// ---- Workload types (what a workload can be; decision 128) ----
+
+export type WorkloadTypeRow = typeof monitoringWorkloadTypes.$inferSelect;
+
+export type CatalogueWorkloadType = WorkloadTypeRow & {
+  source: CatalogueSource;
+  updateAvailable: boolean;
+  templateVersion: number | null;
+  template: WorkloadTypeRow | null;
+};
+
+/** The types `owner` sees — its own over the templates (or the templates alone). */
+export async function listCatalogueWorkloadTypes(
+  owner: CatalogueOwner,
+): Promise<CatalogueWorkloadType[]> {
+  const rows = await db
+    .select()
+    .from(monitoringWorkloadTypes)
+    .where(templatesAndOrg(monitoringWorkloadTypes.orgId, owner));
+  return overlay(rows, (r) => r.slug);
+}
+
+export async function getCatalogueWorkloadType(
+  owner: CatalogueOwner,
+  slug: string,
+): Promise<CatalogueWorkloadType | null> {
+  const rows = await db
+    .select()
+    .from(monitoringWorkloadTypes)
+    .where(
+      and(
+        eq(monitoringWorkloadTypes.slug, slug),
+        templatesAndOrg(monitoringWorkloadTypes.orgId, owner),
+      ),
+    );
+  return overlay(rows, (r) => r.slug)[0] ?? null;
+}
+
+export type WorkloadTypeFields = Pick<
+  WorkloadTypeRow,
+  "label" | "priority" | "labelValues" | "patterns" | "enabled"
+>;
+
+/**
+ * Seed the shipped types as TEMPLATES, playbook-style: insert what is missing,
+ * refresh an un-edited template whose shipped definition changed (bumping its
+ * version so forks hear of it), never touch an edited one or any org's row.
+ */
+export async function seedWorkloadTypes(
+  rows: (Omit<WorkloadTypeFields, "enabled"> & { slug: string })[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const t = monitoringWorkloadTypes;
+  const changed = sql`(${t.label}, ${t.priority}, ${t.labelValues}, ${t.patterns})
+    is distinct from (excluded.label, excluded.priority, excluded.label_values, excluded.patterns)`;
+  await db
+    .insert(t)
+    .values(rows.map((r) => ({ ...r, builtin: true })))
+    .onConflictDoUpdate({
+      target: [t.orgId, t.slug],
+      set: {
+        label: sql`excluded.label`,
+        priority: sql`excluded.priority`,
+        labelValues: sql`excluded.label_values`,
+        patterns: sql`excluded.patterns`,
+        version: sql`${t.version} + 1`,
+        updatedAt: new Date(),
+      },
+      setWhere: and(isNull(t.editedBy), changed),
+    });
+}
+
+/** A new type: a template (owner `null`) or one only this org has. */
+export async function createWorkloadType(
+  owner: CatalogueOwner,
+  input: WorkloadTypeFields & { slug: string },
+  actorId: string,
+): Promise<WorkloadTypeRow> {
+  const [row] = await db
+    .insert(monitoringWorkloadTypes)
+    .values({ ...input, orgId: owner, editedBy: actorId })
+    .returning();
+  return row;
+}
+
+/**
+ * Write a type as `owner` sees it: a template edit bumps its version; an org
+ * editing a template gets its own copy (the same fork rule as checks/playbooks).
+ */
+export async function saveWorkloadType(
+  owner: CatalogueOwner,
+  current: CatalogueWorkloadType,
+  fields: WorkloadTypeFields,
+  actorId: string,
+): Promise<WorkloadTypeRow> {
+  if (owner !== null && current.orgId === null) {
+    const [row] = await db
+      .insert(monitoringWorkloadTypes)
+      .values({
+        ...fields,
+        slug: current.slug,
+        builtin: current.builtin,
+        orgId: owner,
+        editedBy: actorId,
+        basedOnVersion: current.version,
+      })
+      .returning();
+    return row;
+  }
+  const [row] = await db
+    .update(monitoringWorkloadTypes)
+    .set({
+      ...fields,
+      editedBy: actorId,
+      ...(owner === null && { version: sql`${monitoringWorkloadTypes.version} + 1` }),
+      updatedAt: new Date(),
+    })
+    .where(eq(monitoringWorkloadTypes.uid, current.uid))
+    .returning();
+  return row;
+}
+
+/** Drop the org's row for a slug: "reset" for a fork, delete for an org-only type. */
+export async function deleteOrgWorkloadType(orgId: string, slug: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringWorkloadTypes)
+    .where(and(eq(monitoringWorkloadTypes.orgId, orgId), eq(monitoringWorkloadTypes.slug, slug)))
+    .returning({ uid: monitoringWorkloadTypes.uid });
+  return rows.length > 0;
+}
+
+/** Delete a custom TEMPLATE type (shipped ones can only be disabled). */
+export async function deleteTemplateWorkloadType(slug: string): Promise<boolean> {
+  const rows = await db
+    .delete(monitoringWorkloadTypes)
+    .where(
+      and(
+        isNull(monitoringWorkloadTypes.orgId),
+        eq(monitoringWorkloadTypes.slug, slug),
+        eq(monitoringWorkloadTypes.builtin, false),
+      ),
+    )
+    .returning({ uid: monitoringWorkloadTypes.uid });
+  return rows.length > 0;
+}
+
+export async function markWorkloadTypeReviewed(
+  orgId: string,
+  slug: string,
+  templateVersion: number,
+): Promise<void> {
+  await db
+    .update(monitoringWorkloadTypes)
+    .set({ basedOnVersion: templateVersion })
+    .where(and(eq(monitoringWorkloadTypes.orgId, orgId), eq(monitoringWorkloadTypes.slug, slug)));
+}
+
+/** What would detection see: every workload of an org's clusters with its raw signals. */
+export async function orgWorkloadSignals(orgId: string) {
+  return db
+    .select({
+      clusterName: monitoringClusters.name,
+      kind: monitoringWorkloads.kind,
+      namespace: monitoringWorkloads.namespace,
+      name: monitoringWorkloads.name,
+      images: monitoringWorkloads.images,
+      technology: monitoringWorkloads.technology,
+      technologyOverride: monitoringWorkloads.technologyOverride,
+    })
+    .from(monitoringWorkloads)
+    .innerJoin(monitoringClusters, eq(monitoringClusters.id, monitoringWorkloads.clusterId))
+    .where(eq(monitoringClusters.orgId, orgId));
 }
 
 /**
@@ -284,12 +752,17 @@ export async function updatePlaybook(
  */
 export async function observedKeyCounts(
   keys: readonly string[],
+  owner: CatalogueOwner,
 ): Promise<Record<string, number>> {
   if (keys.length === 0) return {};
+  // An org's readings lock its own keys; a template's keys are locked by
+  // readings in ANY org, since every org that inherits it plots them.
+  const inOrg =
+    owner === null ? undefined : inArray(monitoringObservations.jobId, jobsOfOrg(owner));
   const rows = await db
     .select({ key: monitoringObservations.key, n: count() })
     .from(monitoringObservations)
-    .where(inArray(monitoringObservations.key, [...keys]))
+    .where(and(inArray(monitoringObservations.key, [...keys]), inOrg))
     .groupBy(monitoringObservations.key);
   return Object.fromEntries(rows.map((r) => [r.key, r.n]));
 }
@@ -368,7 +841,7 @@ export interface ClusterListRow extends ClusterSummary {
  * UNQUALIFIED identifiers (`"id"`), which inside a subquery bind to the inner
  * table — silently comparing the wrong columns, or failing as ambiguous.
  */
-export async function listClusters(): Promise<ClusterListRow[]> {
+export async function listClusters(orgId: string): Promise<ClusterListRow[]> {
   const rows = await db
     .select({
       ...CLUSTER_SAFE_COLUMNS,
@@ -381,6 +854,7 @@ export async function listClusters(): Promise<ClusterListRow[]> {
         where j.cluster_id = monitoring_clusters.id and c.status = 'open')`,
     })
     .from(monitoringClusters)
+    .where(eq(monitoringClusters.orgId, orgId))
     .orderBy(asc(monitoringClusters.name));
   return rows;
 }
@@ -396,17 +870,27 @@ export async function getClusterSummary(
   return row ?? null;
 }
 
-/** Full row INCLUDING kubeconfig + Holmes key — server-side use only. */
+/** A cluster row with its two credentials OPENED (they are sealed at rest). */
+function openCluster<T extends { kubeconfig: string; holmesApiKey: string }>(row: T): T {
+  return {
+    ...row,
+    kubeconfig: openSecret(row.kubeconfig),
+    holmesApiKey: openSecret(row.holmesApiKey),
+  };
+}
+
+/** Full row INCLUDING kubeconfig + Holmes key, opened — server-side use only. */
 export async function getClusterSecrets(id: string) {
   const [row] = await db
     .select()
     .from(monitoringClusters)
     .where(eq(monitoringClusters.id, id))
     .limit(1);
-  return row ?? null;
+  return row ? openCluster(row) : null;
 }
 
 export async function createCluster(input: {
+  orgId: string;
   name: string;
   kubeconfig: string;
   holmesUrl: string;
@@ -415,7 +899,12 @@ export async function createCluster(input: {
 }): Promise<ClusterSummary> {
   const [row] = await db
     .insert(monitoringClusters)
-    .values({ ...input, lastValidatedAt: new Date() })
+    .values({
+      ...input,
+      kubeconfig: sealSecret(input.kubeconfig),
+      holmesApiKey: sealSecret(input.holmesApiKey),
+      lastValidatedAt: new Date(),
+    })
     .returning(CLUSTER_SAFE_COLUMNS);
   return row;
 }
@@ -432,7 +921,14 @@ export async function updateCluster(
 ): Promise<ClusterSummary | null> {
   const [row] = await db
     .update(monitoringClusters)
-    .set({ ...fields, updatedAt: new Date() })
+    .set({
+      ...fields,
+      ...(fields.kubeconfig !== undefined && { kubeconfig: sealSecret(fields.kubeconfig) }),
+      ...(fields.holmesApiKey !== undefined && {
+        holmesApiKey: sealSecret(fields.holmesApiKey),
+      }),
+      updatedAt: new Date(),
+    })
     .where(eq(monitoringClusters.id, id))
     .returning(CLUSTER_SAFE_COLUMNS);
   return row ?? null;
@@ -555,6 +1051,14 @@ async function listWorkloadsWhere(
       technologyReason: monitoringWorkloads.technologyReason,
       technologyOverride: monitoringWorkloads.technologyOverride,
       lastSeenAt: monitoringWorkloads.lastSeenAt,
+      // Whether a deep run has a method for it: a playbook for its effective
+      // technology in the cluster's org — its own copy or a template. Plain,
+      // fully-qualified SQL for the reason given on `listClusters`.
+      profiled: sql<boolean>`exists (
+        select 1 from monitoring_playbooks p
+        join monitoring_clusters c on c.id = monitoring_workloads.cluster_id
+        where p.technology = coalesce(monitoring_workloads.technology_override, monitoring_workloads.technology)
+          and (p.org_id is null or p.org_id = c.org_id))`,
     })
     .from(monitoringWorkloads)
     .where(where)
@@ -568,12 +1072,7 @@ async function listWorkloadsWhere(
   // agrees on what a workload IS and on whether a deep run has a method for it.
   return rows.map((row) => {
     const technology = effectiveTechnology(row);
-    return {
-      ...row,
-      technology,
-      technologyDetected: row.technology,
-      profiled: technology !== null && PROFILED_TECHNOLOGIES.includes(technology),
-    };
+    return { ...row, technology, technologyDetected: row.technology };
   });
 }
 
@@ -719,8 +1218,11 @@ const JOB_LIST_EXTRAS = {
     where r.job_id = monitoring_jobs.id)`,
 };
 
-/** Every job, grouped by cluster — feeds the module's tree sidebar. */
-export async function listJobs(clusterId?: string): Promise<JobListRow[]> {
+/** The org's jobs (or one cluster's), grouped by cluster — feeds the tree sidebar. */
+export async function listJobs(
+  orgId: string,
+  clusterId?: string,
+): Promise<JobListRow[]> {
   return db
     .select({
       id: monitoringJobs.id,
@@ -736,7 +1238,16 @@ export async function listJobs(clusterId?: string): Promise<JobListRow[]> {
       ...JOB_LIST_EXTRAS,
     })
     .from(monitoringJobs)
-    .where(clusterId ? eq(monitoringJobs.clusterId, clusterId) : undefined)
+    .innerJoin(
+      monitoringClusters,
+      eq(monitoringClusters.id, monitoringJobs.clusterId),
+    )
+    .where(
+      and(
+        eq(monitoringClusters.orgId, orgId),
+        clusterId ? eq(monitoringJobs.clusterId, clusterId) : undefined,
+      ),
+    )
     .orderBy(asc(monitoringJobs.name));
 }
 
@@ -906,7 +1417,11 @@ export async function getJobExecutionContext(jobId: string) {
     .where(eq(monitoringJobs.id, jobId))
     .limit(1);
   if (!row) return null;
-  return { ...row, targets: await getResolvedJobTargets(jobId) };
+  return {
+    ...row,
+    cluster: openCluster(row.cluster),
+    targets: await getResolvedJobTargets(jobId),
+  };
 }
 
 // ---- Runs / queue ----
@@ -987,11 +1502,39 @@ export async function claimQueuedRuns(
       attempt = ${monitoringRuns.attempt} + 1,
       model = ${JOB_MODEL}
     where id in (
-      select id from ${monitoringRuns}
-      where status = 'queued'
-      order by created_at
+      -- Fair across orgs (decision 130). Rank = the org's running runs plus the
+      -- run's place in its org's queue; ties go to the org served LEAST recently.
+      -- The tie-break is what makes it fair here: this lane runs one at a time, so
+      -- at claim time nobody has anything running and rank alone would collapse
+      -- back into first-in-first-out. Ranked unlocked; only the pick is locked.
+      with org_runs as (
+        select r.id, r.status, r.created_at, r.claimed_at, c.org_id
+        from monitoring_runs r
+        join monitoring_jobs j on j.id = r.job_id
+        join monitoring_clusters c on c.id = j.cluster_id
+        where r.status in ('queued', 'running')
+           or r.claimed_at > now() - interval '1 day'
+      ),
+      running as (
+        select org_id, count(*) as n from org_runs where status = 'running' group by org_id
+      ),
+      served as (
+        select org_id, max(claimed_at) as last from org_runs group by org_id
+      ),
+      ranked as (
+        select q.id, q.created_at, s.last,
+          coalesce(n.n, 0) + row_number() over (partition by q.org_id order by q.created_at) as fair
+        from org_runs q
+        left join running n on n.org_id = q.org_id
+        left join served s on s.org_id = q.org_id
+        where q.status = 'queued'
+      )
+      select m.id from ${monitoringRuns} m
+      join ranked k on k.id = m.id
+      where m.status = 'queued'
+      order by k.fair, k.last nulls first, k.created_at
       limit ${limit}
-      for update skip locked
+      for update of m skip locked
     )
     returning id, job_id
   `);

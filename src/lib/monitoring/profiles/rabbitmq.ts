@@ -4,30 +4,28 @@ import type { Playbook } from "../playbook";
 /**
  * RabbitMQ.
  *
- * This profile carries two coverage limits that are real in THIS cluster and that the
- * playbook states out loud rather than working around:
+ * This profile carries two common coverage limits that the playbook makes the agent
+ * check for out loud rather than work around (the first install had both):
  *
- * 1. **There is no Prometheus exporter.** The broker's `rabbitmq_prometheus` plugin is
- *    not exposed (no `:15692`, no ServiceMonitor), so nothing about RabbitMQ is
- *    historical. Every number is point-in-time, which makes "is this queue draining or
- *    growing?" — the question that actually matters about a queue — unanswerable from
- *    metrics alone. The checks are written so that the honest answer is a skip rather
- *    than a guess dressed as a trend.
- * 2. **The management-API toolset is configured for ONE broker.** Namespaces here run
- *    several (`rabbitmq`, `rabbitmq-request`, `rabbitmq-database`), and the ones not
- *    configured are unreachable through the toolset. Assessing the wrong broker with
- *    the right API is worse than admitting the gap, so the method says to verify the
- *    endpoint identity before trusting anything it returns.
+ * 1. **No Prometheus exporter.** Where the broker's `rabbitmq_prometheus` plugin is
+ *    not scraped, nothing about RabbitMQ is historical. Every number is point-in-time,
+ *    which makes "is this queue draining or growing?" — the question that actually
+ *    matters about a queue — unanswerable from metrics alone. The checks are written
+ *    so that the honest answer is then a skip rather than a guess dressed as a trend.
+ * 2. **A management-API toolset configured for ONE broker** while a namespace runs
+ *    several. Assessing the wrong broker with the right API is worse than admitting
+ *    the gap, so the method says to verify the endpoint identity before trusting
+ *    anything it returns.
  */
 
 export const RABBITMQ_PLAYBOOK: Playbook = {
   technology: "rabbitmq",
   framing:
-    "A broker is healthy when messages leave as fast as they arrive, and everything that matters follows from that. The failures worth catching are: a queue growing with no consumer attached (nobody is listening, and nothing will tell you); a memory or disk alarm putting publishers into flow control, which looks to the application like a hung request rather than an error; and an unbounded queue with no dead-letter path, which converts one stuck consumer into an outage. Note before you start: this deployment exposes no RabbitMQ metrics, so you have point-in-time state only — say so rather than inferring a trend you cannot see.",
+    "A broker is healthy when messages leave as fast as they arrive, and everything that matters follows from that. The failures worth catching are: a queue growing with no consumer attached (nobody is listening, and nothing will tell you); a memory or disk alarm putting publishers into flow control, which looks to the application like a hung request rather than an error; and an unbounded queue with no dead-letter path, which converts one stuck consumer into an outage. Find out first whether RabbitMQ metrics are scraped at all: without them you have point-in-time state only — say so rather than inferring a trend you cannot see.",
   dataSources: [
-    "Management API: use the RabbitMQ toolset for cluster status, node info, queue and exchange details, and memory and disk usage. IMPORTANT: the toolset is configured for a single broker, while this namespace may run several — verify that the endpoint it talks to is actually {{name}} in {{namespace}} (compare node names and the queue set) before trusting the numbers. If it is a different broker, every check here belongs in \"skipped\" with that reason.",
-    "Metrics: there is NO RabbitMQ exporter in this cluster — no `rabbitmq_*` series exist. Container and PVC series (`container_memory_working_set_bytes`, `kubelet_volume_stats_*`) cover the pod, and that is all. Do not report queue depths or rates as if they came from Prometheus.",
-    "Logs: the pod logs for {{name}} in namespace {{namespace}}, and Loki for a longer window. With no metrics history, the logs are the ONLY historical evidence available here — alarms, partitions and connection churn all leave traces there, and that makes the log window the closest thing to a trend you have.",
+    "Management API: use the RabbitMQ toolset for cluster status, node info, queue and exchange details, and memory and disk usage. IMPORTANT: a RabbitMQ toolset usually points at one broker, while a namespace may run several — verify that the endpoint it talks to is actually {{name}} in {{namespace}} (compare node names and the queue set) before trusting the numbers. If it is a different broker, every check here belongs in \"skipped\" with that reason.",
+    "Metrics: if the RabbitMQ Prometheus plugin is scraped, `rabbitmq_*` series exist and give queue depth and rates over time — list them first. If there are none, container and PVC series (`container_memory_working_set_bytes`, `kubelet_volume_stats_*`) cover only the pod: do not report queue depths or rates as if they came from Prometheus.",
+    "Logs: the pod logs for {{name}} in namespace {{namespace}}, and Loki for a longer window if the cluster has it. With no metrics history, the logs are the ONLY historical evidence available — alarms, partitions and connection churn all leave traces there, and that makes the log window the closest thing to a trend you have.",
     "Kubernetes: the workload {{name}} in {{namespace}}, its pods, its PVC, and its resource limits. The memory watermark question below is answered against the container limit.",
     "Node: the node each pod is scheduled on and its allocatable memory, because RabbitMQ's default memory watermark is a fraction of the HOST's memory and is therefore wrong wherever a container limit is lower.",
   ],
@@ -41,7 +39,7 @@ export const RABBITMQ_PLAYBOOK: Playbook = {
     "Check queue configuration for the failure modes: queues with no max-length and no dead-letter exchange are unbounded, so one stuck consumer fills memory until the alarm fires. Note durability too — a durable queue holding transient messages is not actually safe.",
     "Check the cluster: node states, the partition-handling strategy, and whether any partition has occurred. Then check queue types — classic mirrored queues are deprecated and lose data on failover in ways quorum queues do not.",
     "Check the Erlang runtime's ceilings: file descriptors, sockets and Erlang processes against their limits. A file-descriptor ceiling is a hard outage that arrives without warning, and it is invisible from Kubernetes.",
-    "Check connection and channel churn from the logs: a client opening a connection per message is the classic RabbitMQ antipattern, and with no metrics the log is where it shows up.",
+    "Check connection and channel churn from the logs: a client opening a connection per message is the classic RabbitMQ antipattern, and without metrics the log is where it shows up.",
     "If you need a rate rather than a level, take a second sample — but note that repeating an identical tool call is refused, so vary the call (a different queue subset, for instance). If you cannot get two samples, report the level and say explicitly that no trend was measurable.",
   ],
   observations: [
@@ -84,7 +82,7 @@ export const RABBITMQ_PLAYBOOK: Playbook = {
     { key: "channels.total", source: "engine", unit: "count", how: "open channels" },
     { key: "logs.alarm_events", source: "logs", unit: "count", how: "memory or disk alarm messages in the window examined" },
     { key: "logs.connection_churn_events", source: "logs", unit: "count", how: "connection open/close pairs suggesting per-request connections" },
-    { key: "logs.window_hours", source: "logs", unit: "hours", how: "how far back the log window actually reaches — the only history available here" },
+    { key: "logs.window_hours", source: "logs", unit: "hours", how: "how far back the log window actually reaches — the only history when no metrics are scraped" },
   ],
 };
 
@@ -256,7 +254,7 @@ export const RABBITMQ_CHECKS: readonly MonitorCheck[] = [
     title: "Queue depth high",
     baseSeverity: "medium",
     question:
-      "What is the deepest queue, and is its depth reasonable for its purpose? Because this deployment exposes no RabbitMQ metrics, state plainly whether you could measure a trend or only a level — a large but draining queue is healthy, and without two samples you cannot tell the difference.",
+      "What is the deepest queue, and is its depth reasonable for its purpose? Unless RabbitMQ metrics are scraped, state plainly whether you could measure a trend or only a level — a large but draining queue is healthy, and without two samples you cannot tell the difference.",
     evidence:
       "The queue, its depth, consumer count, and whether a second sample was obtained; say so explicitly when it was not.",
     reference: "RabbitMQ docs: Queues — monitoring queue length",

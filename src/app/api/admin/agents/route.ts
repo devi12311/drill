@@ -1,8 +1,9 @@
-import { getAdminActor, forbidden } from "@/lib/auth/session";
-import { listAllAgents } from "@/lib/db/admin-queries";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { listAgentHealth } from "@/lib/db/admin-queries";
 
+/** The active org's agents — org section of the console. */
 export async function GET() {
-  if (!(await getAdminActor())) return forbidden();
-  const agents = await listAllAgents();
-  return Response.json({ agents });
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
+  return Response.json({ agents: await listAgentHealth(ctx.orgId) });
 }

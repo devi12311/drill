@@ -1,6 +1,8 @@
 import "server-only";
 import { cache } from "react";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { LOGIN_PATH, NO_ORG_PATH } from "@/lib/routes";
 import {
   signSession,
   signImpersonation,
@@ -10,7 +12,10 @@ import {
 } from "./jwt";
 import { SESSION_COOKIE } from "./session-cookie";
 import { IMPERSONATION_COOKIE } from "./impersonation-cookie";
-import { getUserById } from "@/lib/db/queries";
+import { ORG_COOKIE } from "./org-cookie";
+import { getUserById, type ManagerScope } from "@/lib/db/queries";
+import { listMemberships, type Membership } from "@/lib/db/org-queries";
+import { isOrgAdmin, type OrgRole } from "@/lib/orgs/types";
 import type { SessionUser } from "./me";
 
 export { SESSION_COOKIE };
@@ -59,6 +64,7 @@ export async function clearSession(): Promise<void> {
   store.delete(SESSION_COOKIE);
   // Never leave a dangling impersonation cookie after logout.
   store.delete(IMPERSONATION_COOKIE);
+  store.delete(ORG_COOKIE);
 }
 
 /** Begin impersonating a target user (caller must have verified admin + target). */
@@ -143,13 +149,105 @@ export async function getAuthUser(): Promise<AuthUser | null> {
 }
 
 /**
+ * Who is asking AND in which org — the context every tenant-owned query takes.
+ * Route handlers use this, not `getAuthUser()`, whenever they touch org data:
+ * the org filter then lives in one place (the query layer, keyed on `orgId`)
+ * instead of being remembered per handler. It IS a query Scope, so a handler
+ * passes it straight through.
+ */
+export interface AuthContext extends ManagerScope {
+  user: AuthUser;
+  orgName: string;
+  orgRole: OrgRole;
+  /** Every org the user is in — the switcher's list, read in the same query. */
+  memberships: Membership[];
+}
+
+/**
+ * The active org for a user: the browser's chosen one if they still belong to
+ * it, else their oldest membership. Membership is re-read per request (not put
+ * in the JWT), so removing someone from an org takes effect at once.
+ */
+async function contextFor(user: AuthUser): Promise<AuthContext | null> {
+  const memberships = await listMemberships(user.id);
+  if (memberships.length === 0) return null;
+  const preferred = (await cookies()).get(ORG_COOKIE)?.value;
+  const active =
+    memberships.find((m) => m.orgId === preferred) ?? memberships[0];
+  return {
+    user,
+    userId: user.id,
+    orgId: active.orgId,
+    orgName: active.orgName,
+    orgRole: active.role,
+    isOrgAdmin: isOrgAdmin(active.role),
+    memberships,
+  };
+}
+
+/**
+ * Make an org the browser's active one. Callers must have checked membership —
+ * though a wrong id is harmless: `contextFor` ignores an org the user is not in.
+ */
+export async function setActiveOrg(orgId: string): Promise<void> {
+  const store = await cookies();
+  // Same lifetime as the session it qualifies.
+  store.set(ORG_COOKIE, orgId, cookieOptions(COOKIE_MAX_AGE));
+}
+
+/**
+ * The effective user (impersonation applied, like `getAuthUser`) in their active
+ * org, or null when unauthenticated or in no org at all. Memoized per request:
+ * the shell and the page both resolve it.
+ */
+export const getAuthContext = cache(async function getAuthContext(): Promise<AuthContext | null> {
+  const user = await getAuthUser();
+  return user ? contextFor(user) : null;
+});
+
+/**
+ * For server pages: the session user, or a redirect — to the no-org screen when
+ * signed in but in no org (so they can start one or open an invite), else to
+ * login. One rule for the `(app)` shell and the root router.
+ */
+export async function requireSessionUser(): Promise<SessionUser> {
+  const user = await getSessionUser();
+  if (user) return user;
+  redirect((await getAuthUser()) ? NO_ORG_PATH : LOGIN_PATH);
+}
+
+/** Who may use the admin console, and how much of it. */
+export interface ConsoleContext extends AuthContext {
+  /** Platform admin: also the cross-org sections (users, audit, orgs, catalogue). */
+  isPlatformAdmin: boolean;
+}
+
+/**
+ * The admin console's gate: the REAL user (impersonation ignored, so an admin
+ * acting as someone keeps the console) in their own active org — allowed when
+ * they run that org (owner/admin) or operate the platform. The org-scoped
+ * sections (monitoring, cost, activity, agents) read `orgId` from it; the
+ * platform-only ones additionally require `isPlatformAdmin` (or `getAdminActor`).
+ */
+export const getConsoleContext = cache(async function getConsoleContext(): Promise<ConsoleContext | null> {
+  const real = await getRealUser();
+  if (!real) return null;
+  const ctx = await contextFor(real);
+  if (!ctx) return null;
+  const isPlatformAdmin = real.role === "admin";
+  if (!isPlatformAdmin && !ctx.isOrgAdmin) return null;
+  return { ...ctx, isPlatformAdmin };
+});
+
+/**
  * `getAuthUser()` projected onto the client-safe `SessionUser` contract. One
  * implementation feeds both `GET /api/auth/me` and the server-rendered `(app)`
  * shell, so the browser and the server never disagree about who is logged in.
  */
 export async function getSessionUser(): Promise<SessionUser | null> {
-  const user = await getAuthUser();
-  if (!user) return null;
+  const ctx = await getAuthContext();
+  if (!ctx) return null;
+  const { user } = ctx;
   const impersonating = Boolean(user.impersonatorId);
   return {
     id: user.id,
@@ -161,6 +259,9 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     // Impersonation is only ever honoured for a *currently* admin actor
     // (see getAuthUser), so the flag alone proves the actor is an admin.
     actorIsAdmin: user.role === "admin" || impersonating,
+    org: { id: ctx.orgId, name: ctx.orgName, role: ctx.orgRole },
+    orgs: ctx.memberships.map((m) => ({ id: m.orgId, name: m.orgName, role: m.role })),
+    isOrgAdmin: ctx.isOrgAdmin,
   };
 }
 

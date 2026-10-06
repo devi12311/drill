@@ -1,3 +1,4 @@
+import { cataloguePageOwner } from "@/lib/monitoring/access";
 import { ChecksBrowser } from "@/components/monitoring/checks-browser";
 import { checkListItems } from "@/lib/monitoring/checks";
 
@@ -15,6 +16,21 @@ import { checkListItems } from "@/lib/monitoring/checks";
  * Server-rendered: the catalogue is the page's whole content, so fetching it from
  * the browser on mount only bought a round-trip of "Loading…".
  */
-export default async function ChecksPage() {
-  return <ChecksBrowser checks={await checkListItems()} />;
+export default async function ChecksPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ scope?: string }>;
+}) {
+  // The org's effective catalogue by default; platform admins can switch to the
+  // shared templates every org inherits (docs/DECISIONS.md 126).
+  const { owner, scope, canEditTemplates } = await cataloguePageOwner(
+    (await searchParams).scope,
+  );
+  return (
+    <ChecksBrowser
+      checks={await checkListItems(owner)}
+      scope={scope}
+      canEditTemplates={canEditTemplates}
+    />
+  );
 }

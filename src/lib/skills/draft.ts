@@ -5,7 +5,7 @@ import { SKILL_LIMITS, validateSkillDraft, type SkillDraft } from "./types";
 /**
  * Drafting a skill with Holmes. Holmes rather than a bare model, because its
  * system prompt already describes this deployment's toolsets — so the draft can
- * name `prod-mongo` or `tempo-v1` instead of inventing tools. Nothing is saved:
+ * name its real toolsets (`kubernetes/logs`, a database toolset) instead of inventing tools. Nothing is saved:
  * the draft fills the editor, and the author reviews it before saving.
  */
 
@@ -23,7 +23,7 @@ const SKILL_RESPONSE_FORMAT = {
       properties: {
         name: {
           type: "string",
-          description: "Lowercase slug of letters, digits and hyphens, 3-64 chars, e.g. cost-problems-investigation",
+          description: "Lowercase slug of letters, digits and hyphens, 3-64 chars, e.g. checkout-latency-investigation",
         },
         description: {
           type: "string",
@@ -36,8 +36,8 @@ const SKILL_RESPONSE_FORMAT = {
             additionalProperties: false,
             required: ["key", "label", "required"],
             properties: {
-              key: { type: "string", description: "snake_case, e.g. integration_id" },
-              label: { type: "string", description: "Human label, e.g. Integration id" },
+              key: { type: "string", description: "snake_case, e.g. service_name" },
+              label: { type: "string", description: "Human label, e.g. Service name" },
               required: { type: "boolean" },
             },
           },
@@ -71,7 +71,7 @@ WHAT THE AUTHOR WANTS
 ${input.request}
 ${current}
 HOW TO WRITE IT
-- Use the toolsets you actually have in this deployment and name them exactly (e.g. \`prod-mongo\`, \`tempo-v1\`, \`kubernetes/logs\`). Never invent a toolset; if a step needs one you lack, say so in the step.
+- Use the toolsets you actually have in this deployment and name them exactly (e.g. \`kubernetes/logs\`, \`prometheus/metrics\`, or a database toolset). Never invent a toolset; if a step needs one you lack, say so in the step.
 - You MAY make at most 3 read-only tool calls, and only to confirm an exact name the procedure depends on (a collection, a service, a span name). Never run anything that changes state.
 - Inputs are the values a person supplies when running the skill (ids, dates). Reference each one in the body as {{key}} — only declared keys; no other double braces anywhere in the body.
 - Body structure, in markdown:

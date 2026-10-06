@@ -10,7 +10,7 @@ interface AgentHealthRow {
   id: string;
   name: string;
   url: string;
-  ownerUsername: string;
+  addedByUsername: string | null;
   lastValidatedAt: string | null;
   conversationCount: number;
 }
@@ -27,9 +27,9 @@ export default function AdminAgentsPage() {
   const columns: Column<AgentHealthRow>[] = [
     { key: "name", header: "Agent", render: (a) => a.name },
     {
-      key: "ownerUsername",
-      header: "Owner",
-      render: (a) => a.ownerUsername,
+      key: "addedByUsername",
+      header: "Added by",
+      render: (a) => a.addedByUsername ?? "—",
     },
     {
       key: "url",

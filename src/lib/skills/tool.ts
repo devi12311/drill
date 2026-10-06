@@ -15,7 +15,7 @@ export const FETCH_SKILL_TOOL_DEF: FrontendToolDef = {
     properties: {
       skill_name: {
         type: "string",
-        description: "Exactly as listed in the Drill skills catalog, e.g. cost-problems-investigation",
+        description: "Exactly as listed in the Drill skills catalog, e.g. checkout-latency-investigation",
       },
     },
     required: ["skill_name"],
@@ -32,10 +32,10 @@ export async function runFetchSkill(
   ctx: FrontendToolContext,
 ): Promise<FrontendToolOutcome> {
   const name = String(args.skill_name ?? "").trim();
-  const skill = name ? await getUsableSkill(ctx.userId, { name }) : null;
+  const skill = name ? await getUsableSkill(ctx, { name }) : null;
   if (skill) return { data: renderFetched(skill), status: "success" };
   // Same shape as Holmes's own miss, so the model recovers the same way.
-  const available = (await usableSkills(ctx.userId))
+  const available = (await usableSkills(ctx))
     .filter((s) => !s.alwaysOn)
     .map((s) => s.name);
   return {

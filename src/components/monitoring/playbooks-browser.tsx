@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { Button } from "@/components/ui/button";
 import { DialogBody } from "@/components/ui/dialog";
@@ -16,7 +16,18 @@ import {
   ModalFooter,
   useDefinitionParam,
 } from "@/components/monitoring/definition-modal";
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 import { PlaybookForm } from "@/components/monitoring/playbook-form";
+import { PlaybookDiffPanel } from "@/components/monitoring/playbook-diff";
+import { CatalogueScopeSwitch } from "@/components/monitoring/catalogue-scope-switch";
+import { Badge } from "@/components/ui/badge";
+import { ConfirmButton } from "@/components/ui/confirm-button";
+import { diffMethod } from "@/lib/monitoring/playbook-diff";
+import {
+  SOURCE_LABEL,
+  scopedUrl,
+  type CatalogueScope,
+} from "@/lib/monitoring/catalogue-scope";
 import { formatDateTime } from "@/lib/admin/format";
 import { useAdminData } from "@/lib/admin/use-admin-data";
 import { useRefreshThenNavigate } from "@/lib/admin/use-refresh-then-navigate";
@@ -24,10 +35,8 @@ import type {
   PlaybookSummary,
   PlaybookView,
 } from "@/lib/monitoring/playbook";
-import type { WorkloadTechnology } from "@/lib/monitoring/types";
 import {
   OBSERVATION_SOURCE_LABEL,
-  TECHNOLOGY_LABEL,
 } from "@/lib/monitoring/ui";
 
 /**
@@ -40,17 +49,31 @@ import {
  */
 export function PlaybooksBrowser({
   summaries,
+  scope,
+  canEditTemplates,
 }: {
   summaries: PlaybookSummary[];
+  /** The org's effective methods, or the shared templates (platform admins). */
+  scope: CatalogueScope;
+  canEditTemplates: boolean;
 }) {
+  const { label } = useTechnologies();
   const [openTechnology, setOpenTechnology] = useDefinitionParam("playbook");
 
   return (
     <div className="space-y-6">
       <AdminPageHeader
-        title="Investigation playbooks"
-        description="How a deep assessment investigates each technology: where that engine's data lives, the order to look in, and the measurements it must bring back. The rubric says what is asked; this says how — and a deep run carries it verbatim in the prompt."
-      />
+        title={scope === "templates" ? "Playbook templates" : "Investigation playbooks"}
+        description={
+          scope === "templates"
+            ? "The shared methods every organization inherits. An edit reaches every org that has not customized that method; orgs that have are told the template changed."
+            : "How a deep assessment investigates each technology: where that engine's data lives, the order to look in, and the measurements it must bring back. Editing a shared method gives your organization its own copy, tuned to your clusters."
+        }
+      >
+        {canEditTemplates && (
+          <CatalogueScopeSwitch path="/admin/monitoring/profiles" scope={scope} />
+        )}
+      </AdminPageHeader>
 
       <Disclosure
         label="Why a method never decides what counts as a problem"
@@ -70,9 +93,24 @@ export function PlaybooksBrowser({
           <DefinitionTile
             key={profile.technology}
             id={profile.technology}
-            title={TECHNOLOGY_LABEL[profile.technology]}
-            meta={`${profile.checkCount} checks · ${profile.observationCount} measurements`}
-            marker={profile.editedAt ? "edited" : undefined}
+            title={label(profile.technology)}
+            meta={
+              profile.missing
+                ? `${profile.checkCount} checks · no method yet — write one`
+                : `${profile.checkCount} checks · ${profile.observationCount} measurements`
+            }
+            dimmed={profile.missing}
+            marker={
+              profile.missing
+                ? "no playbook"
+                : profile.updateAvailable
+                ? "update"
+                : profile.source !== "template"
+                  ? SOURCE_LABEL[profile.source]
+                  : profile.editedAt
+                    ? "edited"
+                    : undefined
+            }
             onOpen={setOpenTechnology}
           />
         ))}
@@ -85,6 +123,7 @@ export function PlaybooksBrowser({
         summary={
           summaries.find((p) => p.technology === openTechnology) ?? null
         }
+        scope={scope}
         onClose={() => setOpenTechnology(null)}
       />
     </div>
@@ -93,19 +132,58 @@ export function PlaybooksBrowser({
 
 function PlaybookPanel({
   summary,
+  scope,
   onClose,
 }: {
   summary: PlaybookSummary | null;
+  scope: CatalogueScope;
   onClose: () => void;
 }) {
+  const { label } = useTechnologies();
   const refresh = useRefreshThenNavigate();
-  const detail = useAdminData<{ profile: PlaybookView }>(
-    summary ? `/api/admin/monitoring/profiles/${summary.technology}` : "",
-    [summary?.technology],
-  );
+  const url = summary
+    ? scopedUrl(`/api/admin/monitoring/profiles/${summary.technology}`, scope)
+    : "";
+  const detail = useAdminData<{ profile: PlaybookView }>(url, [
+    summary?.technology,
+    scope,
+  ]);
   const open = summary && detail.data ? detail.data.profile : null;
-  const [editing, setEditing] = useState(false);
+  // A type with no method yet has nothing to read — open straight into writing it.
+  const [editing, setEditing] = useState(summary?.missing ?? false);
   const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  /** In an org's catalogue, editing a template creates the org's own copy. */
+  const forks = scope === "org" && summary?.source === "template";
+  // What the template changed relative to the org's copy, when it moved on.
+  const templateDiff = useMemo(
+    () =>
+      open?.template && open.updateAvailable
+        ? diffMethod(open, open.template, { detail: true })
+        : null,
+    [open],
+  );
+
+  /** Reset to template (DELETE) or keep the org's copy (reviewed); both close. */
+  async function act(method: "DELETE" | "POST") {
+    if (!summary) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(
+        method === "DELETE" ? url : `/api/admin/monitoring/profiles/${summary.technology}/reviewed`,
+        { method },
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      onClose();
+      refresh(null);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Action failed");
+      setBusy(false);
+    }
+  }
 
   /**
    * Every way out of the panel — Escape, the overlay, the X, Cancel — comes
@@ -121,11 +199,19 @@ function PlaybookPanel({
       onClose={onClose}
       confirmClose={mayDiscard}
       title={
-        summary ? TECHNOLOGY_LABEL[summary.technology as WorkloadTechnology] : ""
+        summary ? label(summary.technology) : ""
       }
       badges={
         summary && (
-          <span className="text-caption-tracked text-bone-gray">
+          <span className="flex flex-wrap items-center gap-2 text-caption-tracked text-bone-gray">
+            {scope === "org" && (
+              <Badge variant="outline" className="text-bone-gray">
+                {summary.missing ? "no playbook yet" : SOURCE_LABEL[summary.source]}
+              </Badge>
+            )}
+            {summary.updateAvailable && (
+              <span className="uppercase text-traffic-yellow">template updated</span>
+            )}
             {summary.checkCount} checks · {summary.observationCount} measurements
             {/* Worth stating, because an edited method stops tracking the text
                 this release ships — that is what `edited_by` guards. */}
@@ -149,6 +235,7 @@ function PlaybookPanel({
       ) : editing ? (
         <PlaybookForm
           playbook={open}
+          scope={scope}
           onDirtyChange={setDirty}
           onCancel={() => {
             if (!mayDiscard()) return;
@@ -170,6 +257,14 @@ function PlaybookPanel({
       ) : (
         <>
           <DialogBody className="space-y-4">
+            {actionError && (
+              <p className="text-body-sm text-traffic-red">{actionError}</p>
+            )}
+            {templateDiff && (
+              <DefinitionBlock label="The shared template changed">
+                <PlaybookDiffPanel diff={templateDiff} beforeLabel="your copy" />
+              </DefinitionBlock>
+            )}
             <p className="max-w-[90ch] text-body-sm text-pale-stone">
               {open.framing}
             </p>
@@ -248,7 +343,32 @@ function PlaybookPanel({
           </DialogBody>
 
           <ModalFooter>
-            <Button onClick={() => setEditing(true)}>Edit</Button>
+            <Button
+              disabled={busy}
+              onClick={() => setEditing(true)}
+              title={
+                forks
+                  ? "Gives your organization its own copy; the shared method is unchanged"
+                  : undefined
+              }
+            >
+              {forks ? "Customize" : "Edit"}
+            </Button>
+            {open.updateAvailable && (
+              <Button variant="outline" disabled={busy} onClick={() => act("POST")}>
+                Keep my version
+              </Button>
+            )}
+            {scope === "org" && open.source === "override" && (
+              <ConfirmButton
+                label="Reset to template"
+                title="Reset to the shared method?"
+                description="Your organization's copy is discarded and deep runs use the shared template from the next run on. Measurements already recorded keep their history."
+                confirmLabel="Reset"
+                disabled={busy}
+                onConfirm={() => act("DELETE")}
+              />
+            )}
             <Button variant="ghost" className="ml-auto" onClick={onClose}>
               Close
             </Button>

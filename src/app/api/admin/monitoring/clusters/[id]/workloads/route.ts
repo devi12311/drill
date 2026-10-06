@@ -1,14 +1,12 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { writeAudit } from "@/lib/db/admin-queries";
 import {
   getClusterSummary,
   setWorkloadTechnology,
 } from "@/lib/db/monitoring-queries";
-import { asTechnology } from "@/lib/monitoring/technology";
-import {
-  WORKLOAD_KINDS,
-  WORKLOAD_TECHNOLOGY_OPTIONS,
-} from "@/lib/monitoring/types";
+import { isAssignableType } from "@/lib/monitoring/workload-types-live";
+import { WORKLOAD_KINDS } from "@/lib/monitoring/types";
 import type { WorkloadKind } from "@/lib/monitoring/types";
 
 // Next 16: route params are async.
@@ -27,9 +25,10 @@ type Context = { params: Promise<{ id: string }> };
  * says.
  */
 export async function PATCH(request: Request, context: Context) {
-  const actor = await getAdminActor();
-  if (!actor) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { cluster: id }))) return monitoringNotFound();
   const cluster = await getClusterSummary(id);
   if (!cluster) return Response.json({ error: "Not found" }, { status: 404 });
 
@@ -54,19 +53,14 @@ export async function PATCH(request: Request, context: Context) {
       { status: 400 },
     );
 
-  // Explicit null clears the override; anything else must be in the vocabulary —
-  // and specifically in the WORKLOAD half of it. `kubernetes` names the cluster
-  // itself, so marking a Deployment as that would hand it the cluster method and
-  // file its findings under cluster checks.
+  // Explicit null clears the override; anything else must be one of the org's
+  // ENABLED workload types. `kubernetes` is never one — it names the cluster
+  // itself, so marking a Deployment as that would hand it the cluster method.
   const clearing = body.technology === null || body.technology === "";
-  const parsed = clearing ? null : asTechnology(body.technology);
-  const technology =
-    parsed && WORKLOAD_TECHNOLOGY_OPTIONS.includes(parsed) ? parsed : null;
-  if (!clearing && !technology)
+  const technology = clearing ? null : String(body.technology).toLowerCase();
+  if (technology !== null && !(await isAssignableType(ctx.orgId, technology)))
     return Response.json(
-      {
-        error: `technology must be null or one of: ${WORKLOAD_TECHNOLOGY_OPTIONS.join(", ")}`,
-      },
+      { error: "technology must be null or one of this organization's enabled workload types" },
       { status: 400 },
     );
 
@@ -78,7 +72,8 @@ export async function PATCH(request: Request, context: Context) {
     );
 
   await writeAudit({
-    actorId: actor.id,
+    actorId: ctx.userId,
+    orgId: ctx.orgId,
     action: "monitoring.workload.technology_set",
     metadata: { clusterId: id, ...target, technology },
   });

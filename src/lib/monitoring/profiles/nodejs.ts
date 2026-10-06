@@ -6,13 +6,13 @@ import type { Playbook } from "../playbook";
  * source code — and the only profile where the investigation can end at a line
  * number rather than a metric.
  *
- * The honest limitation, stated in the playbook as well as here: this cluster
- * exposes NO application-level RED metrics. Nothing scrapes request rate, error
- * rate or latency from the services themselves, so the golden signals have to be
- * reconstructed from traces and logs. Traces come from Tempo 1.3, which has no
- * TraceQL and only tag-equality search over a recent window. That makes some
- * questions answerable only approximately, which is a reason to say so in the
- * evidence — never a reason to guess.
+ * The usual limitation, which the method makes the agent check rather than assume:
+ * many services export NO application-level RED metrics, so the golden signals have
+ * to be reconstructed from traces and logs — and tracing backends differ in what
+ * their search can do. That makes some questions answerable only approximately,
+ * which is a reason to say so in the evidence — never a reason to guess. (The first
+ * install's specifics — its tracing backend, repo naming, branch-from-tag rule —
+ * live in that org's own copy of this playbook, decision 127.)
  */
 
 export const NODEJS_PLAYBOOK: Playbook = {
@@ -20,22 +20,22 @@ export const NODEJS_PLAYBOOK: Playbook = {
   framing:
     "A Node.js service fails in ways its container spec cannot show you. It is single-threaded, so CPU saturation appears as latency rather than as high CPU; its heap ceiling is set by a flag rather than by the container limit, so it gets OOMKilled while looking healthy; and its worst outages are usually caused by a dependency it calls badly rather than by its own code. Investigate outward: what users see, then what the runtime is doing, then what it calls, then what the code actually does at the deployed revision.",
   dataSources: [
-    "Traces: the Tempo toolset. Search is tag-equality only, over recent traces — no TraceQL, no trace-derived metrics. The service tag matches this workload's name; try `service.name=<NAME>` in upper case first, since these services report it that way. Search by `http.status_code=500` to find failures, then fetch full traces by ID.",
-    "Logs: pod logs for {{name}} in namespace {{namespace}}, and Loki for a longer window. Available Loki labels are app, component, container, filename, job, level, namespace, node_name, pod, stream — note there is NO service label, so select by namespace and pod prefix.",
-    "Metrics: PromQL, but for infrastructure only — container CPU, throttling, memory working set, restarts, and node state. There is no application RED metric here; do not report request rate, error rate or latency as if it came from Prometheus.",
-    "Code: the source repository via the Bitbucket toolset. The repo name matches this workload's name case-insensitively. The deployed revision is the leading alphabetic segment of the container image tag (a tag like `rc-3-2026-07-03-13-30` means branch `rc`); verify that branch exists and say so if you fall back to the default branch.",
+    "Traces: the tracing toolset, if one is configured (Tempo, Jaeger…). Find out what its search supports and which tag carries the service name — it may not match the workload name exactly, so try the obvious spellings — before relying on it. Search for 5xx status codes to find failures, then fetch full traces by ID.",
+    "Logs: pod logs for {{name}} in namespace {{namespace}}, and Loki for a longer window if the cluster has it — list its labels first; where there is no service label, select by namespace and pod prefix.",
+    "Metrics: PromQL for infrastructure — container CPU, throttling, memory working set, restarts, and node state. Check whether the service exports application RED metrics (request rate, errors, duration) at all; if it does not, do not report them as if they came from Prometheus.",
+    "Code: if a source-code toolset is configured, the repository for this workload at the deployed revision. Derive the revision from the image tag or the workload's labels and annotations where you can, verify it exists, and say so if you fall back to the default branch.",
     "Kubernetes: the Deployment {{name}} in {{namespace}} — container args and env (heap flags, NODE_ENV, log level), probes, lifecycle hooks, terminationGracePeriodSeconds, resource requests and limits, and any HPA targeting it.",
   ],
   method: [
     "Start with what users see: find failing requests in traces (status 5xx) and error-level lines in logs over the longest window available. Establish the error rate as a proportion of traffic, and say which source and window it came from.",
-    "Establish latency from trace durations for the busiest endpoints — not from Prometheus, which has no application timings here.",
+    "Establish latency from trace durations for the busiest endpoints, or from application metrics where they exist — never from container metrics, which hold no request timings.",
     "Check the runtime's shape against the container: CPU limit versus one core (a limit below 1000m on a single-threaded runtime caps throughput and shows up as queueing), CPU throttling ratio, and memory working set against the limit.",
     "Check the heap ceiling explicitly: look for --max-old-space-size or NODE_OPTIONS in args and env, and compare it to the container memory limit. A heap ceiling at or above the limit means the process is killed before V8 ever runs a full GC.",
     "Check crash history: restart counts, last terminated reason, OOMKilled events, and unhandled rejection or uncaught exception lines in the logs.",
     "Check what it calls: from full traces, the outbound spans — database, broker and HTTP calls — their latencies and failure rates, and whether a slow dependency explains the latency you measured in step 2. Look for the same query repeated many times within one trace, which is an N+1.",
     "Check lifecycle correctness in the spec: does the liveness probe touch a dependency (which turns a dependency outage into a restart storm), is there a preStop delay and a SIGTERM handler, and is terminationGracePeriodSeconds longer than the slowest request you measured?",
     "Read the code last, and only where the evidence points: the handler for the failing route at the deployed revision, its error handling, its timeout and retry configuration, and its connection-pool settings.",
-    "Finally, name what you could not measure. Absent application metrics are a real gap in this cluster, and a finding that says so is more useful than one that pretends otherwise.",
+    "Finally, name what you could not measure. Absent application metrics or traces are a real gap, and a finding that says so is more useful than one that pretends otherwise.",
   ],
   observations: [
     { key: "service.replicas_ready", source: "manifest", unit: "count", how: "ready versus desired replicas" },

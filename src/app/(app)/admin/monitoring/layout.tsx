@@ -1,5 +1,8 @@
 import { Suspense } from "react";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { listClusters, listJobs } from "@/lib/db/monitoring-queries";
+import { technologyLabels } from "@/lib/monitoring/workload-types-live";
+import { TechnologiesProvider } from "@/components/monitoring/technologies-provider";
 import {
   MonitoringTree,
   TreeSkeleton,
@@ -14,13 +17,20 @@ import {
  * walk every cluster and every job in the installation, and the content column is
  * what the operator actually clicked on. Mutations refresh the tree through
  * `useRefreshThenNavigate`, which is careful about the order — see that hook.
+ *
+ * The org's workload types ARE awaited here (one small query): every screen below
+ * names technologies, and they are data now (decision 128), so the provider has to
+ * hold them before any of those screens renders.
  */
 export default async function MonitoringLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const { orgId } = await monitoringPageContext();
+  const technologies = await technologyLabels(orgId);
   return (
+    <TechnologiesProvider technologies={technologies}>
     <div className="flex min-h-0 flex-1">
       <Suspense fallback={<TreeSkeleton />}>
         <Tree />
@@ -32,12 +42,17 @@ export default async function MonitoringLayout({
         </div>
       </main>
     </div>
+    </TechnologiesProvider>
   );
 }
 
 /** Split out purely so `Suspense` has something to await. */
 async function Tree() {
-  const [clusters, jobs] = await Promise.all([listClusters(), listJobs()]);
+  const { orgId } = await monitoringPageContext();
+  const [clusters, jobs] = await Promise.all([
+    listClusters(orgId),
+    listJobs(orgId),
+  ]);
   return (
     <MonitoringTree
       clusters={clusters.map((c) => ({

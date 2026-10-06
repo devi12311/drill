@@ -5,6 +5,8 @@ import type { FrontendToolDef } from "@/lib/holmes/types";
 export type ArtifactHit = ArtifactSearchRow;
 
 export interface ArtifactSearchOpts {
+  /** The org whose knowledge base is searched — never another's. */
+  orgId: string;
   service?: string;
   tag?: string;
   limit?: number;
@@ -37,9 +39,10 @@ function toOrQuery(q: string): string {
  */
 export async function searchArtifacts(
   q: string,
-  opts: ArtifactSearchOpts = {},
+  opts: ArtifactSearchOpts,
 ): Promise<ArtifactHit[]> {
   return searchArtifactRows({
+    orgId: opts.orgId,
     tsQuery: toOrQuery(q),
     rawQuery: q.trim(),
     service: opts.service,
@@ -82,7 +85,10 @@ export const SEARCH_TOOL_DEF: FrontendToolDef = {
  * (Holmes requires string results); never throws — a broken knowledge base
  * must not kill a live investigation.
  */
-export async function runSearchTool(args: unknown): Promise<string> {
+export async function runSearchTool(
+  args: unknown,
+  orgId: string,
+): Promise<string> {
   let query = "";
   try {
     const parsed = typeof args === "string" ? JSON.parse(args) : args;
@@ -96,7 +102,7 @@ export async function runSearchTool(args: unknown): Promise<string> {
     return JSON.stringify({ results: [], note: "empty query" });
   }
   try {
-    const hits = (await searchArtifacts(query, { limit: 5 })).filter(
+    const hits = (await searchArtifacts(query, { orgId, limit: 5 })).filter(
       (h) => h.score >= RELEVANCE_FLOOR,
     );
     if (!hits.length) {

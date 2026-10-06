@@ -1,14 +1,14 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { getAgent } from "@/lib/db/queries";
 import { servedModels } from "@/lib/holmes/validate";
 
 type Context = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
-  const agent = await getAgent(user.id, id);
+  const agent = await getAgent(ctx.orgId, id);
   if (!agent) {
     return Response.json({ error: "Agent not found" }, { status: 404 });
   }

@@ -1,5 +1,7 @@
 "use client";
 
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
+import { scopedUrl, type CatalogueScope } from "@/lib/monitoring/catalogue-scope";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -18,7 +20,6 @@ import {
   SELECT_CLASS,
   SEVERITY_LABEL,
   TARGET_KIND_LABEL,
-  TECHNOLOGY_LABEL,
   describeScope,
   requirementLabel,
 } from "@/lib/monitoring/ui";
@@ -30,7 +31,6 @@ import {
   SEVERITIES,
   TARGET_KINDS,
   WORKLOAD_KINDS,
-  WORKLOAD_TECHNOLOGIES,
   type MonitorCategory,
   type Severity,
   type TargetKind,
@@ -80,11 +80,14 @@ function sameDraft(a: CheckDraft, b: CheckDraft) {
 
 export function CheckForm({
   check,
+  scope,
   onSaved,
   onCancel,
   onDirtyChange,
 }: {
   check?: CheckView;
+  /** Which catalogue the save writes to — an org edit of a template forks it. */
+  scope: CatalogueScope;
   /** Receives the saved check's ID — a new one becomes the open panel. */
   onSaved: (saved: { id: string }) => void;
   onCancel: () => void;
@@ -92,6 +95,7 @@ export function CheckForm({
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const editing = Boolean(check);
+  const { label, all } = useTechnologies();
   const [id, setId] = useState(check?.id ?? "");
   const [category, setCategory] = useState<MonitorCategory>(
     check?.category ?? "security",
@@ -245,7 +249,7 @@ export function CheckForm({
       excludesTechnologies.includes(t),
     );
     if (contradictory.length > 0)
-      found.technologies = `${contradictory.map((t) => TECHNOLOGY_LABEL[t]).join(", ")} ${contradictory.length === 1 ? "is" : "are"} in both lists, so this check would never run there.`;
+      found.technologies = `${contradictory.map(label).join(", ")} ${contradictory.length === 1 ? "is" : "are"} in both lists, so this check would never run there.`;
     return found;
   }, [
     editing,
@@ -259,6 +263,7 @@ export function CheckForm({
     absentRuns,
     appliesToTechnologies,
     excludesTechnologies,
+    label,
   ]);
   const invalid = Object.keys(problems).length > 0;
 
@@ -279,9 +284,12 @@ export function CheckForm({
     setError(null);
     try {
       const res = await fetch(
-        editing
-          ? `/api/admin/monitoring/checks/${check!.id}`
-          : "/api/admin/monitoring/checks",
+        scopedUrl(
+          editing
+            ? `/api/admin/monitoring/checks/${check!.id}`
+            : "/api/admin/monitoring/checks",
+          scope,
+        ),
         {
           method: editing ? "PATCH" : "POST",
           headers: { "Content-Type": "application/json" },
@@ -457,7 +465,7 @@ export function CheckForm({
         {/* Folded away, because the answer is almost always "leave it" — but the
             summary line says what the current answer is, so nobody has to open it
             to find out. */}
-        <Disclosure label="Where it applies" summary={describeScope(draft)}>
+        <Disclosure label="Where it applies" summary={describeScope(draft, label)}>
           <fieldset className="space-y-1.5">
             <legend className="text-body-sm font-medium text-warm-off-white">
               Applies to
@@ -521,7 +529,7 @@ export function CheckForm({
               <span className="ml-1.5 font-normal text-bone-gray">optional</span>
             </legend>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-              {WORKLOAD_TECHNOLOGIES.map((technology) => (
+              {all.map(({ slug: technology }) => (
                 <label
                   key={technology}
                   className="flex cursor-pointer items-center gap-2 text-body-sm text-pale-stone"
@@ -532,7 +540,7 @@ export function CheckForm({
                       toggleTechnology(technology, setAppliesToTechnologies)
                     }
                   />
-                  {TECHNOLOGY_LABEL[technology]}
+                  {label(technology)}
                 </label>
               ))}
             </div>
@@ -550,7 +558,7 @@ export function CheckForm({
               <span className="ml-1.5 font-normal text-bone-gray">optional</span>
             </legend>
             <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-              {WORKLOAD_TECHNOLOGIES.map((technology) => (
+              {all.map(({ slug: technology }) => (
                 <label
                   key={technology}
                   className="flex cursor-pointer items-center gap-2 text-body-sm text-pale-stone"
@@ -561,7 +569,7 @@ export function CheckForm({
                       toggleTechnology(technology, setExcludesTechnologies)
                     }
                   />
-                  {TECHNOLOGY_LABEL[technology]}
+                  {label(technology)}
                 </label>
               ))}
             </div>

@@ -2,6 +2,7 @@ import "server-only";
 import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db, type DbExecutor } from "./index";
+import { openSecret, sealSecret } from "@/lib/secrets";
 import {
   chatTurns,
   conversations,
@@ -38,76 +39,117 @@ export async function getUserById(userId: string) {
   return row ?? null;
 }
 
-// ---- Agents (all user-scoped) ----
+// ---- Scope ----
 
-export async function listAgents(userId: string) {
+/**
+ * The tenant and member a query runs for. Every org-owned read and write takes
+ * one, so the org boundary is enforced here rather than remembered per route.
+ * Built from the request's AuthContext, or from a queued turn in the worker.
+ */
+export interface Scope {
+  orgId: string;
+  userId: string;
+}
+
+/** A Scope that may also manage the org's shared things. */
+export interface ManagerScope extends Scope {
+  isOrgAdmin: boolean;
+}
+
+// ---- Agents (org-owned) ----
+
+const agentColumns = {
+  id: holmesAgents.id,
+  name: holmesAgents.name,
+  url: holmesAgents.url,
+  createdBy: holmesAgents.createdBy,
+  lastValidatedAt: holmesAgents.lastValidatedAt,
+  createdAt: holmesAgents.createdAt,
+};
+
+export async function listAgents(orgId: string) {
   return db
-    .select({
-      id: holmesAgents.id,
-      name: holmesAgents.name,
-      url: holmesAgents.url,
-      lastValidatedAt: holmesAgents.lastValidatedAt,
-      createdAt: holmesAgents.createdAt,
-    })
+    .select(agentColumns)
     .from(holmesAgents)
-    .where(eq(holmesAgents.userId, userId))
+    .where(eq(holmesAgents.orgId, orgId))
     .orderBy(holmesAgents.createdAt);
 }
 
-/** Full agent row (incl. apiKey) — server-side use only, never serialized. */
-export async function getAgent(userId: string, agentId: string) {
+/**
+ * Full agent row with the apiKey OPENED — server-side use only, never serialized.
+ * The one read path for the credential, so it is decrypted here and nowhere else.
+ */
+export async function getAgent(orgId: string, agentId: string) {
   const [agent] = await db
     .select()
     .from(holmesAgents)
-    .where(and(eq(holmesAgents.id, agentId), eq(holmesAgents.userId, userId)));
-  return agent ?? null;
+    .where(and(eq(holmesAgents.id, agentId), eq(holmesAgents.orgId, orgId)));
+  return agent ? { ...agent, apiKey: openSecret(agent.apiKey) } : null;
 }
 
 export async function createAgent(
-  userId: string,
+  scope: Scope,
   data: { name: string; url: string; apiKey: string },
 ) {
   const [agent] = await db
     .insert(holmesAgents)
-    .values({ ...data, userId, lastValidatedAt: new Date() })
-    .returning({
-      id: holmesAgents.id,
-      name: holmesAgents.name,
-      url: holmesAgents.url,
-      lastValidatedAt: holmesAgents.lastValidatedAt,
-      createdAt: holmesAgents.createdAt,
-    });
+    .values({
+      ...data,
+      apiKey: sealSecret(data.apiKey),
+      orgId: scope.orgId,
+      createdBy: scope.userId,
+      lastValidatedAt: new Date(),
+    })
+    .returning(agentColumns);
   return agent;
 }
 
+/**
+ * Every member chats through the org's agents, but only whoever registered one
+ * (or an org admin) may repoint or remove it — otherwise any member could
+ * silently redirect everyone's investigations.
+ */
+function manageableAgent(scope: ManagerScope, agentId: string) {
+  return and(
+    eq(holmesAgents.id, agentId),
+    eq(holmesAgents.orgId, scope.orgId),
+    scope.isOrgAdmin ? undefined : eq(holmesAgents.createdBy, scope.userId),
+  );
+}
+
 export async function updateAgent(
-  userId: string,
+  scope: ManagerScope,
   agentId: string,
   data: Partial<{ name: string; url: string; apiKey: string }>,
 ) {
   const [agent] = await db
     .update(holmesAgents)
-    .set({ ...data, lastValidatedAt: new Date() })
-    .where(and(eq(holmesAgents.id, agentId), eq(holmesAgents.userId, userId)))
-    .returning({
-      id: holmesAgents.id,
-      name: holmesAgents.name,
-      url: holmesAgents.url,
-      lastValidatedAt: holmesAgents.lastValidatedAt,
-      createdAt: holmesAgents.createdAt,
-    });
+    .set({
+      ...data,
+      ...(data.apiKey !== undefined && { apiKey: sealSecret(data.apiKey) }),
+      lastValidatedAt: new Date(),
+    })
+    .where(manageableAgent(scope, agentId))
+    .returning(agentColumns);
   return agent ?? null;
 }
 
-export async function deleteAgent(userId: string, agentId: string) {
+export async function deleteAgent(scope: ManagerScope, agentId: string) {
   const deleted = await db
     .delete(holmesAgents)
-    .where(and(eq(holmesAgents.id, agentId), eq(holmesAgents.userId, userId)))
+    .where(manageableAgent(scope, agentId))
     .returning({ id: holmesAgents.id });
   return deleted.length > 0;
 }
 
-// ---- Conversations (all user-scoped) ----
+// ---- Conversations (private to their user, inside the org) ----
+
+const ownConversation = (scope: Scope, conversationId: string) =>
+  and(
+    eq(conversations.id, conversationId),
+    eq(conversations.userId, scope.userId),
+    eq(conversations.orgId, scope.orgId),
+  );
 
 /** True when a stored raw response is a pause awaiting tool approval. */
 function isPaused(raw: SQL | typeof messages.rawResponse): SQL<boolean> {
@@ -120,7 +162,7 @@ function isPaused(raw: SQL | typeof messages.rawResponse): SQL<boolean> {
  * status, else whether the latest answer is a pause still waiting on the user.
  */
 export async function listConversations(
-  userId: string,
+  scope: Scope,
   agentId: string,
 ): Promise<
   {
@@ -154,7 +196,11 @@ export async function listConversations(
     )
     .leftJoin(chatTurns, eq(chatTurns.conversationId, conversations.id))
     .where(
-      and(eq(conversations.userId, userId), eq(conversations.agentId, agentId)),
+      and(
+        eq(conversations.userId, scope.userId),
+        eq(conversations.orgId, scope.orgId),
+        eq(conversations.agentId, agentId),
+      ),
     )
     .orderBy(desc(conversations.updatedAt));
   return rows.map(({ turnStatus, awaitingApproval, ...row }) => ({
@@ -163,17 +209,16 @@ export async function listConversations(
   }));
 }
 
-export async function createConversation(opts: {
-  userId: string;
-  agentId: string;
-  ask: string;
-  model: string;
-}) {
+export async function createConversation(
+  scope: Scope,
+  opts: { agentId: string; ask: string; model: string },
+) {
   const title = opts.ask.replace(/\s+/g, " ").trim().slice(0, 80);
   const [row] = await db
     .insert(conversations)
     .values({
-      userId: opts.userId,
+      orgId: scope.orgId,
+      userId: scope.userId,
       agentId: opts.agentId,
       title,
       model: opts.model,
@@ -182,22 +227,20 @@ export async function createConversation(opts: {
   return row;
 }
 
-/** Conversation row if owned by the user, else null. */
-export async function getConversation(userId: string, conversationId: string) {
+/** Conversation row if owned by the user in this org, else null. */
+export async function getConversation(scope: Scope, conversationId: string) {
   const [row] = await db
     .select()
     .from(conversations)
-    .where(
-      and(eq(conversations.id, conversationId), eq(conversations.userId, userId)),
-    );
+    .where(ownConversation(scope, conversationId));
   return row ?? null;
 }
 
 export async function getConversationMessages(
-  userId: string,
+  scope: Scope,
   conversationId: string,
 ) {
-  const conv = await getConversation(userId, conversationId);
+  const conv = await getConversation(scope, conversationId);
   if (!conv) return null;
   return db
     .select()
@@ -343,20 +386,15 @@ export async function addAssistantMessage(
     .where(eq(conversations.id, conversationId));
 }
 
-export async function deleteConversation(
-  userId: string,
-  conversationId: string,
-) {
+export async function deleteConversation(scope: Scope, conversationId: string) {
   const deleted = await db
     .delete(conversations)
-    .where(
-      and(eq(conversations.id, conversationId), eq(conversations.userId, userId)),
-    )
+    .where(ownConversation(scope, conversationId))
     .returning({ id: conversations.id });
   return deleted.length > 0;
 }
 
-// ---- Resolution artifacts (global read/edit; resolver-only delete) ----
+// ---- Resolution artifacts (org-wide read/edit; resolver-only delete) ----
 
 /**
  * The conversation as plain turns (user asks + assistant analysis) for
@@ -407,17 +445,22 @@ function draftValues(draft: ArtifactDraft) {
  * Re-resolving upserts in place (unique conversation_id).
  */
 export async function upsertArtifact(
-  userId: string,
+  scope: Scope,
   conversationId: string,
   draft: ArtifactDraft,
 ) {
   const values = draftValues(draft);
   const [row] = await db
     .insert(resolutionArtifacts)
-    .values({ ...values, conversationId, createdBy: userId })
+    .values({
+      ...values,
+      orgId: scope.orgId,
+      conversationId,
+      createdBy: scope.userId,
+    })
     .onConflictDoUpdate({
       target: resolutionArtifacts.conversationId,
-      set: { ...values, lastEditedBy: userId, updatedAt: new Date() },
+      set: { ...values, lastEditedBy: scope.userId, updatedAt: new Date() },
     })
     .returning(artifactColumns);
   await db
@@ -430,8 +473,14 @@ export async function upsertArtifact(
 const artifactCreator = alias(users, "artifact_creator");
 const artifactEditor = alias(users, "artifact_editor");
 
-/** Full artifact with resolver/editor usernames. Global read. */
-export async function getArtifact(artifactId: string) {
+const inOrg = (orgId: string, artifactId: string) =>
+  and(
+    eq(resolutionArtifacts.id, artifactId),
+    eq(resolutionArtifacts.orgId, orgId),
+  );
+
+/** Full artifact with resolver/editor usernames, if it belongs to the org. */
+export async function getArtifact(orgId: string, artifactId: string) {
   const [row] = await db
     .select({
       ...artifactColumns,
@@ -444,20 +493,24 @@ export async function getArtifact(artifactId: string) {
       artifactEditor,
       eq(resolutionArtifacts.lastEditedBy, artifactEditor.id),
     )
-    .where(eq(resolutionArtifacts.id, artifactId));
+    .where(inOrg(orgId, artifactId));
   return row ?? null;
 }
 
-/** Any authed user may edit; records who touched it last. */
+/** Any member of the org may edit; records who touched it last. */
 export async function updateArtifact(
+  scope: Scope,
   artifactId: string,
-  userId: string,
   draft: ArtifactDraft,
 ) {
   const [row] = await db
     .update(resolutionArtifacts)
-    .set({ ...draftValues(draft), lastEditedBy: userId, updatedAt: new Date() })
-    .where(eq(resolutionArtifacts.id, artifactId))
+    .set({
+      ...draftValues(draft),
+      lastEditedBy: scope.userId,
+      updatedAt: new Date(),
+    })
+    .where(inOrg(scope.orgId, artifactId))
     .returning(artifactColumns);
   return row ?? null;
 }
@@ -466,16 +519,16 @@ export async function updateArtifact(
  * Resolver-only delete. Returns "deleted" | "forbidden" | "not_found";
  * the linked conversation (if any) flips back to `open`.
  */
-export async function deleteArtifact(artifactId: string, userId: string) {
+export async function deleteArtifact(scope: Scope, artifactId: string) {
   const [existing] = await db
     .select({
       createdBy: resolutionArtifacts.createdBy,
       conversationId: resolutionArtifacts.conversationId,
     })
     .from(resolutionArtifacts)
-    .where(eq(resolutionArtifacts.id, artifactId));
+    .where(inOrg(scope.orgId, artifactId));
   if (!existing) return "not_found" as const;
-  if (existing.createdBy !== userId) return "forbidden" as const;
+  if (existing.createdBy !== scope.userId) return "forbidden" as const;
   await db
     .delete(resolutionArtifacts)
     .where(eq(resolutionArtifacts.id, artifactId));
@@ -508,13 +561,14 @@ export interface ArtifactSearchRow {
  * (newest first). `score` is ts_rank_cd(normalized) + 0.5 * trigram similarity.
  */
 export async function searchArtifactRows(opts: {
+  orgId: string;
   tsQuery: string;
   rawQuery: string;
   service?: string;
   tag?: string;
   limit: number;
 }): Promise<ArtifactSearchRow[]> {
-  const { tsQuery, rawQuery, service, tag, limit } = opts;
+  const { orgId, tsQuery, rawQuery, service, tag, limit } = opts;
   const trgmDoc = sql`(${resolutionArtifacts.title} || ' ' || f_arr2text(${resolutionArtifacts.affectedServices}) || ' ' || f_arr2text(${resolutionArtifacts.symptoms}))`;
   const tsq = sql`(websearch_to_tsquery('english', ${tsQuery}) || websearch_to_tsquery('simple', ${tsQuery}))`;
   const hasQuery = rawQuery.trim().length > 0;
@@ -524,7 +578,7 @@ export async function searchArtifactRows(opts: {
     ? sql<number>`(ts_rank_cd("search_vector", ${tsq}, 32) + 0.5 * word_similarity(${rawQuery}, ${trgmDoc}))`
     : sql<number>`0`;
 
-  const conditions = [];
+  const conditions = [eq(resolutionArtifacts.orgId, orgId)];
   if (hasQuery)
     conditions.push(
       sql`("search_vector" @@ ${tsq} OR word_similarity(${rawQuery}, ${trgmDoc}) > 0.3)`,
@@ -549,7 +603,7 @@ export async function searchArtifactRows(opts: {
     })
     .from(resolutionArtifacts)
     .leftJoin(artifactCreator, eq(resolutionArtifacts.createdBy, artifactCreator.id))
-    .where(conditions.length ? and(...conditions) : undefined)
+    .where(and(...conditions))
     // Browse mode (no query) must not order by the constant score: a bare
     // `0 DESC` is read by Postgres as an ordinal column position.
     .orderBy(

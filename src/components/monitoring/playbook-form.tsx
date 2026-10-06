@@ -1,5 +1,6 @@
 "use client";
 
+import { scopedUrl, type CatalogueScope } from "@/lib/monitoring/catalogue-scope";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -169,11 +170,14 @@ function LineList({
 
 export function PlaybookForm({
   playbook,
+  scope,
   onSaved,
   onCancel,
   onDirtyChange,
 }: {
   playbook: PlaybookView;
+  /** Which catalogue the save writes to — an org edit of a template forks it. */
+  scope: CatalogueScope;
   /** Called with a note worth surfacing (an ended trend), or null if there is none. */
   onSaved: (note: string | null) => void;
   onCancel: () => void;
@@ -318,7 +322,7 @@ export function PlaybookForm({
     );
     try {
       const res = await fetch(
-        `/api/admin/monitoring/profiles/${playbook.technology}`,
+        scopedUrl(`/api/admin/monitoring/profiles/${playbook.technology}`, scope),
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },

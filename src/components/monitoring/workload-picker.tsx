@@ -5,7 +5,7 @@ import { ChevronRight } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { TECHNOLOGY_LABEL } from "@/lib/monitoring/ui";
+import { useTechnologies } from "@/components/monitoring/technologies-provider";
 import { CLUSTER_TARGET, isClusterTarget } from "@/lib/monitoring/types";
 import type {
   AssessmentTarget,
@@ -52,6 +52,7 @@ export function WorkloadPicker({
   selected: AssessmentTarget[];
   onChange: (next: AssessmentTarget[]) => void;
 }) {
+  const { label } = useTechnologies();
   const [filter, setFilter] = useState("");
   // Hundreds of rows in this list; typing must not wait for them to re-group.
   const deferredFilter = useDeferredValue(filter);
@@ -267,7 +268,7 @@ export function WorkloadPicker({
                               : "border-border/60 text-bone-gray",
                           )}
                         >
-                          {TECHNOLOGY_LABEL[workload.technology]}
+                          {label(workload.technology)}
                         </span>
                       )}
                       {workload.replicas !== null && (

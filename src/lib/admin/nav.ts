@@ -1,5 +1,6 @@
 import {
   Activity,
+  Building2,
   DollarSign,
   LayoutDashboard,
   Radar,
@@ -15,6 +16,11 @@ export interface AdminNavItem {
   icon: LucideIcon;
   /** Match the href exactly instead of by prefix (needed for `/admin` itself). */
   exact?: boolean;
+  /**
+   * Platform admins only. Everything else is an ORG section — it shows the active
+   * org's data to its owners/admins and to platform admins alike.
+   */
+  platform?: boolean;
 }
 
 export interface AdminNavGroup {
@@ -39,12 +45,6 @@ export const ADMIN_NAV: AdminNavGroup[] = [
       },
       { href: "/admin/cost", label: "Cost & usage", icon: DollarSign },
       { href: "/admin/activity", label: "Activity", icon: Activity },
-    ],
-  },
-  {
-    label: "People & access",
-    items: [
-      { href: "/admin/users", label: "Users", icon: Users },
       { href: "/admin/audit", label: "Audit", icon: ScrollText },
     ],
   },
@@ -55,7 +55,22 @@ export const ADMIN_NAV: AdminNavGroup[] = [
       { href: "/admin/agents", label: "Agent health", icon: Server },
     ],
   },
+  {
+    label: "Platform",
+    items: [
+      { href: "/admin/orgs", label: "Organizations", icon: Building2, platform: true },
+      { href: "/admin/users", label: "Users", icon: Users, platform: true },
+    ],
+  },
 ];
+
+/** The nav as one viewer may see it: platform items only for platform admins. */
+export function visibleAdminNav(isPlatformAdmin: boolean): AdminNavGroup[] {
+  return ADMIN_NAV.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => isPlatformAdmin || !item.platform),
+  })).filter((group) => group.items.length > 0);
+}
 
 /** Does `pathname` sit under this nav item? */
 export function isNavItemActive(item: AdminNavItem, pathname: string) {

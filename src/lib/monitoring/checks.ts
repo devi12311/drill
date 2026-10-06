@@ -1,8 +1,10 @@
 import "server-only";
 import {
-  listAllChecks,
+  listCatalogueChecks,
   listJobOverrides,
   seedBuiltinChecks,
+  type CatalogueCheck,
+  type CatalogueOwner,
   type CheckRow,
   type JobCheckOverride,
 } from "@/lib/db/monitoring-queries";
@@ -25,6 +27,9 @@ import type {
  * Reads the LIVE rubric — the `monitoring_checks` table — and resolves it for a
  * given job. Everything that assesses or reconciles goes through here; nothing
  * outside this module should read `BUILTIN_CHECKS`, which is only the seed.
+ *
+ * Every read names its owner: an org gets its EFFECTIVE rubric (its own copies
+ * over the templates), `null` gets the templates alone (decision 126).
  */
 
 /** A check as it applies to one job: catalogue values plus any job override. */
@@ -60,11 +65,11 @@ function toMonitorCheck(row: CheckRow): MonitorCheck & { version: number } {
 }
 
 /**
- * Idempotently seed the built-in rubric, once per process.
+ * Idempotently seed the built-in TEMPLATES, once per process.
  *
- * Insert-if-missing only — an admin's retune or disable of a built-in must
- * survive every restart, so this never updates an existing row. A new built-in
- * shipped in a later release appears automatically on next boot.
+ * Insert-if-missing only — a platform admin's retune or disable of a template
+ * must survive every restart, so this never updates an existing row. A new
+ * built-in shipped in a later release appears automatically on next boot.
  */
 let seeded: Promise<void> | null = null;
 
@@ -94,10 +99,10 @@ export function ensureBuiltinChecks(): Promise<void> {
   return seeded;
 }
 
-/** Every check in the live catalogue, including disabled ones. */
-export async function liveChecks(): Promise<CheckRow[]> {
+/** Every check `owner` sees, including disabled ones. */
+export async function liveChecks(owner: CatalogueOwner): Promise<CatalogueCheck[]> {
   await ensureBuiltinChecks();
-  return listAllChecks();
+  return listCatalogueChecks(owner);
 }
 
 function applyOverrides(
@@ -139,9 +144,11 @@ export type JobRubric = (
 export async function jobRubricResolver(
   jobId: string,
   category: MonitorCategory,
+  /** The org owning the job's cluster — its rubric, not the bare templates. */
+  orgId: string,
 ): Promise<JobRubric> {
   const [rows, overrides] = await Promise.all([
-    liveChecks(),
+    liveChecks(orgId),
     listJobOverrides(jobId),
   ]);
   const enabled = rows.filter((r) => r.enabled).map(toMonitorCheck);
@@ -160,8 +167,8 @@ export function checkIndex(
 }
 
 /** The catalogue in the rubric editor's shape — see CheckRubricItem. */
-export async function checkRubricItems(): Promise<CheckRubricItem[]> {
-  return (await liveChecks()).map((c) => ({
+export async function checkRubricItems(orgId: string): Promise<CheckRubricItem[]> {
+  return (await liveChecks(orgId)).map((c) => ({
     id: c.id,
     category: c.category,
     title: c.title,
@@ -175,8 +182,8 @@ export async function checkRubricItems(): Promise<CheckRubricItem[]> {
 }
 
 /** The catalogue in the grid's shape — see CheckListItem for why it is separate. */
-export async function checkListItems(): Promise<CheckListItem[]> {
-  return (await liveChecks()).map((c) => ({
+export async function checkListItems(owner: CatalogueOwner): Promise<CheckListItem[]> {
+  return (await liveChecks(owner)).map((c) => ({
     id: c.id,
     category: c.category,
     title: c.title,
@@ -185,12 +192,14 @@ export async function checkListItems(): Promise<CheckListItem[]> {
     enabled: c.enabled,
     version: c.version,
     technologies: c.appliesToTechnologies,
+    source: c.source,
+    updateAvailable: c.updateAvailable,
   }));
 }
 
-/** The catalogue in the client-facing shape (see CheckView in ./types). */
-export async function checkSummaries(): Promise<CheckView[]> {
-  return (await liveChecks()).map((c) => ({
+/** One check in the client-facing shape (see CheckView in ./types). */
+export function toCheckView(c: CheckRow & Partial<CatalogueCheck>): CheckView {
+  return {
     id: c.id,
     category: c.category,
     title: c.title,
@@ -206,5 +215,16 @@ export async function checkSummaries(): Promise<CheckView[]> {
     builtin: c.builtin,
     enabled: c.enabled,
     version: c.version,
-  }));
+    // A bare row (a template, or a just-written org row) carries no overlay;
+    // `based_on_version` is what tells a fork from the org's own check.
+    source:
+      c.source ??
+      (c.orgId === null ? "template" : c.basedOnVersion !== null ? "override" : "custom"),
+    updateAvailable: c.updateAvailable ?? false,
+  };
+}
+
+/** A whole catalogue — an org's effective one, or the templates — in the client shape. */
+export async function checkSummaries(owner: CatalogueOwner): Promise<CheckView[]> {
+  return (await liveChecks(owner)).map(toCheckView);
 }

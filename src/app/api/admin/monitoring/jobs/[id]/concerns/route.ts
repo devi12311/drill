@@ -1,4 +1,5 @@
-import { forbidden, getAdminActor } from "@/lib/auth/session";
+import { forbidden, getConsoleContext } from "@/lib/auth/session";
+import { monitoringNotFound, ownsMonitoring } from "@/lib/monitoring/access";
 import { getJob, listConcerns } from "@/lib/db/monitoring-queries";
 import { checkSummaries } from "@/lib/monitoring/checks";
 import {
@@ -25,8 +26,10 @@ function parseList<T extends string>(
 }
 
 export async function GET(request: Request, context: Context) {
-  if (!(await getAdminActor())) return forbidden();
+  const ctx = await getConsoleContext();
+  if (!ctx) return forbidden();
   const { id } = await context.params;
+  if (!(await ownsMonitoring(ctx, { job: id }))) return monitoringNotFound();
   const params = new URL(request.url).searchParams;
   /**
    * All reads fire together, and the existence check happens after.
@@ -43,7 +46,7 @@ export async function GET(request: Request, context: Context) {
     }),
     // Check titles/citations travel with the concerns so the client never needs
     // to import the catalogue (it is live data now, not a constant).
-    checkSummaries(),
+    checkSummaries(ctx.orgId),
   ]);
   if (!job) return Response.json({ error: "Not found" }, { status: 404 });
   return Response.json({ job, concerns, checks });

@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { getAgent } from "@/lib/db/queries";
 import { usableSkills } from "@/lib/db/skill-queries";
 import { fixtureMode } from "@/lib/holmes/stream";
@@ -17,8 +17,8 @@ const REQUEST_LIMIT = 4000;
  * draft. Nothing is saved: the editor shows it for review.
  */
 export async function POST(request: Request) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
 
   let body: { request?: unknown; agent_id?: unknown; current?: unknown };
   try {
@@ -51,7 +51,7 @@ export async function POST(request: Request) {
   }
 
   const agent =
-    typeof body.agent_id === "string" ? await getAgent(user.id, body.agent_id) : null;
+    typeof body.agent_id === "string" ? await getAgent(ctx.orgId, body.agent_id) : null;
   if (!agent) {
     return Response.json(
       { error: "Choose a Holmes agent — add one from the chat sidebar if you have none" },
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
   try {
     const [model] = await servedModels(agent.url, agent.apiKey);
     // The skill being revised is not a clash — listing it would push a rename.
-    const existing = (await usableSkills(user.id))
+    const existing = (await usableSkills(ctx))
       .filter((s) => s.name !== current?.name)
       .map((s) => ({ name: s.name, description: s.description }));
     const draft = await draftSkill(

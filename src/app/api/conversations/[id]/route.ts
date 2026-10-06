@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import { getOpenTurn } from "@/lib/db/chat-turn-queries";
 import {
   deleteConversation,
@@ -16,12 +16,12 @@ type Context = { params: Promise<{ id: string }> };
  * Resume on.
  */
 export async function GET(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   try {
-    const conversation = await getConversation(user.id, id);
-    const rows = conversation && (await getConversationMessages(user.id, id));
+    const conversation = await getConversation(ctx, id);
+    const rows = conversation && (await getConversationMessages(ctx, id));
     if (!conversation || !rows) {
       return Response.json({ error: "Conversation not found" }, { status: 404 });
     }
@@ -54,13 +54,13 @@ export async function GET(_request: Request, context: Context) {
 }
 
 export async function DELETE(_request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   try {
     // An open turn cascades away with it; its worker's next heartbeat finds no
     // row and aborts the Holmes call (lib/chat/runner.ts, "lost").
-    const deleted = await deleteConversation(user.id, id);
+    const deleted = await deleteConversation(ctx, id);
     if (!deleted) {
       return Response.json({ error: "Conversation not found" }, { status: 404 });
     }

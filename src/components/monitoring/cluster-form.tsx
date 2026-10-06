@@ -91,7 +91,7 @@ export function ClusterForm() {
           id="cluster-holmes-url"
           value={holmesUrl}
           onChange={(e) => setHolmesUrl(e.target.value)}
-          placeholder="http://holmes.ai-sre.svc.k8s-clickflare:8080"
+          placeholder="http://holmes.<namespace>.svc.cluster.local:8080"
           autoComplete="off"
           required
         />

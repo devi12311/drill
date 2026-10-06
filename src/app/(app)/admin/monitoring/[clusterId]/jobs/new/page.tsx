@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { monitoringPageContext } from "@/lib/monitoring/access";
 import { isUuid } from "@/lib/monitoring/types";
 import { AdminPageHeader } from "@/components/admin/page-header";
 import { JobForm } from "@/components/monitoring/job-form";
@@ -24,6 +25,7 @@ export default async function NewJobPage({
 }) {
   const { clusterId } = await params;
   if (!isUuid(clusterId)) notFound();
+  const { orgId } = await monitoringPageContext({ cluster: clusterId });
   // Set by the cluster page's "Assess this cluster" action. Read here and passed
   // down as initial state, so the form has no effect that could fight the operator.
   const startOnCluster = (await searchParams).target === "cluster";
@@ -31,7 +33,7 @@ export default async function NewJobPage({
   const [cluster, workloads, checks] = await Promise.all([
     getClusterSummary(clusterId),
     listWorkloads(clusterId),
-    checkRubricItems(),
+    checkRubricItems(orgId),
   ]);
   if (!cluster) notFound();
 

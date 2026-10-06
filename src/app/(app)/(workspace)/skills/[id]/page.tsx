@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
-import { getAuthUser } from "@/lib/auth/session";
-import { getSkillView, skillActor } from "@/lib/db/skill-queries";
+import { getAuthContext } from "@/lib/auth/session";
+import { getSkillView } from "@/lib/db/skill-queries";
 import { SkillScope } from "@/components/skills/skill-badges";
 import { SkillEditor } from "@/components/skills/skill-editor";
 
@@ -13,10 +13,10 @@ export default async function SkillPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const user = await getAuthUser();
-  if (!user) redirect("/login");
+  const ctx = await getAuthContext();
+  if (!ctx) redirect("/login");
   const skill =
-    id === "new" ? null : await getSkillView(skillActor(user), id).catch(() => null);
+    id === "new" ? null : await getSkillView(ctx, id).catch(() => null);
   if (id !== "new" && !skill) notFound();
 
   return (

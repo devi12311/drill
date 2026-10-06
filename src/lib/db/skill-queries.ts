@@ -2,6 +2,8 @@ import "server-only";
 import { and, asc, desc, eq, or, sql } from "drizzle-orm";
 import { db, isUniqueViolation } from "./index";
 import { skills, users } from "./schema";
+import type { ManagerScope, Scope } from "./queries";
+import { isUuid } from "@/lib/uuid";
 import type {
   SkillDraft,
   SkillView,
@@ -10,36 +12,41 @@ import type {
 
 type SkillRow = typeof skills.$inferSelect;
 
-/** A malformed id would be a Postgres cast error; to a caller it is just absent. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Who is asking — the effective user, so impersonation sees what they see. */
-export interface SkillActor {
-  id: string;
-  isAdmin: boolean;
-}
-
-export function skillActor(user: { id: string; role: string }): SkillActor {
-  return { id: user.id, isAdmin: user.role === "admin" };
-}
 
 /**
- * A private skill is its author's alone; a shared one changes every user's
- * investigations, so once shared only an admin may edit it — otherwise sharing
- * would be a review the author could undo by editing afterwards.
+ * Who is asking — the effective user in their active org (an AuthContext passes
+ * straight in), so impersonation sees what they see. "Admin" here is the ORG
+ * admin: skills are moderated per org.
+ */
+export type SkillActor = ManagerScope;
+
+/**
+ * A private skill is its author's alone; a shared one changes every member's
+ * investigations, so once shared only an org admin may edit it — otherwise
+ * sharing would be a review the author could undo by editing afterwards.
+ * Callers only ever hand these rows of the actor's own org.
  */
 function canSee(actor: SkillActor, row: SkillRow): boolean {
-  return actor.isAdmin || row.visibility === "shared" || row.createdBy === actor.id;
+  return (
+    actor.isOrgAdmin ||
+    row.visibility === "shared" ||
+    row.createdBy === actor.userId
+  );
 }
 
 function canEdit(actor: SkillActor, row: SkillRow): boolean {
-  if (actor.isAdmin) return true;
-  return row.visibility === "private" && row.createdBy === actor.id;
+  if (actor.isOrgAdmin) return true;
+  return row.visibility === "private" && row.createdBy === actor.userId;
 }
 
-/** Skills that reach this user's investigations: their own plus shared ones. */
-const usableBy = (userId: string) =>
-  or(eq(skills.visibility, "shared"), eq(skills.createdBy, userId));
+const inOrg = (orgId: string) => eq(skills.orgId, orgId);
+
+/** Skills that reach this member's investigations: their own plus the org's shared ones. */
+const usableBy = (scope: Scope) =>
+  and(
+    inOrg(scope.orgId),
+    or(eq(skills.visibility, "shared"), eq(skills.createdBy, scope.userId)),
+  );
 
 function toView(
   actor: SkillActor,
@@ -68,12 +75,12 @@ const withAuthor = () =>
     .leftJoin(users, eq(users.id, skills.createdBy));
 
 /**
- * The library page. Admins see every skill, other users' private ones included —
- * they moderate what gets shared, and can already impersonate anyone.
+ * The library page. Org admins see every skill in the org, members' private ones
+ * included — they moderate what gets shared.
  */
 export async function listSkills(actor: SkillActor): Promise<SkillView[]> {
-  const query = withAuthor();
-  const rows = await (actor.isAdmin ? query : query.where(usableBy(actor.id)))
+  const rows = await withAuthor()
+    .where(actor.isOrgAdmin ? inOrg(actor.orgId) : usableBy(actor))
     .orderBy(desc(skills.visibility), asc(skills.name));
   return rows.map(({ row, author }) => toView(actor, row, author));
 }
@@ -82,8 +89,10 @@ export async function getSkillView(
   actor: SkillActor,
   id: string,
 ): Promise<SkillView | null> {
-  if (!UUID.test(id)) return null;
-  const [found] = await withAuthor().where(eq(skills.id, id));
+  if (!isUuid(id)) return null;
+  const [found] = await withAuthor().where(
+    and(eq(skills.id, id), inOrg(actor.orgId)),
+  );
   if (!found) return null;
   const { row, author } = found;
   if (!canSee(actor, row)) return null;
@@ -91,30 +100,30 @@ export async function getSkillView(
 }
 
 /**
- * What an investigation may use, for the catalog and always-on blocks. Admins get
- * the same set as anyone — another user's private skill never steers theirs.
+ * What an investigation may use, for the catalog and always-on blocks. Org admins
+ * get the same set as anyone — another member's private skill never steers theirs.
  */
-export async function usableSkills(userId: string): Promise<SkillRow[]> {
+export async function usableSkills(scope: Scope): Promise<SkillRow[]> {
   return db
     .select()
     .from(skills)
-    .where(usableBy(userId))
+    .where(usableBy(scope))
     // Shared first: when the catalog is capped, the reviewed ones survive.
     .orderBy(desc(skills.visibility), desc(skills.updatedAt));
 }
 
 /** One usable skill by name (what the model passes) or id (what the UI sends). */
 export async function getUsableSkill(
-  userId: string,
+  scope: Scope,
   ref: { name: string } | { id: string },
 ): Promise<SkillRow | null> {
-  if ("id" in ref && !UUID.test(ref.id)) return null;
+  if ("id" in ref && !isUuid(ref.id)) return null;
   const match =
     "name" in ref ? eq(skills.name, ref.name) : eq(skills.id, ref.id);
   const [row] = await db
     .select()
     .from(skills)
-    .where(and(match, usableBy(userId)));
+    .where(and(match, usableBy(scope)));
   return row ?? null;
 }
 
@@ -129,7 +138,7 @@ function rethrowUnique(err: unknown, name: string): never {
   throw err;
 }
 
-/** New skills always start private; sharing is a separate, admin-only step. */
+/** New skills always start private; sharing is a separate, org-admin-only step. */
 export async function createSkill(
   actor: SkillActor,
   draft: SkillDraft,
@@ -137,7 +146,12 @@ export async function createSkill(
   try {
     const [row] = await db
       .insert(skills)
-      .values({ ...draft, createdBy: actor.id, lastEditedBy: actor.id })
+      .values({
+        ...draft,
+        orgId: actor.orgId,
+        createdBy: actor.userId,
+        lastEditedBy: actor.userId,
+      })
       .returning();
     return (await getSkillView(actor, row.id))!;
   } catch (err) {
@@ -159,12 +173,15 @@ export async function updateSkill(
   id: string,
   patch: SkillPatch,
 ): Promise<SkillWriteResult> {
-  if (!UUID.test(id)) return { ok: false, reason: "not_found" };
-  const [row] = await db.select().from(skills).where(eq(skills.id, id));
+  if (!isUuid(id)) return { ok: false, reason: "not_found" };
+  const [row] = await db
+    .select()
+    .from(skills)
+    .where(and(eq(skills.id, id), inOrg(actor.orgId)));
   if (!row || !canSee(actor, row)) return { ok: false, reason: "not_found" };
   if (!canEdit(actor, row)) return { ok: false, reason: "forbidden" };
-  if ((patch.visibility !== undefined || patch.alwaysOn !== undefined) && !actor.isAdmin)
-    return { ok: false, reason: "forbidden", message: "Only an admin can share a skill or make it always-on" };
+  if ((patch.visibility !== undefined || patch.alwaysOn !== undefined) && !actor.isOrgAdmin)
+    return { ok: false, reason: "forbidden", message: "Only an org admin can share a skill or make it always-on" };
 
   const visibility = patch.visibility ?? row.visibility;
   const alwaysOn = visibility === "shared" ? (patch.alwaysOn ?? row.alwaysOn) : false;
@@ -178,7 +195,7 @@ export async function updateSkill(
         ...patch,
         visibility,
         alwaysOn,
-        lastEditedBy: actor.id,
+        lastEditedBy: actor.userId,
         updatedAt: sql`now()`,
       })
       .where(eq(skills.id, id));
@@ -192,8 +209,11 @@ export async function deleteSkill(
   actor: SkillActor,
   id: string,
 ): Promise<{ ok: true; before: SkillRow } | { ok: false; reason: "not_found" | "forbidden" }> {
-  if (!UUID.test(id)) return { ok: false, reason: "not_found" };
-  const [row] = await db.select().from(skills).where(eq(skills.id, id));
+  if (!isUuid(id)) return { ok: false, reason: "not_found" };
+  const [row] = await db
+    .select()
+    .from(skills)
+    .where(and(eq(skills.id, id), inOrg(actor.orgId)));
   if (!row || !canSee(actor, row)) return { ok: false, reason: "not_found" };
   if (!canEdit(actor, row)) return { ok: false, reason: "forbidden" };
   await db.delete(skills).where(eq(skills.id, id));

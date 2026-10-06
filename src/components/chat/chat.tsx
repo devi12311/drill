@@ -34,7 +34,7 @@ import type {
 
 const EXAMPLE_ASKS = [
   "What is wrong with trace id …? Suggest a fix in the code.",
-  "Give me a résumé of the ClickHouse cluster health",
+  "Summarize the health of the database StatefulSets in namespace Z",
   "Why is deployment X crash-looping in namespace Y?",
 ];
 

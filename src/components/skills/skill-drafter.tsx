@@ -112,8 +112,8 @@ export function SkillDrafter({
         aria-label={revising ? "What to change in the skill" : "What the skill should do"}
         placeholder={
           revising
-            ? "What to change — e.g. add a step that checks the RabbitMQ queue before re-running the job"
-            : "What should it investigate, from which inputs? e.g. a campaign is missing cost for the last days — start from the integration id, check Mongo, then the cost span in Tempo, re-run the cost job if needed"
+            ? "What to change — e.g. add a step that checks the message-queue depth before restarting the consumer"
+            : "What should it investigate, from which inputs? e.g. checkout is slow for one service — start from the service name, check its pods and recent deploys, then its database latency and the traces of the slowest requests"
         }
       />
       <div className="flex flex-wrap items-center justify-between gap-3">

@@ -15,12 +15,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatRelative } from "@/lib/admin/format";
 import { cn } from "@/lib/utils";
+import { useSession } from "@/components/session/session-provider";
 import { pickActiveAgent } from "./active-agent";
 
 export interface AgentSummary {
   id: string;
   name: string;
   url: string;
+  /** Who registered it; with org admins, the only one who may remove it. */
+  createdBy: string | null;
   lastValidatedAt: string | null;
 }
 
@@ -133,6 +136,7 @@ export function AgentsDialog({
   agents: AgentSummary[];
   onChanged: () => void;
 }) {
+  const { user } = useSession();
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -212,7 +216,8 @@ export function AgentsDialog({
         <DialogHeader>
           <DialogTitle>Holmes agents</DialogTitle>
           <DialogDescription>
-            HolmesGPT endpoints Drill investigates with. Keys are verified before saving.
+            HolmesGPT endpoints everyone in {user.org.name} investigates with. Keys are
+            verified before saving.
           </DialogDescription>
         </DialogHeader>
         {agents.length > 0 && (
@@ -248,7 +253,9 @@ export function AgentsDialog({
                     </span>
                   </div>
                 </div>
-                <DeleteAgent agent={agent} onDelete={() => removeAgent(agent.id)} />
+                {(user.isOrgAdmin || agent.createdBy === user.id) && (
+                  <DeleteAgent agent={agent} onDelete={() => removeAgent(agent.id)} />
+                )}
               </li>
             ))}
           </ul>

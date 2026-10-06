@@ -1,4 +1,4 @@
-import { getAuthUser, unauthorized } from "@/lib/auth/session";
+import { getAuthContext, unauthorized } from "@/lib/auth/session";
 import {
   getTurnSnapshot,
   turnEventsAfter,
@@ -32,8 +32,8 @@ const PING_MS = 15_000;
  * tab attaches, its answer may simply be in already.
  */
 export async function GET(request: Request, context: Context) {
-  const user = await getAuthUser();
-  if (!user) return unauthorized();
+  const ctx = await getAuthContext();
+  if (!ctx) return unauthorized();
   const { id } = await context.params;
   const url = new URL(request.url);
   let after =
@@ -80,7 +80,7 @@ export async function GET(request: Request, context: Context) {
         while (!closed) {
           // Ownership is checked on every pass, so the events of a turn this
           // user does not own are never read (snapshot first, then events).
-          const turn = await getTurnSnapshot(user.id, id);
+          const turn = await getTurnSnapshot(ctx, id);
           if (!turn) {
             send({ type: "settled" });
             break;

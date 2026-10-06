@@ -19,3 +19,25 @@ export const INTERNAL_API_PREFIX = "/api/internal/";
 export function isInternalApiPath(pathname: string) {
   return pathname.startsWith(INTERNAL_API_PREFIX);
 }
+
+export const LOGIN_PATH = "/login";
+
+/** Where a signed-in user with no org at all lands (left or removed from the last one). */
+export const NO_ORG_PATH = "/no-org";
+
+/**
+ * A post-login destination, if it is a path on THIS site. `//evil.com` and
+ * `/\evil.com` are protocol-relative to a browser, so only a single leading
+ * slash qualifies — anything else would make the login page an open redirect.
+ */
+export function safeNext(raw: string | null | undefined): string | null {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
+    return null;
+  }
+  return raw;
+}
+
+/** The login URL that brings the user back to `path` afterwards. */
+export function loginUrl(path: string): string {
+  return `${LOGIN_PATH}?next=${encodeURIComponent(path)}`;
+}
