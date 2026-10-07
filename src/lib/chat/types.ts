@@ -1,4 +1,5 @@
-import type { ToolCall } from "@/lib/holmes/types";
+import type { HolmesChatResponse, ToolCall } from "@/lib/holmes/types";
+import type { MessageSkill } from "@/lib/skills/types";
 
 /**
  * A chat turn's lifecycle. There is no `succeeded`: a turn that answers is written
@@ -60,4 +61,18 @@ export interface ConversationSummary {
 
 export function isInvestigating(conv: Pick<ConversationSummary, "activity">): boolean {
   return conv.activity === "queued" || conv.activity === "running";
+}
+
+/** One transcript line as the chat pane renders it (a stored message, or an optimistic one). */
+export interface ChatEntry {
+  id: string;
+  role: "user" | "assistant";
+  /** user entries */
+  ask?: string;
+  /** user entries: the skill the line ran explicitly */
+  skill?: MessageSkill;
+  /** assistant entries */
+  response?: HolmesChatResponse & { drill_duration_ms?: number };
+  error?: string;
+  model?: string;
 }

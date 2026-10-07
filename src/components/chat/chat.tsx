@@ -14,11 +14,12 @@ import { Composer, type ComposerHandle, type SkillRun } from "./composer";
 import { loadConversation } from "./conversation-api";
 import { ChatHero, ExampleAsks } from "./empty-state";
 import {
-  AssistantMessage,
-  UserMessage,
-  type ChatEntry,
+  CHAT_WIDTH,
+  Investigation,
+  RAIL_GRID,
+  RailSpacer,
 } from "./messages";
-import { TurnCard } from "./turn-card";
+import { TurnCard, TurnStatus } from "./turn-card";
 import { freshView, useTurnStream, type TurnView } from "./use-turn-stream";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSkills } from "@/components/skills/use-skills";
@@ -35,7 +36,9 @@ import { useAgentModels } from "@/components/workspace/workspace-provider";
 import { invocationLine } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
 import { useSession } from "@/components/session/session-provider";
-import { isActiveTurn, type TurnSnapshot } from "@/lib/chat/types";
+import { describeDecisions } from "@/lib/chat/describe";
+import { groupInvestigations, investigationRows } from "@/lib/chat/investigations";
+import { isActiveTurn, type ChatEntry, type TurnSnapshot } from "@/lib/chat/types";
 import { viewTransitionSettled } from "@/components/ui/view-transition";
 import { cn } from "@/lib/utils";
 import type {
@@ -121,6 +124,7 @@ export function Chat({
   // at once instead of a gap, and it is the same TurnCard the real turn then
   // fills — so the orb that flew in on the first send is never remounted.
   const [pendingTurn, setPendingTurn] = useState<TurnView | null>(null);
+  const [stopClickedAt, setStopClickedAt] = useState<number | null>(null);
 
   /** Messages are the one source of truth once a turn settles or is dismissed. */
   const refresh = useCallback(async () => {
@@ -171,13 +175,16 @@ export function Chat({
     onActivity();
   }
 
-  // Follow the progress only while the reader is at the bottom: expanding a
-  // tool's output mid-investigation must not be yanked away by the next event.
+  // The transcript follows what is said — a send, an answer, a turn that
+  // stopped — never the tool calls, which grow inside their own rail. And only
+  // while the reader is at the bottom: reading back must not be yanked away.
+  const turnOutcome =
+    view && !isActiveTurn(view.turn.status) ? `${view.turn.id}:${view.turn.status}` : null;
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickRef.current)
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [entries, view, pendingTurn]);
+  }, [entries, turnOutcome]);
 
   function send(ask: string, preNotice?: string) {
     return run(ask, { ask }, preNotice);
@@ -196,20 +203,10 @@ export function Chat({
     );
   }
 
-  /** Answers the pending approval; the summary mirrors what the server stores. */
+  /** Answers the pending approval; the line is the one the server stores. */
   function decide(decisions: ToolApprovalDecision[]) {
-    const pending =
-      entries[entries.length - 1]?.response?.pending_approvals ?? [];
-    const summary = decisions
-      .map((d) => {
-        const name =
-          pending.find((a) => a.tool_call_id === d.tool_call_id)?.tool_name ??
-          "tool";
-        if (d.approved) return `Approved ${name}`;
-        return d.feedback ? `Denied ${name}: ${d.feedback}` : `Denied ${name}`;
-      })
-      .join("\n");
-    return run(summary, { tool_decisions: decisions });
+    const pending = entries[entries.length - 1]?.response?.pending_approvals;
+    return run(describeDecisions(pending, decisions), { tool_decisions: decisions });
   }
 
   /**
@@ -310,6 +307,24 @@ export function Chat({
 
   const empty = entries.length === 0 && !view;
   const shownTurn = view ?? pendingTurn;
+  const investigations = groupInvestigations(entries);
+  // The turn is always the last investigation's: its line (question or
+  // decision) is in the transcript from Send on.
+  if (shownTurn && investigations.length === 0)
+    investigations.push({ id: shownTurn.turn.id, question: null, parts: [] });
+  const lastInvestigation = investigations.at(-1);
+  // Compared with statusSince rather than reset in an effect: any status change
+  // (stopped, then resumed) is newer than the click, so Stop comes back.
+  const stopping =
+    stopClickedAt != null && view != null && stopClickedAt >= view.statusSince;
+  const liveStatus =
+    shownTurn && lastInvestigation && isActiveTurn(shownTurn.turn.status) ? (
+      <TurnStatus
+        view={shownTurn}
+        calls={investigationRows(lastInvestigation, shownTurn.items).calls}
+        stopping={stopping}
+      />
+    ) : null;
 
   return (
     <div className="flex h-full min-w-0 flex-1">
@@ -322,7 +337,7 @@ export function Chat({
       <div
         data-chat-empty={empty || undefined}
         className={cn(
-          "flex h-full min-w-0 flex-1 flex-col",
+          "@container/chat flex h-full min-w-0 flex-1 flex-col",
           empty && "justify-center pb-[8vh]",
         )}
       >
@@ -395,35 +410,48 @@ export function Chat({
               stickRef.current =
                 el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
             }}
-            className={cn("min-h-0 overflow-y-auto", empty ? "flex-initial" : "flex-1")}
+            // Both-edges gutter: the scrollbar would otherwise shift the centred
+            // column left of the composer below it. A size container once there
+            // is a transcript (it is flex-sized then, never content-sized), so
+            // the rail can be capped to exactly the visible height (`cqh`).
+            className={cn(
+              "min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]",
+              empty ? "flex-initial" : "flex-1 [container-type:size]",
+            )}
           >
-            <div className="mx-auto w-full max-w-[820px] px-6">
+            <div className={empty ? "mx-auto w-full max-w-[820px] px-6" : CHAT_WIDTH}>
               {empty ? (
                 <ChatHero />
               ) : (
-                <div data-transcript className="space-y-8 py-8">
-                  {entries.map((entry, i) =>
-                    entry.role === "user" ? (
-                      <UserMessage key={entry.id} ask={entry.ask!} skill={entry.skill} />
-                    ) : (
-                      <AssistantMessage
-                        key={entry.id}
-                        entry={entry}
+                <div data-transcript className="space-y-10 py-8">
+                  {investigations.map((inv) => {
+                    const turn = inv === lastInvestigation ? shownTurn : null;
+                    return (
+                      <Investigation
+                        key={inv.id}
+                        inv={inv}
+                        live={
+                          turn
+                            ? {
+                                items: turn.items,
+                                active: isActiveTurn(turn.turn.status),
+                                card: (
+                                  <TurnCard
+                                    view={turn}
+                                    onResume={() => turnAction("resume")}
+                                    onDismiss={() => turnAction("dismiss")}
+                                  />
+                                ),
+                              }
+                            : undefined
+                        }
+                        isLatest={inv === lastInvestigation}
+                        busy={active}
                         onFollowUp={onFollowUp}
                         onDecide={decide}
-                        busy={active}
-                        isLatest={i === entries.length - 1}
                       />
-                    ),
-                  )}
-                  {shownTurn && (
-                    <TurnCard
-                      view={shownTurn}
-                      onStop={view ? () => turnAction("cancel") : undefined}
-                      onResume={() => turnAction("resume")}
-                      onDismiss={() => turnAction("dismiss")}
-                    />
-                  )}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -431,42 +459,53 @@ export function Chat({
         </SkillBuilderContext.Provider>
         {/*
           The mode island is fixed in the bottom-right, where it would sit on the
-          composer's send button on narrow viewports. Reserve room for it — but
-          only for the admins who actually see it, and only below xl, where the
-          centred column no longer leaves that margin on its own.
+          composer's send button. Reserve room for it — only for the admins who
+          see it, and only while the pane leaves no margin of its own: below
+          ~940px for the 820px column, and again just past the rail breakpoint
+          (globals.css `rail`, 1100px), where the column widens to fill the pane.
         */}
         <div
           className={cn(
-            "mx-auto w-full max-w-[820px] px-6 pb-6 pt-2",
-            showsModeSwitch(user) && "pr-20 xl:pr-6",
+            empty ? "mx-auto w-full max-w-[820px] px-6" : [CHAT_WIDTH, RAIL_GRID],
+            "pb-6 pt-2",
+            showsModeSwitch(user) &&
+              "pr-20 @min-[940px]/chat:pr-6 @min-[1100px]/chat:pr-20 @min-[1220px]/chat:pr-6",
           )}
         >
-          {picking ? (
-            <SkillBuilderBar builder={builder} />
-          ) : (
-            <>
-              {actionError && (
-                <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
-              )}
-              <Composer
-                ref={composerRef}
-                onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
-                onStop={() => turnAction("cancel")}
-                busy={active}
-                models={models}
-                model={model}
-                onModelChange={setModel}
-                skills={runnableSkills}
-                // Survives leaving for Skills and coming back (the pane remounts).
-                draftKey={initialConversationId ?? `new:${agentId}`}
-                // Only the first send changes the page's shape; later ones just append.
-                animateSend={empty}
-              />
-              {empty && (
-                <ExampleAsks onPick={(ask, select) => composerRef.current?.fill(ask, select)} />
-              )}
-            </>
-          )}
+          {!empty && <RailSpacer />}
+          <div className="min-w-0">
+            {picking ? (
+              <SkillBuilderBar builder={builder} />
+            ) : (
+              <>
+                {actionError && (
+                  <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
+                )}
+                <Composer
+                  ref={composerRef}
+                  onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
+                  onStop={() => {
+                    setStopClickedAt(Date.now());
+                    turnAction("cancel");
+                  }}
+                  busy={active}
+                  stopping={stopping}
+                  status={liveStatus}
+                  models={models}
+                  model={model}
+                  onModelChange={setModel}
+                  skills={runnableSkills}
+                  // Survives leaving for Skills and coming back (the pane remounts).
+                  draftKey={initialConversationId ?? `new:${agentId}`}
+                  // Only the first send changes the page's shape; later ones just append.
+                  animateSend={empty}
+                />
+                {empty && (
+                  <ExampleAsks onPick={(ask, select) => composerRef.current?.fill(ask, select)} />
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
       {picking && <SkillBuilderPanel builder={builder} />}

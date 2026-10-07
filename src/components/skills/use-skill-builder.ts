@@ -10,7 +10,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { useLeaveGuard } from "@/components/ui/use-leave-guard";
-import type { ChatEntry } from "@/components/chat/messages";
+import type { ChatEntry } from "@/lib/chat/types";
 import {
   askedQuestions,
   MAX_SKILL_STEPS,
@@ -97,7 +97,7 @@ export function useSkillBuilderState(entries: ChatEntry[], conversationId: strin
         entries.map((e) => ({
           role: e.role,
           text: e.ask ?? "",
-          paused: !!e.response?.pending_approvals?.length,
+          pendingApprovals: e.response?.pending_approvals,
           skillRun: !!e.skill,
         })),
       ),

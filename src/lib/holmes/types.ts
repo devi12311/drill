@@ -42,6 +42,14 @@ export function isDrillTool(call: Pick<ToolCall, "toolset_name">): boolean {
   return toolset === "drill" || toolset.startsWith("drill-");
 }
 
+/**
+ * The record of a call Holmes paused on for approval. Once decided, the same
+ * `tool_call_id` comes back in the next answer with its real result.
+ */
+export function awaitsApproval(call: Pick<ToolCall, "result">): boolean {
+  return call.result.status === "approval_required";
+}
+
 export interface FollowUpAction {
   id: string;
   action_label: string;

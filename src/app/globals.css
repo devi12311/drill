@@ -3,6 +3,16 @@
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
+/*
+ * The chat pane is wide enough for the investigation rail beside the answer
+ * (rail 256 + gap 24 + the 772px body + gutters). A container query, not a media
+ * query: opening the skill-builder panel narrows the pane, not the viewport.
+ */
+@custom-variant rail {
+  @container chat (width >= 1100px) {
+    @slot;
+  }
+}
 
 /*
  * Drill theme — DESIGN.md ("Warp — moonlit terminal behind amber glass").
@@ -207,7 +217,7 @@
  * lands), so each is scoped to the one state where its element exists.
  */
 html[data-view-transition] [data-chat-empty] [data-composer-draft],
-html[data-view-transition] [data-transcript] > :first-child {
+html[data-view-transition] [data-transcript] [data-ask] {
   view-transition-name: chat-ask;
 }
 html[data-view-transition] [data-chat-hero] {
@@ -228,7 +238,7 @@ html[data-view-transition] [data-turn-card] {
   animation-duration: 520ms;
   animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
-/* The ask's two renderings (14px draft, 16px message) swap fast, not ghost. */
+/* The ask's two renderings (draft text, message bubble) swap fast, not ghost. */
 ::view-transition-old(chat-ask),
 ::view-transition-new(chat-ask) {
   animation-duration: 140ms;

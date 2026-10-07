@@ -136,7 +136,7 @@ export async function POST(request: Request, context: Context) {
             rows.map((r) => ({
               role: r.role,
               text: r.content,
-              paused: !!(r.rawResponse as HolmesChatResponse | null)?.pending_approvals?.length,
+              pendingApprovals: (r.rawResponse as HolmesChatResponse | null)?.pending_approvals,
               skillRun: r.skill !== null,
             })),
           ).map((q) => q.text),

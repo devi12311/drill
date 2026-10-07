@@ -14,26 +14,11 @@ import type {
   ToolApprovalDecision,
 } from "@/lib/holmes/types";
 import { servedModels } from "@/lib/holmes/validate";
+import { describeDecisions } from "@/lib/chat/describe";
 import { buildHolmesExtras } from "@/lib/chat/extras";
 import { getUsableSkill } from "@/lib/db/skill-queries";
 import { invocationLine, renderInvocation } from "@/lib/skills/prompt";
 import { validateSkillValues, type MessageSkill } from "@/lib/skills/types";
-
-/** How a decision reads in the transcript (stored as the user's turn). */
-function describeDecisions(
-  paused: HolmesChatResponse,
-  decisions: ToolApprovalDecision[],
-): string {
-  return decisions
-    .map((d) => {
-      const name =
-        paused.pending_approvals?.find((a) => a.tool_call_id === d.tool_call_id)
-          ?.tool_name ?? "tool";
-      if (d.approved) return `Approved ${name}`;
-      return d.feedback ? `Denied ${name}: ${d.feedback}` : `Denied ${name}`;
-    })
-    .join("\n");
-}
 
 /**
  * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }, or
@@ -199,7 +184,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const note = paused ? describeDecisions(paused, decisions!) : undefined;
+  const note = paused ? describeDecisions(paused.pending_approvals, decisions!) : undefined;
   try {
     const result = await openTurn({
       scope: ctx,

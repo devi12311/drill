@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { ArrowUp, ChevronDown, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -93,6 +93,8 @@ export function Composer({
   onSend,
   onStop,
   busy,
+  stopping = false,
+  status,
   models,
   model,
   onModelChange,
@@ -109,6 +111,10 @@ export function Composer({
   onStop: () => void;
   /** An investigation is running: Send becomes Stop, typing stays allowed. */
   busy: boolean;
+  /** Stop was pressed and the investigation has not stopped yet. */
+  stopping?: boolean;
+  /** What the running investigation is doing — shown on top, beside its Stop. */
+  status?: ReactNode;
   /** Null while the agent's list is loading. */
   models: string[] | null;
   /** Null until the agent has served at least one model. */
@@ -248,6 +254,7 @@ export function Composer({
           </div>
         </div>
       )}
+      {status && <div className="border-b border-border/60 pb-2.5">{status}</div>}
       {run && (
         <div className="space-y-2.5 border-b border-border px-4 pb-3 pt-3">
           <div className="flex items-center justify-between gap-3">
@@ -365,8 +372,9 @@ export function Composer({
               size="icon-sm"
               variant="secondary"
               onClick={onStop}
-              aria-label="Stop the investigation"
-              title="Stop the investigation"
+              disabled={stopping}
+              aria-label={stopping ? "Stopping the investigation" : "Stop the investigation"}
+              title={stopping ? "Stopping…" : "Stop the investigation"}
             >
               <Square className="size-3.5" />
             </Button>

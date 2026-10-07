@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { ChevronRight, RotateCw, Square } from "lucide-react";
+import { ChevronRight, RotateCw } from "lucide-react";
 import type { OrbState } from "thinking-orbs";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,9 +10,10 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { turnErrorHeadline } from "@/lib/chat/describe";
+import type { LiveItem } from "@/lib/chat/investigations";
+import { isActiveTurn } from "@/lib/chat/types";
 import { cn } from "@/lib/utils";
 import { DrillOrb } from "./orb";
-import { LiveTimeline, type LiveItem } from "./tool-timeline";
 import type { TurnView } from "./use-turn-stream";
 
 /** After this long without an event, say what Holmes is doing instead of nothing. */
@@ -25,13 +26,13 @@ function clock(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function useNow(enabled: boolean): number {
+/** The wall clock, ticking every second while mounted. */
+function useNow(): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!enabled) return;
     const t = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(t);
-  }, [enabled]);
+  }, []);
   return now;
 }
 
@@ -111,73 +112,36 @@ export function StoppedNotice({
 }
 
 /**
- * One investigation, from Send to its answer. It never disappears on failure: the
- * timeline stays, and the next step is one button.
+ * What the running turn is doing, how long it has run — the strip on top of the
+ * composer, where Stop is. Its calls stream into the investigation's rail.
  */
-export function TurnCard({
+export function TurnStatus({
   view,
-  onStop,
-  onResume,
-  onDismiss,
+  calls,
+  stopping,
 }: {
   view: TurnView;
-  /** Absent while the turn is still being queued — there is nothing to stop yet. */
-  onStop?: () => void;
-  onResume: () => void;
-  onDismiss: () => void;
+  /** Tool calls so far in the whole investigation — an approval pause does not reset it. */
+  calls: number;
+  /** Stop was pressed and the turn has not stopped yet. */
+  stopping: boolean;
 }) {
   const { turn, items } = view;
-  const live = turn.status === "queued" || turn.status === "running";
-  const localNow = useNow(live);
-  // Compared with statusSince rather than reset in an effect: any status change
-  // (stopped, then resumed) is newer than the click, so the button comes back.
-  const [stopClickedAt, setStopClickedAt] = useState<number | null>(null);
-  const stopping = stopClickedAt != null && stopClickedAt >= view.statusSince;
+  const localNow = useNow();
   const serverNow = localNow + view.clockOffset;
   const started = Date.parse(turn.startedAt ?? turn.createdAt);
-  const calls = items.filter(
-    (i) => i.kind === "call" && i.call.tool_name !== "TodoWrite",
-  ).length;
   const inFlight = items.some((i) => i.kind === "call" && !i.call.toolCall);
   const quiet = view.lastEventAt != null ? serverNow - view.lastEventAt : 0;
   const queuedFor = localNow - view.statusSince;
-
-  if (!live) {
-    return (
-      <div className="space-y-4">
-        <LiveTimeline items={items} aiNote={view.aiNote} stopped />
-        <StoppedNotice
-          error={turn.error}
-          cancelled={turn.status === "cancelled"}
-          savedResults={evidenceCount(items)}
-          actions={
-            <>
-              {turn.resumable && (
-                <Button size="sm" onClick={onResume}>
-                  <RotateCw className="size-4" />
-                  Resume
-                </Button>
-              )}
-              <Button size="sm" variant="ghost" onClick={onDismiss}>
-                Dismiss
-              </Button>
-            </>
-          }
-          footer={
-            <p className="text-[12px] text-bone-gray">
-              Sending a new message keeps these results in the transcript.
-            </p>
-          }
-        />
-      </div>
-    );
-  }
 
   let status: string;
   let hint: string | null = null;
   // The orb says the phase at a glance: waiting, gathering, then thinking it over.
   let orb: OrbState = "searching";
-  if (turn.status === "queued") {
+  if (stopping) {
+    orb = "breathing";
+    status = "Stopping…";
+  } else if (turn.status === "queued") {
     orb = "breathing";
     status =
       turn.attempt > 0
@@ -199,29 +163,62 @@ export function TurnCard({
   }
 
   return (
-    <div data-turn-card className="space-y-3">
+    <div data-turn-card role="status" className="space-y-1 px-4 pt-2.5">
       <div className="flex items-center gap-3 text-body-sm text-bone-gray">
         <DrillOrb state={orb} size={20} />
         <span className="min-w-0 truncate">{status}</span>
-        <span className="font-mono text-[12px] tabular-nums">
+        <span className="ml-auto shrink-0 font-mono text-[12px] tabular-nums">
           {clock(serverNow - started)}
         </span>
-        <Button
-          size="xs"
-          variant="ghost"
-          className="ml-auto"
-          disabled={stopping || !onStop}
-          onClick={() => {
-            setStopClickedAt(Date.now());
-            onStop?.();
-          }}
-        >
-          <Square className="size-3" />
-          {stopping ? "Stopping…" : "Stop"}
-        </Button>
       </div>
-      {hint && <p className="text-[12px] text-bone-gray">{hint}</p>}
-      <LiveTimeline items={items} aiNote={view.aiNote} />
+      {hint && <p className="pl-8 text-[12px] text-bone-gray">{hint}</p>}
     </div>
+  );
+}
+
+/**
+ * The turn in the investigation body: Holmes's latest note while it runs. It
+ * never disappears on failure: the calls stay in the rail, and the next step is
+ * one button.
+ */
+export function TurnCard({
+  view,
+  onResume,
+  onDismiss,
+}: {
+  view: TurnView;
+  onResume: () => void;
+  onDismiss: () => void;
+}) {
+  const { turn, items } = view;
+  if (isActiveTurn(turn.status))
+    return view.aiNote ? (
+      <p className="text-body-sm italic text-bone-gray">{view.aiNote}</p>
+    ) : null;
+
+  return (
+    <StoppedNotice
+      error={turn.error}
+      cancelled={turn.status === "cancelled"}
+      savedResults={evidenceCount(items)}
+      actions={
+        <>
+          {turn.resumable && (
+            <Button size="sm" onClick={onResume}>
+              <RotateCw className="size-4" />
+              Resume
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" onClick={onDismiss}>
+            Dismiss
+          </Button>
+        </>
+      }
+      footer={
+        <p className="text-[12px] text-bone-gray">
+          Sending a new message keeps these results in the transcript.
+        </p>
+      }
+    />
   );
 }

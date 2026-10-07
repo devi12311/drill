@@ -8,7 +8,7 @@ import {
   type TurnSnapshot,
   type TurnStreamMessage,
 } from "@/lib/chat/types";
-import type { LiveItem } from "./tool-timeline";
+import type { LiveItem } from "@/lib/chat/investigations";
 
 /** Everything the turn card renders, rebuilt from the stored events. */
 export interface TurnView {

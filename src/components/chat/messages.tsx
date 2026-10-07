@@ -1,41 +1,57 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ShieldCheck, ShieldX } from "lucide-react";
 import { Markdown } from "./markdown";
-import { ToolTimeline } from "./tool-timeline";
+import { InvestigationRail } from "./investigation-rail";
 import { ApprovalCard } from "./approval-card";
 import { StoppedNotice } from "./turn-card";
+import type { DecisionView } from "@/lib/chat/describe";
+import {
+  investigationCost,
+  investigationRows,
+  type Investigation as InvestigationData,
+  type LiveItem,
+} from "@/lib/chat/investigations";
+import type { ChatEntry } from "@/lib/chat/types";
 import type {
   FollowUpAction,
-  HolmesChatResponse,
   ToolApprovalDecision,
   ToolCall,
 } from "@/lib/holmes/types";
 import { useSkillBuilder } from "@/components/skills/use-skill-builder";
 import { FETCH_SKILL_TOOL_NAME } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
+import { cn } from "@/lib/utils";
 
-export interface ChatEntry {
-  id: string;
-  role: "user" | "assistant";
-  /** user entries */
-  ask?: string;
-  /** user entries: the skill the line ran explicitly */
-  skill?: MessageSkill;
-  /** assistant entries */
-  response?: HolmesChatResponse & { drill_duration_ms?: number };
-  error?: string;
-  model?: string;
+/**
+ * The chat column, wider once the pane can hold the investigation rail beside
+ * the answer (the `rail` variant).
+ */
+export const CHAT_WIDTH = "mx-auto w-full max-w-[820px] px-6 rail:max-w-[1100px]";
+
+/**
+ * Rail beside body. Each investigation and the composer use it, so the composer
+ * always lines up with the body it answers into.
+ */
+export const RAIL_GRID =
+  "grid grid-cols-1 rail:grid-cols-[256px_minmax(0,1fr)] rail:gap-x-6";
+
+/** The rail's cell when there is nothing in it — holds the body's column. */
+export function RailSpacer() {
+  return <div aria-hidden className="hidden rail:block" />;
 }
 
-/** User ask rendered as a terminal command line (DESIGN.md brew-chip voice). */
-export function UserMessage({ ask, skill }: { ask: string; skill?: MessageSkill }) {
+/** The user's question: a message bubble on the right, apart from what Holmes says. */
+function UserMessage({ ask, skill }: { ask: string; skill?: MessageSkill }) {
   return (
-    <div className="flex items-baseline gap-3">
-      <span className="mt-1 size-2 shrink-0 translate-y-[-1px] rounded-full bg-prompt-green" />
-      <div className="min-w-0 flex-1">
+    <div className="flex justify-end">
+      <div className="flex max-w-[75%] min-w-0 flex-col items-end gap-1.5">
         {skill && <SkillTag label="Ran skill" name={skill.name} />}
-        <p className="font-mono text-body whitespace-pre-wrap break-words text-warm-off-white">
+        <p
+          data-ask
+          className="rounded-lg bg-smoke-charcoal px-4 py-2.5 text-body-sm whitespace-pre-wrap break-words text-warm-off-white"
+        >
           {ask}
         </p>
       </div>
@@ -45,8 +61,28 @@ export function UserMessage({ ask, skill }: { ask: string; skill?: MessageSkill 
 
 function SkillTag({ label, name }: { label: string; name: string }) {
   return (
-    <div className="mb-1.5 text-caption-tracked uppercase text-bone-gray">
+    <div className="text-caption-tracked uppercase text-bone-gray">
       {label} · <span className="font-mono normal-case tracking-normal text-pale-stone">{name}</span>
+    </div>
+  );
+}
+
+/** The person's answer to an approval pause — an event in the investigation, not a question. */
+function DecisionLine({ decision }: { decision: DecisionView }) {
+  const Icon = decision.approved ? ShieldCheck : ShieldX;
+  return (
+    <div className="flex min-w-0 items-baseline gap-2 text-body-sm text-bone-gray">
+      <Icon className="size-3.5 shrink-0 translate-y-0.5" />
+      <span className="shrink-0">
+        You {decision.approved ? "approved" : "denied"}{" "}
+        <span className="font-mono text-[13px] text-pale-stone">{decision.tool_name}</span>
+      </span>
+      <span className="min-w-0 truncate font-mono text-[12px]" title={decision.description}>
+        {decision.description}
+      </span>
+      {decision.feedback && (
+        <span className="min-w-0 truncate italic">— {decision.feedback}</span>
+      )}
     </div>
   );
 }
@@ -60,24 +96,14 @@ function fetchedSkills(toolCalls: ToolCall[]): string[] {
   return [...new Set(names)];
 }
 
-function CostFooter({
-  response,
-  model,
-}: {
-  response: ChatEntry["response"];
-  model?: string;
-}) {
-  const meta = response?.metadata;
-  if (!meta) return null;
+function CostFooter({ inv }: { inv: InvestigationData }) {
+  const { cost, tokens, ms, model } = investigationCost(inv);
+  if (cost == null && tokens == null) return null;
   const parts: string[] = [];
   if (model) parts.push(model);
-  if (meta.costs?.total_cost != null)
-    parts.push(`$${meta.costs.total_cost.toFixed(4)}`);
-  if (meta.usage?.total_tokens != null)
-    parts.push(`${meta.usage.total_tokens.toLocaleString()} tok`);
-  if (response?.drill_duration_ms != null)
-    parts.push(`${Math.round(response.drill_duration_ms / 1000)}s`);
-  if (parts.length === 0) return null;
+  if (cost != null) parts.push(`$${cost.toFixed(4)}`);
+  if (tokens != null) parts.push(`${tokens.toLocaleString()} tok`);
+  if (ms != null) parts.push(`${Math.round(ms / 1000)}s`);
   return (
     <div className="text-caption-tracked uppercase text-bone-gray">
       {parts.join(" · ")}
@@ -116,7 +142,7 @@ function FoldedAnalysis({ text }: { text: string }) {
   );
 }
 
-export function FollowUpChips({
+function FollowUpChips({
   actions,
   onPick,
   disabled,
@@ -143,22 +169,17 @@ export function FollowUpChips({
   );
 }
 
-export function AssistantMessage({
+/** One stored answer inside an investigation: its analysis, or why it stopped. */
+function AnswerPart({
   entry,
-  onFollowUp,
-  onDecide,
-  busy,
-  isLatest,
+  picking,
+  approval,
 }: {
   entry: ChatEntry;
-  onFollowUp: (action: FollowUpAction) => void;
-  onDecide: (decisions: ToolApprovalDecision[]) => void;
-  busy: boolean;
-  /** Only the latest entry's pending approval can still be answered. */
-  isLatest: boolean;
+  picking: boolean;
+  /** The pause's approval prompt, when this answer is the one waiting. */
+  approval?: ReactNode;
 }) {
-  // While picking steps, only the calls and their context matter.
-  const picking = useSkillBuilder() !== null;
   if (entry.error) {
     return (
       <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-body-sm text-warm-off-white">
@@ -172,46 +193,122 @@ export function AssistantMessage({
   const response = entry.response;
   if (!response) return null;
   if (response.drill_error) {
-    // A stopped turn the user moved on from: what it gathered stays readable.
-    const toolCalls = response.tool_calls ?? [];
+    // A stopped turn the user moved on from: what it gathered stays in the rail.
     return (
-      <div className="space-y-4">
-        <ToolTimeline toolCalls={toolCalls} messageId={entry.id} />
-        <StoppedNotice
-          error={response.drill_error}
-          cancelled={response.drill_error.startsWith("Stopped")}
-          savedResults={toolCalls.filter((c) => c.tool_name !== "TodoWrite").length}
-        />
-      </div>
+      <StoppedNotice
+        error={response.drill_error}
+        cancelled={response.drill_error.startsWith("Stopped")}
+        savedResults={(response.tool_calls ?? []).filter((c) => c.tool_name !== "TodoWrite").length}
+      />
     );
   }
-  const usedSkills = fetchedSkills(response.tool_calls ?? []);
   return (
-    <div className="space-y-4">
-      {usedSkills.length > 0 && <SkillTag label="Used skill" name={usedSkills.join(", ")} />}
-      <ToolTimeline toolCalls={response.tool_calls ?? []} messageId={entry.id} />
-      {picking ? (
-        <FoldedAnalysis text={response.analysis} />
-      ) : (
-        <Markdown>{response.analysis}</Markdown>
+    <>
+      {response.analysis?.trim() &&
+        (picking ? (
+          <FoldedAnalysis text={response.analysis} />
+        ) : (
+          <Markdown>{response.analysis}</Markdown>
+        ))}
+      {!picking && approval}
+    </>
+  );
+}
+
+/** The investigation's turn while it runs — or after it stopped, until Resume or Dismiss. */
+interface LiveTurn {
+  items: LiveItem[];
+  /** The turn in the body: Holmes's latest note, or the stopped notice. */
+  card: ReactNode;
+  active: boolean;
+}
+
+/**
+ * A question and everything Holmes did to answer it — approval pauses and the
+ * turn still running included — as one rail of plan and calls beside one body.
+ */
+export function Investigation({
+  inv,
+  live,
+  isLatest,
+  busy,
+  onFollowUp,
+  onDecide,
+}: {
+  inv: InvestigationData;
+  live?: LiveTurn;
+  /** Only the latest investigation's pending approval can still be answered. */
+  isLatest: boolean;
+  busy: boolean;
+  onFollowUp: (action: FollowUpAction) => void;
+  onDecide: (decisions: ToolApprovalDecision[]) => void;
+}) {
+  // While picking steps, only the calls and their context matter.
+  const picking = useSkillBuilder() !== null;
+  const rail = investigationRows(inv, live?.items);
+  const answers = inv.parts.flatMap((p) => (p.kind === "answer" ? [p.entry] : []));
+  const usedSkills = fetchedSkills(answers.flatMap((e) => e.response?.tool_calls ?? []));
+  const last = inv.parts.at(-1);
+  // The answer that closed the investigation — where its follow-ups and cost go.
+  const final =
+    !live && last?.kind === "answer" && last.entry.response && !last.entry.response.drill_error
+      ? last.entry.response
+      : null;
+
+  return (
+    // Narrow: question, then the work, then the answer. Wide: the rail spans
+    // both rows beside them, so it starts level with the question — and the
+    // body row is `1fr`, so a tall rail lengthens it, not the question's row
+    // (which would push the answer further down with every call).
+    <div className={cn(RAIL_GRID, "gap-y-4 rail:grid-rows-[auto_1fr]")}>
+      {inv.question && (
+        <div className="min-w-0 rail:col-start-2">
+          <UserMessage ask={inv.question.ask!} skill={inv.question.skill} />
+        </div>
       )}
-      {!picking && !!response.pending_approvals?.length && (
-        <ApprovalCard
-          approvals={response.pending_approvals}
-          actionable={isLatest && !busy}
-          onDecide={onDecide}
+      {(rail.rows.length > 0 || rail.todos || live?.active) && (
+        // Placed directly, not wrapped: a sticky box only travels within its parent.
+        <InvestigationRail
+          data={rail}
+          live={live?.active}
+          stopped={!!live && !live.active}
+          className="rail:col-start-1 rail:row-span-2 rail:row-start-1"
         />
       )}
-      {!picking && (
-        <>
-          <FollowUpChips
-            actions={response.follow_up_actions ?? []}
-            onPick={onFollowUp}
-            disabled={busy}
-          />
-          <CostFooter response={response} model={entry.model} />
-        </>
-      )}
+      <div className="min-w-0 space-y-5 rail:col-start-2">
+        {usedSkills.length > 0 && <SkillTag label="Used skill" name={usedSkills.join(", ")} />}
+        {inv.parts.map((part) =>
+          part.kind === "decision" ? (
+            part.decisions.map((d, i) => <DecisionLine key={`${part.entry.id}:${i}`} decision={d} />)
+          ) : (
+            <AnswerPart
+              key={part.entry.id}
+              entry={part.entry}
+              picking={picking}
+              approval={
+                part === last && !!part.entry.response?.pending_approvals?.length && (
+                  <ApprovalCard
+                    approvals={part.entry.response.pending_approvals}
+                    actionable={isLatest && !busy}
+                    onDecide={onDecide}
+                  />
+                )
+              }
+            />
+          ),
+        )}
+        {live?.card}
+        {final && !picking && (
+          <>
+            <FollowUpChips
+              actions={final.follow_up_actions ?? []}
+              onPick={onFollowUp}
+              disabled={busy}
+            />
+            <CostFooter inv={inv} />
+          </>
+        )}
+      </div>
     </div>
   );
 }

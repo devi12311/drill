@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Chat } from "@/components/chat/chat";
 import { loadConversation } from "@/components/chat/conversation-api";
-import type { ChatEntry } from "@/components/chat/messages";
+import type { ChatEntry } from "@/lib/chat/types";
 import { useSession } from "@/components/session/session-provider";
 import { useWorkspace } from "@/components/workspace/workspace-provider";
 import { writeChatUrl } from "@/lib/workspace/nav";

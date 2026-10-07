@@ -1,6 +1,6 @@
 import type { TurnSnapshot } from "@/lib/chat/types";
 import type { MessageSkill } from "@/lib/skills/types";
-import type { ChatEntry } from "./messages";
+import type { ChatEntry } from "@/lib/chat/types";
 
 interface StoredMessage {
   id: string;

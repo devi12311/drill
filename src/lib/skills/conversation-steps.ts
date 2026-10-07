@@ -1,5 +1,11 @@
 import { SEARCH_TOOL_NAME } from "@/lib/artifacts/types";
-import { isDrillTool, type ToolCall } from "@/lib/holmes/types";
+import { parseDecisions } from "@/lib/chat/describe";
+import {
+  awaitsApproval,
+  isDrillTool,
+  type PendingToolApproval,
+  type ToolCall,
+} from "@/lib/holmes/types";
 import { FETCH_SKILL_TOOL_NAME } from "./prompt";
 import { SKILL_LIMITS, checkInput, toInputKey } from "./types";
 
@@ -37,39 +43,52 @@ export function isAddableStep(call: ToolCall): boolean {
 
 export interface ConversationStep {
   key: string;
+  /** The stored message the call belongs to. */
+  messageId: string;
   call: ToolCall;
   /** Position in the conversation — what step numbers follow. */
   order: number;
 }
 
-/** Every call of the conversation's assistant messages, keyed, in conversation order. */
+/**
+ * Every call of the conversation's assistant messages, keyed, in conversation
+ * order. A call paused for approval appears once: its later result replaces the
+ * paused record (which keeps no output of its own).
+ */
 export function conversationCalls(
   messages: readonly { id: string; toolCalls: readonly ToolCall[] }[],
 ): ConversationStep[] {
+  const answered = new Set<string>();
   const out: ConversationStep[] = [];
-  for (const message of messages)
-    message.toolCalls.forEach((call, i) =>
-      out.push({ key: stepKey(message.id, i), call, order: out.length }),
-    );
-  return out;
+  // Walked newest first: a paused record is superseded by a result after it.
+  for (const message of [...messages].reverse())
+    for (let i = message.toolCalls.length - 1; i >= 0; i--) {
+      const call = message.toolCalls[i];
+      if (awaitsApproval(call) && answered.has(call.tool_call_id)) continue;
+      if (!awaitsApproval(call)) answered.add(call.tool_call_id);
+      out.push({ key: stepKey(message.id, i), messageId: message.id, call, order: 0 });
+    }
+  return out.reverse().map((step, order) => ({ ...step, order }));
 }
 
 export interface TranscriptLine {
   role: "user" | "assistant";
   text: string;
-  /** Assistant: the answer stopped to ask for tool approval. */
-  paused?: boolean;
+  /** Assistant: the calls the answer stopped on, waiting for approval. */
+  pendingApprovals?: readonly PendingToolApproval[] | null;
   /** User: the line ran a skill explicitly ("/name key=value"). */
   skillRun?: boolean;
 }
 
 /**
- * What the person asked, in order. The line after a paused answer is their
+ * What the person asked, in order. A line answering a paused answer is their
  * approval decision ("Approved bash"), stored as a user message but not a question.
  */
 export function askedQuestions(lines: readonly TranscriptLine[]): { text: string; skillRun: boolean }[] {
   return lines.flatMap((line, i) =>
-    line.role === "user" && line.text && !lines[i - 1]?.paused
+    line.role === "user" &&
+    line.text &&
+    !parseDecisions(line.text, lines[i - 1]?.pendingApprovals ?? [])
       ? [{ text: line.text, skillRun: !!line.skillRun }]
       : [],
   );
