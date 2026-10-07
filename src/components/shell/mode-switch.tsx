@@ -4,7 +4,16 @@ import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { MessagesSquare, ShieldCheck } from "lucide-react";
 import { useSession } from "@/components/session/session-provider";
+import type { SessionUser } from "@/lib/auth/me";
 import { ADMIN_HOME, CHAT_HOME, isAdminPath } from "@/lib/routes";
+
+/**
+ * Who sees the island. Anything else pinned to the bottom-right corner (the
+ * composer, the skill builder's footer) clears room for it on the same rule.
+ */
+export function showsModeSwitch(user: Pick<SessionUser, "actorIsAdmin" | "isOrgAdmin">): boolean {
+  return user.actorIsAdmin || user.isOrgAdmin;
+}
 
 /**
  * The mode island: a circular control pinned to the bottom-right that flips
@@ -26,7 +35,7 @@ export function ModeSwitch() {
   const { user } = useSession();
   const pathname = usePathname();
   const router = useRouter();
-  const allowed = user.actorIsAdmin || user.isOrgAdmin;
+  const allowed = showsModeSwitch(user);
   const inAdmin = isAdminPath(pathname);
   const target = inAdmin ? CHAT_HOME : ADMIN_HOME;
 

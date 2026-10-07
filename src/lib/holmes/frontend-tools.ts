@@ -22,7 +22,7 @@ export interface FrontendToolOutcome {
 
 interface FrontendTool {
   def: FrontendToolDef;
-  /** The timeline's toolset label. */
+  /** The timeline's toolset label — "drill-…", which `isDrillTool` relies on. */
   toolset: string;
   /** Never throws: a broken Drill feature must not kill a live investigation. */
   run(args: Record<string, unknown>, ctx: FrontendToolContext): Promise<FrontendToolOutcome>;

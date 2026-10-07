@@ -25,7 +25,7 @@ export interface TurnView {
   statusSince: number;
 }
 
-function freshView(turn: TurnSnapshot, notice?: string): TurnView {
+export function freshView(turn: TurnSnapshot, notice?: string): TurnView {
   return {
     turn,
     items: [],

@@ -3,7 +3,7 @@ import { getAgent } from "@/lib/db/queries";
 import { usableSkills } from "@/lib/db/skill-queries";
 import { fixtureMode } from "@/lib/holmes/stream";
 import { servedModels } from "@/lib/holmes/validate";
-import { draftSkill } from "@/lib/skills/draft";
+import { draftSkill, requestSource } from "@/lib/skills/draft";
 import { validateSkillDraft, type SkillDraft } from "@/lib/skills/types";
 
 // A real Holmes call that may confirm a name or two with tools — allow the time.
@@ -67,7 +67,7 @@ export async function POST(request: Request) {
     const draft = await draftSkill(
       { url: agent.url, apiKey: agent.apiKey },
       model,
-      { request: ask, current, existing },
+      { source: requestSource(ask), current, existing },
       request.signal,
     );
     return Response.json({ draft });

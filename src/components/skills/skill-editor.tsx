@@ -1,6 +1,13 @@
 "use client";
 
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import { Check, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,9 +21,11 @@ import { Markdown } from "@/components/chat/markdown";
 import { useSession } from "@/components/session/session-provider";
 import { SkillDrafter } from "./skill-drafter";
 import { cn } from "@/lib/utils";
+import { SKILL_SEED_KEY } from "@/lib/skills/conversation-steps";
 import {
   SKILL_LIMITS,
   hasProblems,
+  validateSkillDraft,
   skillDraftProblems,
   toInputKey,
   toSkillName,
@@ -69,6 +78,19 @@ function changedFields(a: SkillDraft, b: SkillDraft): DraftField[] {
   if (!sameInputs(a.inputs, b.inputs)) changed.push("inputs");
   if (a.body !== b.body) changed.push("body");
   return changed;
+}
+
+const noSubscription = () => () => {};
+const readSeed = () => sessionStorage.getItem(SKILL_SEED_KEY);
+const noSeed = () => null;
+
+/** A stale or tampered seed is just not offered; the form stays blank. */
+function parseSeed(raw: string): SkillDraft | null {
+  try {
+    return validateSkillDraft(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function listOf(words: string[]): string {
@@ -220,7 +242,14 @@ function ProcedureTabs({
  * so a save only fails for reasons the form could not know (a taken name, a lost
  * permission) — and every other problem is shown beside its own field.
  */
-export function SkillEditor({ skill }: { skill: SkillView | null }) {
+export function SkillEditor({
+  skill,
+  fromConversation = false,
+}: {
+  skill: SkillView | null;
+  /** `/skills/new?from=conversation`: start from the skill builder's draft. */
+  fromConversation?: boolean;
+}) {
   const router = useRouter();
   const { user } = useSession();
   // What the server holds. Moves forward on save, so "unsaved" is always
@@ -260,6 +289,34 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
   const visit = (field: DraftField) => () =>
     setVisited((v) => (v.has(field) ? v : new Set(v).add(field)));
 
+  /** A Holmes draft replaces the form, with one step of Undo and its fields marked. */
+  function applyHolmesDraft(next: SkillDraft) {
+    setBeforeDraft(draft);
+    setHolmesFields(changedFields(next, draft));
+    setJustSaved(false);
+    setDraft(next);
+  }
+
+  // A draft the chat's skill builder handed over in sessionStorage. Read through
+  // an external store so the server render (which has no sessionStorage) and
+  // hydration agree, then applied during render — once per seed — and removed so
+  // a reload is a blank form rather than the same draft again.
+  const seed = useSyncExternalStore(noSubscription, readSeed, noSeed);
+  const [appliedSeed, setAppliedSeed] = useState<string | null>(null);
+  if (fromConversation && skill === null && seed && seed !== appliedSeed) {
+    setAppliedSeed(seed);
+    const next = parseSeed(seed);
+    if (next) {
+      setBeforeDraft(EMPTY);
+      setHolmesFields(changedFields(next, EMPTY));
+      setDraft(next);
+    }
+  }
+  const seeded = appliedSeed !== null;
+  useEffect(() => {
+    if (appliedSeed) sessionStorage.removeItem(SKILL_SEED_KEY);
+  }, [appliedSeed]);
+
   const unused = unusedInputs(draft);
   const update = (patch: Partial<SkillDraft>) => {
     setJustSaved(false);
@@ -289,15 +346,16 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
       const result: SkillView = skill
         ? await send("PATCH", `/api/skills/${skill.id}`, draft)
         : await send("POST", "/api/skills", draft);
-      // The server trims; take its copy so the form is not "changed" by a space.
+      // Saving finishes the edit, so it leaves for the library (which refetches on
+      // mount). Until that route paints, the form shows the saved copy as clean —
+      // Save disabled, "Saved" beside it — instead of a button that looks dead.
       const next = toDraft(result);
       setSaved(next);
       setDraft(next);
       setBeforeDraft(null);
       setHolmesFields([]);
       setJustSaved(true);
-      if (!skill) router.replace(`/skills/${result.id}`);
-      router.refresh();
+      router.push("/skills");
     });
 
   // These save on their own, so they report on their own, beside the checkbox.
@@ -325,14 +383,11 @@ export function SkillEditor({ skill }: { skill: SkillView | null }) {
       {!readOnly && (
         <div className="space-y-2">
           <SkillDrafter
-            startOpen={skill === null}
+            // Remounted when a seed lands, so it collapses to its Revise button.
+            key={seeded ? "seeded" : "blank"}
+            startOpen={skill === null && !seeded}
             current={hasContent ? draft : null}
-            onDraft={(next) => {
-              setBeforeDraft(draft);
-              setHolmesFields(changedFields(next, draft));
-              setJustSaved(false);
-              setDraft(next);
-            }}
+            onDraft={applyHolmesDraft}
           />
           {beforeDraft && (
             <p className="text-body-sm text-bone-gray">

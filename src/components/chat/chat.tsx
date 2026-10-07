@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, ChevronDown } from "lucide-react";
+import { CheckCircle2, ChevronDown, ListChecks } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -10,33 +10,38 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Composer, type SkillRun } from "./composer";
+import { Composer, type ComposerHandle, type SkillRun } from "./composer";
 import { loadConversation } from "./conversation-api";
+import { ChatHero, ExampleAsks } from "./empty-state";
 import {
   AssistantMessage,
   UserMessage,
   type ChatEntry,
 } from "./messages";
 import { TurnCard } from "./turn-card";
-import { useTurnStream } from "./use-turn-stream";
+import { freshView, useTurnStream, type TurnView } from "./use-turn-stream";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSkills } from "@/components/skills/use-skills";
+import {
+  SkillBuilderBar,
+  SkillBuilderPanel,
+} from "@/components/skills/skill-builder-rail";
+import {
+  SkillBuilderContext,
+  useSkillBuilderState,
+} from "@/components/skills/use-skill-builder";
+import { showsModeSwitch } from "@/components/shell/mode-switch";
 import { useAgentModels } from "@/components/workspace/workspace-provider";
 import { invocationLine } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
 import { useSession } from "@/components/session/session-provider";
 import { isActiveTurn, type TurnSnapshot } from "@/lib/chat/types";
+import { viewTransitionSettled } from "@/components/ui/view-transition";
 import { cn } from "@/lib/utils";
 import type {
   FollowUpAction,
   ToolApprovalDecision,
 } from "@/lib/holmes/types";
-
-const EXAMPLE_ASKS = [
-  "What is wrong with trace id …? Suggest a fix in the code.",
-  "Summarize the health of the database StatefulSets in namespace Z",
-  "Why is deployment X crash-looping in namespace Y?",
-];
 
 /** Within this many px of the bottom, new progress keeps the view pinned there. */
 const STICK_PX = 120;
@@ -111,6 +116,11 @@ export function Chat({
   const conversationIdRef = useRef<string | null>(initialConversationId);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const composerRef = useRef<ComposerHandle>(null);
+  // From Send until the server hands back a turn id: the card shows "Starting…"
+  // at once instead of a gap, and it is the same TurnCard the real turn then
+  // fills — so the orb that flew in on the first send is never remounted.
+  const [pendingTurn, setPendingTurn] = useState<TurnView | null>(null);
 
   /** Messages are the one source of truth once a turn settles or is dismissed. */
   const refresh = useCallback(async () => {
@@ -137,6 +147,21 @@ export function Chat({
   );
   const active = view != null && isActiveTurn(view.turn.status);
   const hasAnswer = entries.some((e) => e.role === "assistant" && e.response);
+  const builder = useSkillBuilderState(entries, conversationId);
+  const picking = builder.picking;
+  const turnIntoSkillBlocked = active || !conversationId
+    ? "Wait for the investigation to finish"
+    : builder.addableCount === 0
+      ? "No tool calls to build from"
+      : null;
+
+  // Picking starts on the first call — focused without moving the view.
+  useEffect(() => {
+    if (!picking) return;
+    scrollRef.current
+      ?.querySelector<HTMLElement>("[data-pick-key]")
+      ?.focus({ preventScroll: true });
+  }, [picking]);
 
   async function unresolve() {
     if (!artifactId) return;
@@ -152,7 +177,7 @@ export function Chat({
     const el = scrollRef.current;
     if (el && stickRef.current)
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [entries, view]);
+  }, [entries, view, pendingTurn]);
 
   function send(ask: string, preNotice?: string) {
     return run(ask, { ask }, preNotice);
@@ -209,8 +234,11 @@ export function Chat({
       ...prev,
       { id: optimisticId, role: "user", ask: userLine, skill },
     ]);
-    const unsend = () =>
+    setPendingTurn(freshView(queuedTurn(optimisticId), preNotice));
+    const unsend = () => {
+      setPendingTurn(null);
       setEntries((prev) => prev.filter((e) => e.id !== optimisticId));
+    };
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -223,6 +251,10 @@ export function Chat({
         }),
       });
       const body = await res.json().catch(() => null);
+      // On the first send the POST is back mid-animation; adopting the id,
+      // rewriting the URL and attaching the stream would stall it. The pending
+      // card already says "Starting…", and the worker runs the turn regardless.
+      await viewTransitionSettled();
       if (res.status === 409 && body?.turn_id) {
         // Already investigating here — started from another tab. Show that one.
         unsend();
@@ -243,6 +275,7 @@ export function Chat({
         clear();
         await refresh();
       }
+      setPendingTurn(null);
       follow(queuedTurn(body.turn_id), preNotice);
       onActivity();
       return true;
@@ -276,137 +309,167 @@ export function Chat({
   }
 
   const empty = entries.length === 0 && !view;
+  const shownTurn = view ?? pendingTurn;
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col">
-      {conversationId && (
-        <div className="flex items-center justify-end border-b border-border px-6 py-2">
-          {status === "resolved" ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger className="flex items-center gap-2 rounded-sm border border-input px-3 py-1.5 text-body-sm text-pale-stone hover:bg-smoke-charcoal hover:text-warm-off-white">
-                <span className="size-1.5 rounded-full bg-traffic-green" />
-                Resolved
-                <ChevronDown className="size-3.5 text-bone-gray" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onSelect={() =>
-                    artifactId && router.push(`/resolutions/${artifactId}`)
-                  }
-                >
-                  View artifact
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setResolveOpen(true)}>
-                  Re-resolve (regenerate)
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={unresolve}>
-                  Unresolve
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
+    <div className="flex h-full min-w-0 flex-1">
+      {/*
+        A new chat centres the hero and the composer together; the first message
+        lets the transcript take the height and the composer docks at the bottom.
+        The composer is never re-parented for this — moving it would remount it
+        and lose a draft that a failed send puts back.
+      */}
+      <div
+        data-chat-empty={empty || undefined}
+        className={cn(
+          "flex h-full min-w-0 flex-1 flex-col",
+          empty && "justify-center pb-[8vh]",
+        )}
+      >
+        {/*
+          Shown from the first message, not from when the server returns the
+          conversation id: appearing ~100ms later would shift the transcript
+          under the first-send transition. Its actions stay disabled until
+          there is an answer (resolve) or tool calls (skill) anyway.
+        */}
+        {!empty && (
+          <div className="flex items-center justify-end gap-2 border-b border-border px-6 py-2">
             <Button
               variant="secondary"
               size="sm"
-              className="gap-2"
-              disabled={!hasAnswer || active}
-              onClick={() => setResolveOpen(true)}
+              className="gap-2 aria-pressed:bg-iron-veil aria-pressed:text-warm-off-white"
+              aria-pressed={picking}
+              disabled={!picking && turnIntoSkillBlocked !== null}
+              title={picking ? "Leave the skill builder" : (turnIntoSkillBlocked ?? undefined)}
+              onClick={() => (picking ? builder.stop() : builder.start())}
             >
-              <CheckCircle2 className="size-4 text-traffic-green" />
-              Mark resolved
+              <ListChecks className="size-4" />
+              Turn into skill
             </Button>
-          )}
-        </div>
-      )}
-      <div
-        ref={scrollRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          stickRef.current =
-            el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
-        }}
-        className="min-h-0 flex-1 overflow-y-auto"
-      >
-        <div className="mx-auto w-full max-w-[820px] px-6">
-          {empty ? (
-            <div className="flex h-full flex-col justify-center pt-[18vh]">
-              <div className="text-caption-tracked uppercase text-bone-gray">
-                AI SRE · HolmesGPT
-              </div>
-              <h1 className="mt-3 text-heading-lg text-warm-off-white">
-                Ask the cluster.
-              </h1>
-              <p className="mt-2 max-w-[60ch] text-subheading text-pale-stone">
-                Traces, logs, metrics, databases and deployed code — Drill
-                investigates across all of it and comes back with a root cause.
-              </p>
-              <div className="mt-8 space-y-2">
-                {EXAMPLE_ASKS.map((ask) => (
-                  <div
-                    key={ask}
-                    className="flex items-baseline gap-3 font-mono text-body-sm text-bone-gray"
+            {status === "resolved" ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  disabled={picking}
+                  className="flex items-center gap-2 rounded-sm border border-input px-3 py-1.5 text-body-sm text-pale-stone hover:bg-smoke-charcoal hover:text-warm-off-white disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <span className="size-1.5 rounded-full bg-traffic-green" />
+                  Resolved
+                  <ChevronDown className="size-3.5 text-bone-gray" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      artifactId && router.push(`/resolutions/${artifactId}`)
+                    }
                   >
-                    <span className="size-1.5 translate-y-[-2px] rounded-full bg-prompt-green" />
-                    {ask}
-                  </div>
-                ))}
-              </div>
+                    View artifact
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setResolveOpen(true)}>
+                    Re-resolve (regenerate)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={unresolve}>
+                    Unresolve
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="gap-2"
+                disabled={!hasAnswer || active || picking}
+                onClick={() => setResolveOpen(true)}
+              >
+                <CheckCircle2 className="size-4 text-traffic-green" />
+                Mark resolved
+              </Button>
+            )}
+          </div>
+        )}
+        <SkillBuilderContext.Provider value={picking ? builder : null}>
+          <div
+            ref={scrollRef}
+            onKeyDown={picking ? builder.onKeyDown : undefined}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              stickRef.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+            }}
+            className={cn("min-h-0 overflow-y-auto", empty ? "flex-initial" : "flex-1")}
+          >
+            <div className="mx-auto w-full max-w-[820px] px-6">
+              {empty ? (
+                <ChatHero />
+              ) : (
+                <div data-transcript className="space-y-8 py-8">
+                  {entries.map((entry, i) =>
+                    entry.role === "user" ? (
+                      <UserMessage key={entry.id} ask={entry.ask!} skill={entry.skill} />
+                    ) : (
+                      <AssistantMessage
+                        key={entry.id}
+                        entry={entry}
+                        onFollowUp={onFollowUp}
+                        onDecide={decide}
+                        busy={active}
+                        isLatest={i === entries.length - 1}
+                      />
+                    ),
+                  )}
+                  {shownTurn && (
+                    <TurnCard
+                      view={shownTurn}
+                      onStop={view ? () => turnAction("cancel") : undefined}
+                      onResume={() => turnAction("resume")}
+                      onDismiss={() => turnAction("dismiss")}
+                    />
+                  )}
+                </div>
+              )}
             </div>
+          </div>
+        </SkillBuilderContext.Provider>
+        {/*
+          The mode island is fixed in the bottom-right, where it would sit on the
+          composer's send button on narrow viewports. Reserve room for it — but
+          only for the admins who actually see it, and only below xl, where the
+          centred column no longer leaves that margin on its own.
+        */}
+        <div
+          className={cn(
+            "mx-auto w-full max-w-[820px] px-6 pb-6 pt-2",
+            showsModeSwitch(user) && "pr-20 xl:pr-6",
+          )}
+        >
+          {picking ? (
+            <SkillBuilderBar builder={builder} />
           ) : (
-            <div className="space-y-8 py-8">
-              {entries.map((entry, i) =>
-                entry.role === "user" ? (
-                  <UserMessage key={entry.id} ask={entry.ask!} skill={entry.skill} />
-                ) : (
-                  <AssistantMessage
-                    key={entry.id}
-                    entry={entry}
-                    onFollowUp={onFollowUp}
-                    onDecide={decide}
-                    busy={active}
-                    isLatest={i === entries.length - 1}
-                  />
-                ),
+            <>
+              {actionError && (
+                <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
               )}
-              {view && (
-                <TurnCard
-                  view={view}
-                  onStop={() => turnAction("cancel")}
-                  onResume={() => turnAction("resume")}
-                  onDismiss={() => turnAction("dismiss")}
-                />
+              <Composer
+                ref={composerRef}
+                onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
+                onStop={() => turnAction("cancel")}
+                busy={active}
+                models={models}
+                model={model}
+                onModelChange={setModel}
+                skills={runnableSkills}
+                // Survives leaving for Skills and coming back (the pane remounts).
+                draftKey={initialConversationId ?? `new:${agentId}`}
+                // Only the first send changes the page's shape; later ones just append.
+                animateSend={empty}
+              />
+              {empty && (
+                <ExampleAsks onPick={(ask, select) => composerRef.current?.fill(ask, select)} />
               )}
-            </div>
+            </>
           )}
         </div>
       </div>
-      {/*
-        The mode island is fixed in the bottom-right, where it would sit on the
-        composer's send button on narrow viewports. Reserve room for it — but
-        only for the admins who actually see it, and only below xl, where the
-        centred column no longer leaves that margin on its own.
-      */}
-      <div
-        className={cn(
-          "mx-auto w-full max-w-[820px] px-6 pb-6 pt-2",
-          user.actorIsAdmin && "pr-20 xl:pr-6",
-        )}
-      >
-        {actionError && (
-          <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
-        )}
-        <Composer
-          onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
-          onStop={() => turnAction("cancel")}
-          busy={active}
-          models={models}
-          model={model}
-          onModelChange={setModel}
-          skills={runnableSkills}
-          // Survives leaving for Skills and coming back (the pane remounts).
-          draftKey={initialConversationId ?? `new:${agentId}`}
-        />
-      </div>
+      {picking && <SkillBuilderPanel builder={builder} />}
       {conversationId && (
         <ResolveDialog
           open={resolveOpen}

@@ -4,6 +4,9 @@
  * review dialog edits before saving.
  */
 
+/** The knowledge-base frontend tool's name — client-safe, so the UI can recognise its calls. */
+export const SEARCH_TOOL_NAME = "search_past_resolutions";
+
 export type ArtifactNodeKind =
   | "service"
   | "component"

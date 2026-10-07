@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { ChevronRight, RotateCw, Square } from "lucide-react";
+import type { OrbState } from "thinking-orbs";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -10,6 +11,7 @@ import {
 } from "@/components/ui/collapsible";
 import { turnErrorHeadline } from "@/lib/chat/describe";
 import { cn } from "@/lib/utils";
+import { DrillOrb } from "./orb";
 import { LiveTimeline, type LiveItem } from "./tool-timeline";
 import type { TurnView } from "./use-turn-stream";
 
@@ -119,7 +121,8 @@ export function TurnCard({
   onDismiss,
 }: {
   view: TurnView;
-  onStop: () => void;
+  /** Absent while the turn is still being queued — there is nothing to stop yet. */
+  onStop?: () => void;
   onResume: () => void;
   onDismiss: () => void;
 }) {
@@ -172,7 +175,10 @@ export function TurnCard({
 
   let status: string;
   let hint: string | null = null;
+  // The orb says the phase at a glance: waiting, gathering, then thinking it over.
+  let orb: OrbState = "searching";
   if (turn.status === "queued") {
+    orb = "breathing";
     status =
       turn.attempt > 0
         ? "Resuming from saved results…"
@@ -185,6 +191,7 @@ export function TurnCard({
   } else if (view.notice && items.length === 0) {
     status = view.notice;
   } else if (!inFlight && quiet > QUIET_MS) {
+    orb = "weaving";
     status = `Holmes is reasoning over the results… quiet ${clock(quiet)}`;
     hint = "Long pauses are normal here — the final analysis of a deep investigation can take a few minutes.";
   } else {
@@ -192,9 +199,9 @@ export function TurnCard({
   }
 
   return (
-    <div className="space-y-3">
+    <div data-turn-card className="space-y-3">
       <div className="flex items-center gap-3 text-body-sm text-bone-gray">
-        <span className="size-2 shrink-0 animate-pulse rounded-full bg-gold-leaf" />
+        <DrillOrb state={orb} size={20} />
         <span className="min-w-0 truncate">{status}</span>
         <span className="font-mono text-[12px] tabular-nums">
           {clock(serverNow - started)}
@@ -203,10 +210,10 @@ export function TurnCard({
           size="xs"
           variant="ghost"
           className="ml-auto"
-          disabled={stopping}
+          disabled={stopping || !onStop}
           onClick={() => {
             setStopClickedAt(Date.now());
-            onStop();
+            onStop?.();
           }}
         >
           <Square className="size-3" />

@@ -6,13 +6,19 @@ import { getSkillView } from "@/lib/db/skill-queries";
 import { SkillScope } from "@/components/skills/skill-badges";
 import { SkillEditor } from "@/components/skills/skill-editor";
 
-/** `/skills/new` creates; `/skills/<id>` edits (or shows, when not editable). */
+/**
+ * `/skills/new` creates (`?from=conversation`: from the chat's skill builder);
+ * `/skills/<id>` edits (or shows, when not editable).
+ */
 export default async function SkillPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ from?: string }>;
 }) {
   const { id } = await params;
+  const { from } = await searchParams;
   const ctx = await getAuthContext();
   if (!ctx) redirect("/login");
   const skill =
@@ -35,7 +41,7 @@ export default async function SkillPage({
           </h1>
           {skill && <SkillScope skill={skill} />}
         </div>
-        <SkillEditor skill={skill} />
+        <SkillEditor skill={skill} fromConversation={from === "conversation"} />
       </div>
     </main>
   );

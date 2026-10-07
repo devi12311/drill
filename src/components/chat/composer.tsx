@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import Link from "next/link";
 import { ArrowUp, ChevronDown, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { fuzzyFilter } from "@/lib/fuzzy";
+import { withViewTransition } from "@/components/ui/view-transition";
 import { parseInvocationLine } from "@/lib/skills/prompt";
 import type { SkillView } from "@/lib/skills/types";
 import { cn } from "@/lib/utils";
@@ -81,7 +82,14 @@ function writeDraft(key: string, value: string) {
   }
 }
 
+/** What the page around the composer may do to it. */
+export interface ComposerHandle {
+  /** Replace the draft with `text` and focus it, selecting `select` (e.g. a placeholder to type over). */
+  fill: (text: string, select?: string) => void;
+}
+
 export function Composer({
+  ref,
   onSend,
   onStop,
   busy,
@@ -90,7 +98,9 @@ export function Composer({
   onModelChange,
   skills,
   draftKey,
+  animateSend = false,
 }: {
+  ref?: Ref<ComposerHandle>;
   /**
    * Resolves false when nothing was sent — the draft is put back. With `run`,
    * `ask` is optional extra context for the skill.
@@ -108,8 +118,17 @@ export function Composer({
   skills: SkillView[] | null;
   /** Where the unsent text is kept: the conversation id, or `new:<agentId>`. */
   draftKey: string;
+  /**
+   * Send as a view transition: the draft is cleared and the turn queued inside
+   * the browser's snapshot, so the page around can animate the hand-off.
+   */
+  animateSend?: boolean;
 }) {
   const [value, setValue] = useState(() => readDraft(draftKey));
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // An animated send waits a frame for the snapshot, with the draft still in
+  // the box; a second Enter in that frame must not send it twice.
+  const sendQueued = useRef(false);
   // Sending clears `value`, which clears the stored draft; a send that is put
   // back restores it. A picked skill is not kept — it may be stale on return.
   useEffect(() => writeDraft(draftKey, value), [draftKey, value]);
@@ -121,6 +140,20 @@ export function Composer({
   const suggestions =
     run || dismissedFor === value ? null : slashMatches(value, skills);
   const active = suggestions?.length ? Math.min(highlight, suggestions.length - 1) : 0;
+
+  useImperativeHandle(ref, () => ({
+    fill(text, select) {
+      setRun(null);
+      setValue(text);
+      const at = select ? text.indexOf(select) : -1;
+      const [from, to] = at >= 0 ? [at, at + (select?.length ?? 0)] : [text.length, text.length];
+      // After the commit, so the selection lands on the new value, not the old.
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(from, to);
+      });
+    },
+  }));
 
   function pick(skill: SkillView, values: Record<string, string> = {}, note = "") {
     setRun({ skill, values });
@@ -149,16 +182,25 @@ export function Composer({
       if (ask || run) setBlocked(true);
       return;
     }
-    if (!(typed || ready) || !model) return;
-    setValue("");
+    if (!(typed || ready) || !model || sendQueued.current) return;
+    const send = () => {
+      sendQueued.current = false;
+      setValue("");
+      return onSend(ask, skillRun ?? undefined);
+    };
+    sendQueued.current = true;
+    const sent = await (animateSend ? withViewTransition(send) : send());
     // Restored only if nothing new was typed meanwhile; the skill stays picked
     // until a run actually goes out.
-    if (await onSend(ask, skillRun ?? undefined)) setRun(null);
+    if (sent) setRun(null);
     else setValue((current) => current || (typed ? value : ask));
   }
 
   return (
-    <div className="relative rounded-lg border border-input bg-smoked-onyx focus-within:border-ring/60">
+    <div
+      data-composer
+      className="relative rounded-lg border border-input bg-smoked-onyx focus-within:border-ring/60"
+    >
       {suggestions && (
         <div
           role="listbox"
@@ -241,6 +283,8 @@ export function Composer({
         </div>
       )}
       <textarea
+        ref={textareaRef}
+        data-composer-draft
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
@@ -282,13 +326,15 @@ export function Composer({
             submit();
           }
         }}
-        rows={3}
+        // One line at rest; field-sizing grows it with pasted logs/traces up to
+        // the cap, then it scrolls (browsers without field-sizing just scroll).
+        rows={1}
         placeholder={
           run
             ? "Anything else Holmes should know (optional)…"
             : "Describe the problem — or type / to run a skill…"
         }
-        className="w-full resize-none bg-transparent px-4 pt-3 font-mono text-body-sm text-warm-off-white outline-none placeholder:text-bone-gray"
+        className="field-sizing-content max-h-48 w-full resize-none bg-transparent px-4 pb-1 pt-3 font-mono text-body-sm text-warm-off-white outline-none placeholder:text-bone-gray"
       />
       <div className="flex items-center justify-between px-3 pb-2.5">
         <DropdownMenu>

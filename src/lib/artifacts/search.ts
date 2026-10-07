@@ -1,6 +1,7 @@
 import "server-only";
 import { searchArtifactRows, type ArtifactSearchRow } from "@/lib/db/queries";
 import type { FrontendToolDef } from "@/lib/holmes/types";
+import { SEARCH_TOOL_NAME } from "./types";
 
 export type ArtifactHit = ArtifactSearchRow;
 
@@ -57,7 +58,6 @@ export async function searchArtifacts(
 export const CITE_INSTRUCTION =
   "cite it inline with exactly [[artifact:<id>]] (Drill renders that marker as a link the user can open)";
 
-export const SEARCH_TOOL_NAME = "search_past_resolutions";
 
 export const SEARCH_TOOL_DEF: FrontendToolDef = {
   name: SEARCH_TOOL_NAME,

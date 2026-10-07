@@ -1,5 +1,6 @@
 "use client";
 
+import { useLayoutEffect, useRef, useState } from "react";
 import { Markdown } from "./markdown";
 import { ToolTimeline } from "./tool-timeline";
 import { ApprovalCard } from "./approval-card";
@@ -10,6 +11,7 @@ import type {
   ToolApprovalDecision,
   ToolCall,
 } from "@/lib/holmes/types";
+import { useSkillBuilder } from "@/components/skills/use-skill-builder";
 import { FETCH_SKILL_TOOL_NAME } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
 
@@ -83,6 +85,37 @@ function CostFooter({
   );
 }
 
+/**
+ * An analysis folded to its first lines while steps are picked, so the
+ * conversation reads as its calls; "show more" opens one message at a time.
+ */
+function FoldedAnalysis({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && !open) setOverflows(el.scrollHeight > el.clientHeight + 1);
+  }, [text, open]);
+  return (
+    <div>
+      <div ref={ref} className={open ? undefined : "max-h-[4.5em] overflow-hidden"}>
+        <Markdown>{text}</Markdown>
+      </div>
+      {(overflows || open) && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="mt-1 text-body-sm text-bone-gray underline-offset-2 outline-none hover:text-warm-off-white hover:underline focus-visible:underline"
+        >
+          {open ? "show less" : "show more"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function FollowUpChips({
   actions,
   onPick,
@@ -124,6 +157,8 @@ export function AssistantMessage({
   /** Only the latest entry's pending approval can still be answered. */
   isLatest: boolean;
 }) {
+  // While picking steps, only the calls and their context matter.
+  const picking = useSkillBuilder() !== null;
   if (entry.error) {
     return (
       <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-body-sm text-warm-off-white">
@@ -141,7 +176,7 @@ export function AssistantMessage({
     const toolCalls = response.tool_calls ?? [];
     return (
       <div className="space-y-4">
-        <ToolTimeline toolCalls={toolCalls} />
+        <ToolTimeline toolCalls={toolCalls} messageId={entry.id} />
         <StoppedNotice
           error={response.drill_error}
           cancelled={response.drill_error.startsWith("Stopped")}
@@ -154,21 +189,29 @@ export function AssistantMessage({
   return (
     <div className="space-y-4">
       {usedSkills.length > 0 && <SkillTag label="Used skill" name={usedSkills.join(", ")} />}
-      <ToolTimeline toolCalls={response.tool_calls ?? []} />
-      <Markdown>{response.analysis}</Markdown>
-      {!!response.pending_approvals?.length && (
+      <ToolTimeline toolCalls={response.tool_calls ?? []} messageId={entry.id} />
+      {picking ? (
+        <FoldedAnalysis text={response.analysis} />
+      ) : (
+        <Markdown>{response.analysis}</Markdown>
+      )}
+      {!picking && !!response.pending_approvals?.length && (
         <ApprovalCard
           approvals={response.pending_approvals}
           actionable={isLatest && !busy}
           onDecide={onDecide}
         />
       )}
-      <FollowUpChips
-        actions={response.follow_up_actions ?? []}
-        onPick={onFollowUp}
-        disabled={busy}
-      />
-      <CostFooter response={response} model={entry.model} />
+      {!picking && (
+        <>
+          <FollowUpChips
+            actions={response.follow_up_actions ?? []}
+            onPick={onFollowUp}
+            disabled={busy}
+          />
+          <CostFooter response={response} model={entry.model} />
+        </>
+      )}
     </div>
   );
 }

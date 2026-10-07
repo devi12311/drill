@@ -1,0 +1,994 @@
+{
+ "analysis": "## Root cause\n\n`ms-postback-relay` is **OOMKilled on boot** (exit 137, 37 restarts). Release `rc-14-2026-10-06-16-05` changed `RetryScheduler.start()` to load **every pending retry into memory** before serving. Yesterday's partner-gateway outage (13:58–15:47 UTC) left **2,184,113 pending rows (~1.4 GB)** in `postback_retries`. Each pod runs out of its 448 MB heap about 40 s into startup.\n\nThe release alone was harmless (it shipped at 16:09, after the backlog stopped growing), and so was the backlog alone (the `master` build pages through it 500 rows at a time). Together they keep every replica in a crash loop, so **no postbacks have been delivered since the first restart**.\n\n## Evidence\n\n| Signal | Finding |\n|---|---|\n| `kubectl describe` | `Last State: Terminated · OOMKilled · 137`, limit `512Mi`, `--max-old-space-size=448` |\n| Previous logs | `loading pending retries on boot` → heap 441/448 MB → `JavaScript heap out of memory` |\n| Prometheus | Sawtooth from ~90 MiB to 512 MiB in 38–44 s per restart. Flat at 140–170 MiB for 7 days before the rollout |\n| Rollout history | Revision 42 → `rc-14-2026-10-06-16-05` at 2026-10-06 16:09 |\n| Code @ `rc` | `repo.find({ where: { status: 'pending' } })` with no `take`. `master` uses `take: 500` per tick |\n| Postgres | 2.13 M of the pending rows were created 13:00–15:59 on 2026-10-06 |\n\nTempo has no traces for the service: it never finishes booting, so it never exports a span.\n\n## Fix\n\nKeep boot-time scheduling, but stream it in pages instead of materialising the whole table:\n\n```diff\n   async loadPendingRetries(): Promise<void> {\n-    const pending = await this.repo.find({ where: { status: 'pending' } });\n-    for (const retry of pending) this.queue.push(retry);\n+    // Page by id: a backlog after an outage can be millions of rows.\n+    let after = 0;\n+    for (;;) {\n+      const page = await this.repo.find({\n+        where: { status: 'pending', id: MoreThan(after) },\n+        order: { id: 'ASC' },\n+        take: 500,\n+      });\n+      if (page.length === 0) break;\n+      for (const retry of page) this.queue.push(retry.id);\n+      after = page[page.length - 1].id;\n+    }\n   }\n```\n\nQueue ids rather than entities. Even paged, 2.2 M full rows would not fit in 448 MB.\n\n## Unblock now (before the fix ships)\n\n1. Roll back to revision 41: `kubectl rollout undo deployment/ms-postback-relay -n native-prod --to-revision=41`. The `master` build drains the backlog 500 rows per tick.\n2. Or keep `rc-14` and set `RETRY_SCHEDULER_ON_BOOT=false` until the paged loader is merged.\n\nDrill is read-only, so neither has been applied.\n",
+ "tool_calls": [
+  {
+   "tool_call_id": "call_01_TodoWrite",
+   "tool_name": "TodoWrite",
+   "toolset_name": "core_investigation",
+   "description": "Update investigation tasks",
+   "size": 291,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Investigation plan updated:\n[~] Confirm the crash reason from pod status and previous logs\n[ ] Correlate with memory metrics and the latest rollout\n[ ] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix",
+    "params": {
+     "todos": [
+      {
+       "id": "1",
+       "content": "Confirm the crash reason from pod status and previous logs",
+       "status": "in_progress"
+      },
+      {
+       "id": "2",
+       "content": "Correlate with memory metrics and the latest rollout",
+       "status": "pending"
+      },
+      {
+       "id": "3",
+       "content": "Read the startup code at the deployed ref",
+       "status": "pending"
+      },
+      {
+       "id": "4",
+       "content": "Verify the code's assumption against production data",
+       "status": "pending"
+      },
+      {
+       "id": "5",
+       "content": "Write root cause, evidence and a fix",
+       "status": "pending"
+      }
+     ]
+    },
+    "invocation": "Update investigation tasks",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_02_search_past_",
+   "tool_name": "search_past_resolutions",
+   "toolset_name": "drill-knowledge",
+   "description": "search_past_resolutions({\"query\":\"ms-postback-relay CrashLoopBackOff OOMKilled\"})",
+   "size": 79,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "{\"results\": [], \"note\": \"No past resolution matches this service and symptom.\"}",
+    "params": {
+     "query": "ms-postback-relay CrashLoopBackOff OOMKilled"
+    },
+    "invocation": "search_past_resolutions({\"query\":\"ms-postback-relay CrashLoopBackOff OOMKilled\"})",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_03_drill_fetch_",
+   "tool_name": "drill_fetch_skill",
+   "toolset_name": "drill-skills",
+   "description": "drill_fetch_skill({\"skill_name\":\"crashloop-triage\"})",
+   "size": 513,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "<skill name=\"crashloop-triage\">\n## Goal\nFind why a workload restarts in a loop and name the change that started it.\n\n## Workflow\n1. Pod status + previous container's termination reason (OOMKilled / Error / probe).\n2. Previous logs — the crash is in the *previous* container, not the current one.\n3. Memory/CPU against limits across restarts; rollout history for the image change.\n4. Read the startup path at the deployed ref (image tag → branch).\n5. Check any data volume the startup path depends on.\n</skill>",
+    "params": {
+     "skill_name": "crashloop-triage"
+    },
+    "invocation": "drill_fetch_skill({\"skill_name\":\"crashloop-triage\"})",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_04_kubectl_get_",
+   "tool_name": "kubectl_get_by_kind_in_namespace",
+   "toolset_name": "kubernetes/core",
+   "description": "kubectl get pod -n native-prod -l app=ms-postback-relay -o wide",
+   "size": 452,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "NAME                                READY   STATUS             RESTARTS        AGE   IP             NODE\nms-postback-relay-7c9f5d8b6-qk4tz   0/1     CrashLoopBackOff   37 (2m11s ago)  19h   10.42.3.118    worker-pool-b-4\nms-postback-relay-7c9f5d8b6-m2xjw   0/1     CrashLoopBackOff   36 (4m02s ago)  19h   10.42.1.77     worker-pool-b-1\nms-postback-relay-7c9f5d8b6-zr8nd   0/1     Running            38 (31s ago)    19h   10.42.5.204    worker-pool-b-6",
+    "params": {
+     "kind": "pod",
+     "namespace": "native-prod",
+     "label_selector": "app=ms-postback-relay"
+    },
+    "invocation": "kubectl get pod -n native-prod -l app=ms-postback-relay -o wide",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_05_kubectl_desc",
+   "tool_name": "kubectl_describe",
+   "toolset_name": "kubernetes/core",
+   "description": "kubectl describe pod ms-postback-relay-7c9f5d8b6-qk4tz -n native-prod",
+   "size": 1200,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Name:             ms-postback-relay-7c9f5d8b6-qk4tz\nNamespace:        native-prod\nControlled By:    ReplicaSet/ms-postback-relay-7c9f5d8b6\nContainers:\n  relay:\n    Image:          registry.example.internal/ms-postback-relay:rc-14-2026-10-06-16-05\n    State:          Waiting\n      Reason:       CrashLoopBackOff\n    Last State:     Terminated\n      Reason:       OOMKilled\n      Exit Code:    137\n      Started:      Tue, 07 Oct 2026 09:41:52 +0000\n      Finished:     Tue, 07 Oct 2026 09:42:34 +0000\n    Ready:          False\n    Restart Count:  37\n    Limits:\n      cpu:     500m\n      memory:  512Mi\n    Requests:\n      cpu:     100m\n      memory:  256Mi\n    Environment:\n      NODE_OPTIONS:          --max-old-space-size=448\n      RETRY_SCHEDULER_ON_BOOT: true\nEvents:\n  Type     Reason     Age                    From     Message\n  ----     ------     ----                   ----     -------\n  Warning  BackOff    2m (x412 over 19h)     kubelet  Back-off restarting failed container relay in pod ms-postback-relay-7c9f5d8b6-qk4tz\n  Normal   Pulled     2m11s (x38 over 19h)   kubelet  Container image \"registry.example.internal/ms-postback-relay:rc-14-2026-10-06-16-05\" already present on machine",
+    "params": {
+     "kind": "pod",
+     "name": "ms-postback-relay-7c9f5d8b6-qk4tz",
+     "namespace": "native-prod"
+    },
+    "invocation": "kubectl describe pod ms-postback-relay-7c9f5d8b6-qk4tz -n native-prod",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_06_fetch_pod_lo",
+   "tool_name": "fetch_pod_logs",
+   "toolset_name": "kubernetes/logs",
+   "description": "Fetch previous container logs of ms-postback-relay-7c9f5d8b6-qk4tz",
+   "size": 725,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "2026-10-07T09:41:53.204Z info  relay starting version=rc-14 node=v20.17.0\n2026-10-07T09:41:53.611Z info  connected to postgres host=postgres-cluster-rw.postgres-cluster db=postbacks\n2026-10-07T09:41:53.640Z info  RetryScheduler: loading pending retries on boot\n2026-10-07T09:42:04.918Z warn  event loop delay p99=2140ms\n2026-10-07T09:42:17.302Z warn  gc: heap 391MB / limit 448MB after mark-compact\n2026-10-07T09:42:29.877Z warn  gc: heap 441MB / limit 448MB after mark-compact\n\n<--- Last few GCs --->\n[1:0x6a3c2e0]    41012 ms: Mark-Compact 443.9 (459.2) -> 441.7 (460.4) MB, 1873.20 / 0.00 ms  allocation failure; scavenge might not succeed\n\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+    "params": {
+     "pod_name": "ms-postback-relay-7c9f5d8b6-qk4tz",
+     "namespace": "native-prod",
+     "previous": true,
+     "limit": 200
+    },
+    "invocation": "Fetch previous container logs of ms-postback-relay-7c9f5d8b6-qk4tz",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_07_TodoWrite",
+   "tool_name": "TodoWrite",
+   "toolset_name": "core_investigation",
+   "description": "Update investigation tasks",
+   "size": 291,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[~] Correlate with memory metrics and the latest rollout\n[ ] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix",
+    "params": {
+     "todos": [
+      {
+       "id": "1",
+       "content": "Confirm the crash reason from pod status and previous logs",
+       "status": "completed"
+      },
+      {
+       "id": "2",
+       "content": "Correlate with memory metrics and the latest rollout",
+       "status": "in_progress"
+      },
+      {
+       "id": "3",
+       "content": "Read the startup code at the deployed ref",
+       "status": "pending"
+      },
+      {
+       "id": "4",
+       "content": "Verify the code's assumption against production data",
+       "status": "pending"
+      },
+      {
+       "id": "5",
+       "content": "Write root cause, evidence and a fix",
+       "status": "pending"
+      }
+     ]
+    },
+    "invocation": "Update investigation tasks",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_08_execute_prom",
+   "tool_name": "execute_prometheus_range_query",
+   "toolset_name": "prometheus/metrics",
+   "description": "Container working-set memory, ms-postback-relay, last 2h",
+   "size": 283,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "{\n  \"status\": \"success\",\n  \"summary\": {\n    \"series\": 3,\n    \"pattern\": \"sawtooth: each restart climbs from ~90MiB to 505-512MiB in 38-44s, then drops to 0\",\n    \"peak_bytes\": 536870912,\n    \"restarts_in_window\": 21,\n    \"before_2026-10-06T16:05Z\": \"flat 140-170MiB for 7 days\"\n  }\n}",
+    "params": {
+     "query": "max by (pod) (container_memory_working_set_bytes{namespace=\"native-prod\",container=\"relay\"})",
+     "start": "2026-10-07T07:45:00Z",
+     "end": "2026-10-07T09:45:00Z",
+     "step": "30s"
+    },
+    "invocation": "Container working-set memory, ms-postback-relay, last 2h",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_09_kubectl_roll",
+   "tool_name": "kubectl_rollout_history",
+   "toolset_name": "kubernetes/core",
+   "description": "kubectl rollout history deployment/ms-postback-relay -n native-prod",
+   "size": 231,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "REVISION  CHANGE-CAUSE                                         DEPLOYED\n41        image ms-postback-relay:master-2026-09-29-11-20      2026-09-29 11:24\n42        image ms-postback-relay:rc-14-2026-10-06-16-05       2026-10-06 16:09",
+    "params": {
+     "name": "ms-postback-relay",
+     "namespace": "native-prod"
+    },
+    "invocation": "kubectl rollout history deployment/ms-postback-relay -n native-prod",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_10_tempo_v1_sea",
+   "tool_name": "tempo_v1_search",
+   "toolset_name": "tempo-v1",
+   "description": "Search traces service.name=\"ms-postback-relay\" last 1h",
+   "size": 0,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "error",
+    "error": "tempo search returned 0 traces: the service never finishes booting, so no spans are exported",
+    "return_code": 1,
+    "data": null,
+    "params": {
+     "tags": "service.name=ms-postback-relay",
+     "limit": 20,
+     "since": "1h"
+    },
+    "invocation": "Search traces service.name=\"ms-postback-relay\" last 1h",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_11_grafana_loki",
+   "tool_name": "grafana_loki_query",
+   "toolset_name": "grafana/loki",
+   "description": "Upstream errors from ms-postback-relay on 2026-10-06",
+   "size": 320,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "2026-10-06T13:58:41Z error postback failed target=partner-gateway status=503 queued_for_retry=true\n2026-10-06T13:58:41Z error postback failed target=partner-gateway status=503 queued_for_retry=true\n… 1,912,406 similar lines collapsed …\n2026-10-06T15:47:09Z info  partner-gateway healthy again, resuming live delivery",
+    "params": {
+     "query": "{namespace=\"native-prod\", app=\"ms-postback-relay\"} |= \"partner-gateway\" |= \"error\"",
+     "start": "2026-10-06T12:00:00Z",
+     "end": "2026-10-06T18:00:00Z",
+     "limit": 50
+    },
+    "invocation": "Upstream errors from ms-postback-relay on 2026-10-06",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_12_TodoWrite",
+   "tool_name": "TodoWrite",
+   "toolset_name": "core_investigation",
+   "description": "Update investigation tasks",
+   "size": 291,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[~] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix",
+    "params": {
+     "todos": [
+      {
+       "id": "1",
+       "content": "Confirm the crash reason from pod status and previous logs",
+       "status": "completed"
+      },
+      {
+       "id": "2",
+       "content": "Correlate with memory metrics and the latest rollout",
+       "status": "completed"
+      },
+      {
+       "id": "3",
+       "content": "Read the startup code at the deployed ref",
+       "status": "in_progress"
+      },
+      {
+       "id": "4",
+       "content": "Verify the code's assumption against production data",
+       "status": "pending"
+      },
+      {
+       "id": "5",
+       "content": "Write root cause, evidence and a fix",
+       "status": "pending"
+      }
+     ]
+    },
+    "invocation": "Update investigation tasks",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_13_bitbucket_li",
+   "tool_name": "bitbucket_list_branches",
+   "toolset_name": "bitbucket-code",
+   "description": "Branches matching 'rc' in ms-postback-relay",
+   "size": 21,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "rc\nrc-legacy-batching",
+    "params": {
+     "repo": "ms-postback-relay",
+     "q": "rc"
+    },
+    "invocation": "Branches matching 'rc' in ms-postback-relay",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_14_bitbucket_se",
+   "tool_name": "bitbucket_search_code",
+   "toolset_name": "bitbucket-code",
+   "description": "Search \"loadPendingRetries\" in ms-postback-relay",
+   "size": 248,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "src/retry/RetryScheduler.ts:38   async loadPendingRetries(): Promise<void> {\nsrc/retry/RetryScheduler.ts:22   await this.loadPendingRetries();\ntest/retry/RetryScheduler.spec.ts:51   it('loadPendingRetries schedules every pending row', async () => {",
+    "params": {
+     "query": "loadPendingRetries repo:ms-postback-relay"
+    },
+    "invocation": "Search \"loadPendingRetries\" in ms-postback-relay",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_15_bitbucket_re",
+   "tool_name": "bitbucket_read_file",
+   "toolset_name": "bitbucket-code",
+   "description": "Read src/retry/RetryScheduler.ts @ rc",
+   "size": 583,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "import { Repository } from 'typeorm';\nimport { PostbackRetry } from '../entities/PostbackRetry';\n\nexport class RetryScheduler {\n  constructor(private readonly repo: Repository<PostbackRetry>) {}\n\n  async start(): Promise<void> {\n    // rc-14: schedule everything up front so retries survive a restart\n    await this.loadPendingRetries();\n    this.timer = setInterval(() => this.tick(), 1_000);\n  }\n\n  async loadPendingRetries(): Promise<void> {\n    const pending = await this.repo.find({ where: { status: 'pending' } });\n    for (const retry of pending) this.queue.push(retry);\n  }\n}",
+    "params": {
+     "repo": "ms-postback-relay",
+     "ref": "rc",
+     "path": "src/retry/RetryScheduler.ts"
+    },
+    "invocation": "Read src/retry/RetryScheduler.ts @ rc",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_16_bitbucket_re",
+   "tool_name": "bitbucket_read_file",
+   "toolset_name": "bitbucket-code",
+   "description": "Read src/retry/RetryScheduler.ts @ master",
+   "size": 274,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "  async tick(): Promise<void> {\n    const due = await this.repo.find({\n      where: { status: 'pending', nextAttemptAt: LessThanOrEqual(new Date()) },\n      order: { nextAttemptAt: 'ASC' },\n      take: 500,\n    });\n    for (const retry of due) await this.deliver(retry);\n  }",
+    "params": {
+     "repo": "ms-postback-relay",
+     "ref": "master",
+     "path": "src/retry/RetryScheduler.ts"
+    },
+    "invocation": "Read src/retry/RetryScheduler.ts @ master",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_17_TodoWrite",
+   "tool_name": "TodoWrite",
+   "toolset_name": "core_investigation",
+   "description": "Update investigation tasks",
+   "size": 291,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[x] Read the startup code at the deployed ref\n[~] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix",
+    "params": {
+     "todos": [
+      {
+       "id": "1",
+       "content": "Confirm the crash reason from pod status and previous logs",
+       "status": "completed"
+      },
+      {
+       "id": "2",
+       "content": "Correlate with memory metrics and the latest rollout",
+       "status": "completed"
+      },
+      {
+       "id": "3",
+       "content": "Read the startup code at the deployed ref",
+       "status": "completed"
+      },
+      {
+       "id": "4",
+       "content": "Verify the code's assumption against production data",
+       "status": "in_progress"
+      },
+      {
+       "id": "5",
+       "content": "Write root cause, evidence and a fix",
+       "status": "pending"
+      }
+     ]
+    },
+    "invocation": "Update investigation tasks",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_18_prod_postgre",
+   "tool_name": "prod_postgres_query",
+   "toolset_name": "prod-postgres",
+   "description": "Count pending postback retries",
+   "size": 167,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": " status    |   rows    |  size\n-----------+-----------+--------\n pending   | 2,184,113 | 1391 MB\n delivered |   406,920 | 251 MB\n dead      |     3,307 | 2 MB\n(3 rows)",
+    "params": {
+     "database": "postbacks",
+     "query": "SELECT status, count(*) AS rows, pg_size_pretty(sum(pg_column_size(t.*))) AS size FROM postback_retries t GROUP BY status"
+    },
+    "invocation": "Count pending postback retries",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_19_prod_postgre",
+   "tool_name": "prod_postgres_query",
+   "toolset_name": "prod-postgres",
+   "description": "Pending retries by creation hour, 2026-10-06",
+   "size": 229,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "        hour         |  count\n---------------------+---------\n 2026-10-06 12:00:00 |     214\n 2026-10-06 13:00:00 |  48,771\n 2026-10-06 14:00:00 | 1,021,388\n 2026-10-06 15:00:00 | 1,107,950\n 2026-10-06 16:00:00 |   5,790\n(5 rows)",
+    "params": {
+     "database": "postbacks",
+     "query": "SELECT date_trunc('hour', created_at) AS hour, count(*) FROM postback_retries WHERE status = 'pending' GROUP BY 1 ORDER BY 1"
+    },
+    "invocation": "Pending retries by creation hour, 2026-10-06",
+    "url": null
+   }
+  },
+  {
+   "tool_call_id": "call_20_TodoWrite",
+   "tool_name": "TodoWrite",
+   "toolset_name": "core_investigation",
+   "description": "Update investigation tasks",
+   "size": 291,
+   "result": {
+    "schema_version": "robusta:v1.0.0",
+    "status": "success",
+    "error": null,
+    "return_code": 0,
+    "data": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[x] Read the startup code at the deployed ref\n[x] Verify the code's assumption against production data\n[x] Write root cause, evidence and a fix",
+    "params": {
+     "todos": [
+      {
+       "id": "1",
+       "content": "Confirm the crash reason from pod status and previous logs",
+       "status": "completed"
+      },
+      {
+       "id": "2",
+       "content": "Correlate with memory metrics and the latest rollout",
+       "status": "completed"
+      },
+      {
+       "id": "3",
+       "content": "Read the startup code at the deployed ref",
+       "status": "completed"
+      },
+      {
+       "id": "4",
+       "content": "Verify the code's assumption against production data",
+       "status": "completed"
+      },
+      {
+       "id": "5",
+       "content": "Write root cause, evidence and a fix",
+       "status": "completed"
+      }
+     ]
+    },
+    "invocation": "Update investigation tasks",
+    "url": null
+   }
+  }
+ ],
+ "follow_up_actions": [
+  {
+   "id": "check-drain-rate",
+   "action_label": "Estimate backlog drain time",
+   "pre_action_notification_text": "Measuring how fast the retry backlog is draining…",
+   "prompt": "After a rollback to revision 41, how long would ms-postback-relay take to drain the 2.18M pending postback retries? Use the delivery rate from the last 7 days."
+  },
+  {
+   "id": "partner-gateway-outage",
+   "action_label": "Investigate the partner-gateway outage",
+   "pre_action_notification_text": "Looking into partner-gateway between 13:58 and 15:47 UTC…",
+   "prompt": "What caused partner-gateway to return 503 between 2026-10-06 13:58 and 15:47 UTC?"
+  },
+  {
+   "id": "memory-alert",
+   "action_label": "Propose an OOM alert",
+   "pre_action_notification_text": "Drafting a PrometheusRule for repeated OOMKills…",
+   "prompt": "Write a PrometheusRule that alerts when any container in native-prod is OOMKilled more than 3 times in 15 minutes."
+  }
+ ],
+ "pending_approvals": null,
+ "metadata": {
+  "costs": {
+   "total_cost": 0.0412873,
+   "total_tokens": 318664,
+   "cached_tokens": 251904,
+   "prompt_tokens": 302117,
+   "completion_tokens": 16547,
+   "reasoning_tokens": 9822,
+   "num_compactions": 0
+  },
+  "usage": {
+   "total_tokens": 64390,
+   "cached_tokens": 58112,
+   "prompt_tokens": 61208,
+   "completion_tokens": 3182,
+   "reasoning_tokens": 4
+  },
+  "finish_reason": "stop",
+  "request_id": "fixture-ms-postback-relay-oom",
+  "synthetic": true
+ },
+ "conversation_history": [
+  {
+   "role": "system",
+   "content": "You are HolmesGPT, an AI SRE assistant. Investigate with the available read-only toolsets, keep a TodoWrite plan, and answer with root cause, evidence and a fix. [synthetic fixture — system prompt abbreviated]"
+  },
+  {
+   "role": "user",
+   "content": "Why is deployment ms-postback-relay crash-looping in namespace native-prod?"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_01_TodoWrite",
+     "type": "function",
+     "function": {
+      "name": "TodoWrite",
+      "arguments": "{\"todos\": [{\"id\": \"1\", \"content\": \"Confirm the crash reason from pod status and previous logs\", \"status\": \"in_progress\"}, {\"id\": \"2\", \"content\": \"Correlate with memory metrics and the latest rollout\", \"status\": \"pending\"}, {\"id\": \"3\", \"content\": \"Read the startup code at the deployed ref\", \"status\": \"pending\"}, {\"id\": \"4\", \"content\": \"Verify the code's assumption against production data\", \"status\": \"pending\"}, {\"id\": \"5\", \"content\": \"Write root cause, evidence and a fix\", \"status\": \"pending\"}]}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_01_TodoWrite",
+   "name": "TodoWrite",
+   "content": "Investigation plan updated:\n[~] Confirm the crash reason from pod status and previous logs\n[ ] Correlate with memory metrics and the latest rollout\n[ ] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_02_search_past_",
+     "type": "function",
+     "function": {
+      "name": "search_past_resolutions",
+      "arguments": "{\"query\": \"ms-postback-relay CrashLoopBackOff OOMKilled\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_02_search_past_",
+   "name": "search_past_resolutions",
+   "content": "{\"results\": [], \"note\": \"No past resolution matches this service and symptom.\"}"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_03_drill_fetch_",
+     "type": "function",
+     "function": {
+      "name": "drill_fetch_skill",
+      "arguments": "{\"skill_name\": \"crashloop-triage\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_03_drill_fetch_",
+   "name": "drill_fetch_skill",
+   "content": "<skill name=\"crashloop-triage\">\n## Goal\nFind why a workload restarts in a loop and name the change that started it.\n\n## Workflow\n1. Pod status + previous container's termination reason (OOMKilled / Error / probe).\n2. Previous logs — the crash is in the *previous* container, not the current one.\n3. Memory/CPU against limits across restarts; rollout history for the image change.\n4. Read the startup path at the deployed ref (image tag → branch).\n5. Check any data volume the startup path depends on.\n</skill>"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_04_kubectl_get_",
+     "type": "function",
+     "function": {
+      "name": "kubectl_get_by_kind_in_namespace",
+      "arguments": "{\"kind\": \"pod\", \"namespace\": \"native-prod\", \"label_selector\": \"app=ms-postback-relay\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_04_kubectl_get_",
+   "name": "kubectl_get_by_kind_in_namespace",
+   "content": "NAME                                READY   STATUS             RESTARTS        AGE   IP             NODE\nms-postback-relay-7c9f5d8b6-qk4tz   0/1     CrashLoopBackOff   37 (2m11s ago)  19h   10.42.3.118    worker-pool-b-4\nms-postback-relay-7c9f5d8b6-m2xjw   0/1     CrashLoopBackOff   36 (4m02s ago)  19h   10.42.1.77     worker-pool-b-1\nms-postback-relay-7c9f5d8b6-zr8nd   0/1     Running            38 (31s ago)    19h   10.42.5.204    worker-pool-b-6"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_05_kubectl_desc",
+     "type": "function",
+     "function": {
+      "name": "kubectl_describe",
+      "arguments": "{\"kind\": \"pod\", \"name\": \"ms-postback-relay-7c9f5d8b6-qk4tz\", \"namespace\": \"native-prod\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_05_kubectl_desc",
+   "name": "kubectl_describe",
+   "content": "Name:             ms-postback-relay-7c9f5d8b6-qk4tz\nNamespace:        native-prod\nControlled By:    ReplicaSet/ms-postback-relay-7c9f5d8b6\nContainers:\n  relay:\n    Image:          registry.example.internal/ms-postback-relay:rc-14-2026-10-06-16-05\n    State:          Waiting\n      Reason:       CrashLoopBackOff\n    Last State:     Terminated\n      Reason:       OOMKilled\n      Exit Code:    137\n      Started:      Tue, 07 Oct 2026 09:41:52 +0000\n      Finished:     Tue, 07 Oct 2026 09:42:34 +0000\n    Ready:          False\n    Restart Count:  37\n    Limits:\n      cpu:     500m\n      memory:  512Mi\n    Requests:\n      cpu:     100m\n      memory:  256Mi\n    Environment:\n      NODE_OPTIONS:          --max-old-space-size=448\n      RETRY_SCHEDULER_ON_BOOT: true\nEvents:\n  Type     Reason     Age                    From     Message\n  ----     ------     ----                   ----     -------\n  Warning  BackOff    2m (x412 over 19h)     kubelet  Back-off restarting failed container relay in pod ms-postback-relay-7c9f5d8b6-qk4tz\n  Normal   Pulled     2m11s (x38 over 19h)   kubelet  Container image \"registry.example.internal/ms-postback-relay:rc-14-2026-10-06-16-05\" already present on machine"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_06_fetch_pod_lo",
+     "type": "function",
+     "function": {
+      "name": "fetch_pod_logs",
+      "arguments": "{\"pod_name\": \"ms-postback-relay-7c9f5d8b6-qk4tz\", \"namespace\": \"native-prod\", \"previous\": true, \"limit\": 200}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_06_fetch_pod_lo",
+   "name": "fetch_pod_logs",
+   "content": "2026-10-07T09:41:53.204Z info  relay starting version=rc-14 node=v20.17.0\n2026-10-07T09:41:53.611Z info  connected to postgres host=postgres-cluster-rw.postgres-cluster db=postbacks\n2026-10-07T09:41:53.640Z info  RetryScheduler: loading pending retries on boot\n2026-10-07T09:42:04.918Z warn  event loop delay p99=2140ms\n2026-10-07T09:42:17.302Z warn  gc: heap 391MB / limit 448MB after mark-compact\n2026-10-07T09:42:29.877Z warn  gc: heap 441MB / limit 448MB after mark-compact\n\n<--- Last few GCs --->\n[1:0x6a3c2e0]    41012 ms: Mark-Compact 443.9 (459.2) -> 441.7 (460.4) MB, 1873.20 / 0.00 ms  allocation failure; scavenge might not succeed\n\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_07_TodoWrite",
+     "type": "function",
+     "function": {
+      "name": "TodoWrite",
+      "arguments": "{\"todos\": [{\"id\": \"1\", \"content\": \"Confirm the crash reason from pod status and previous logs\", \"status\": \"completed\"}, {\"id\": \"2\", \"content\": \"Correlate with memory metrics and the latest rollout\", \"status\": \"in_progress\"}, {\"id\": \"3\", \"content\": \"Read the startup code at the deployed ref\", \"status\": \"pending\"}, {\"id\": \"4\", \"content\": \"Verify the code's assumption against production data\", \"status\": \"pending\"}, {\"id\": \"5\", \"content\": \"Write root cause, evidence and a fix\", \"status\": \"pending\"}]}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_07_TodoWrite",
+   "name": "TodoWrite",
+   "content": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[~] Correlate with memory metrics and the latest rollout\n[ ] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_08_execute_prom",
+     "type": "function",
+     "function": {
+      "name": "execute_prometheus_range_query",
+      "arguments": "{\"query\": \"max by (pod) (container_memory_working_set_bytes{namespace=\\\"native-prod\\\",container=\\\"relay\\\"})\", \"start\": \"2026-10-07T07:45:00Z\", \"end\": \"2026-10-07T09:45:00Z\", \"step\": \"30s\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_08_execute_prom",
+   "name": "execute_prometheus_range_query",
+   "content": "{\n  \"status\": \"success\",\n  \"summary\": {\n    \"series\": 3,\n    \"pattern\": \"sawtooth: each restart climbs from ~90MiB to 505-512MiB in 38-44s, then drops to 0\",\n    \"peak_bytes\": 536870912,\n    \"restarts_in_window\": 21,\n    \"before_2026-10-06T16:05Z\": \"flat 140-170MiB for 7 days\"\n  }\n}"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_09_kubectl_roll",
+     "type": "function",
+     "function": {
+      "name": "kubectl_rollout_history",
+      "arguments": "{\"name\": \"ms-postback-relay\", \"namespace\": \"native-prod\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_09_kubectl_roll",
+   "name": "kubectl_rollout_history",
+   "content": "REVISION  CHANGE-CAUSE                                         DEPLOYED\n41        image ms-postback-relay:master-2026-09-29-11-20      2026-09-29 11:24\n42        image ms-postback-relay:rc-14-2026-10-06-16-05       2026-10-06 16:09"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_10_tempo_v1_sea",
+     "type": "function",
+     "function": {
+      "name": "tempo_v1_search",
+      "arguments": "{\"tags\": \"service.name=ms-postback-relay\", \"limit\": 20, \"since\": \"1h\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_10_tempo_v1_sea",
+   "name": "tempo_v1_search",
+   "content": "tempo search returned 0 traces: the service never finishes booting, so no spans are exported"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_11_grafana_loki",
+     "type": "function",
+     "function": {
+      "name": "grafana_loki_query",
+      "arguments": "{\"query\": \"{namespace=\\\"native-prod\\\", app=\\\"ms-postback-relay\\\"} |= \\\"partner-gateway\\\" |= \\\"error\\\"\", \"start\": \"2026-10-06T12:00:00Z\", \"end\": \"2026-10-06T18:00:00Z\", \"limit\": 50}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_11_grafana_loki",
+   "name": "grafana_loki_query",
+   "content": "2026-10-06T13:58:41Z error postback failed target=partner-gateway status=503 queued_for_retry=true\n2026-10-06T13:58:41Z error postback failed target=partner-gateway status=503 queued_for_retry=true\n… 1,912,406 similar lines collapsed …\n2026-10-06T15:47:09Z info  partner-gateway healthy again, resuming live delivery"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_12_TodoWrite",
+     "type": "function",
+     "function": {
+      "name": "TodoWrite",
+      "arguments": "{\"todos\": [{\"id\": \"1\", \"content\": \"Confirm the crash reason from pod status and previous logs\", \"status\": \"completed\"}, {\"id\": \"2\", \"content\": \"Correlate with memory metrics and the latest rollout\", \"status\": \"completed\"}, {\"id\": \"3\", \"content\": \"Read the startup code at the deployed ref\", \"status\": \"in_progress\"}, {\"id\": \"4\", \"content\": \"Verify the code's assumption against production data\", \"status\": \"pending\"}, {\"id\": \"5\", \"content\": \"Write root cause, evidence and a fix\", \"status\": \"pending\"}]}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_12_TodoWrite",
+   "name": "TodoWrite",
+   "content": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[~] Read the startup code at the deployed ref\n[ ] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_13_bitbucket_li",
+     "type": "function",
+     "function": {
+      "name": "bitbucket_list_branches",
+      "arguments": "{\"repo\": \"ms-postback-relay\", \"q\": \"rc\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_13_bitbucket_li",
+   "name": "bitbucket_list_branches",
+   "content": "rc\nrc-legacy-batching"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_14_bitbucket_se",
+     "type": "function",
+     "function": {
+      "name": "bitbucket_search_code",
+      "arguments": "{\"query\": \"loadPendingRetries repo:ms-postback-relay\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_14_bitbucket_se",
+   "name": "bitbucket_search_code",
+   "content": "src/retry/RetryScheduler.ts:38   async loadPendingRetries(): Promise<void> {\nsrc/retry/RetryScheduler.ts:22   await this.loadPendingRetries();\ntest/retry/RetryScheduler.spec.ts:51   it('loadPendingRetries schedules every pending row', async () => {"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_15_bitbucket_re",
+     "type": "function",
+     "function": {
+      "name": "bitbucket_read_file",
+      "arguments": "{\"repo\": \"ms-postback-relay\", \"ref\": \"rc\", \"path\": \"src/retry/RetryScheduler.ts\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_15_bitbucket_re",
+   "name": "bitbucket_read_file",
+   "content": "import { Repository } from 'typeorm';\nimport { PostbackRetry } from '../entities/PostbackRetry';\n\nexport class RetryScheduler {\n  constructor(private readonly repo: Repository<PostbackRetry>) {}\n\n  async start(): Promise<void> {\n    // rc-14: schedule everything up front so retries survive a restart\n    await this.loadPendingRetries();\n    this.timer = setInterval(() => this.tick(), 1_000);\n  }\n\n  async loadPendingRetries(): Promise<void> {\n    const pending = await this.repo.find({ where: { status: 'pending' } });\n    for (const retry of pending) this.queue.push(retry);\n  }\n}"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_16_bitbucket_re",
+     "type": "function",
+     "function": {
+      "name": "bitbucket_read_file",
+      "arguments": "{\"repo\": \"ms-postback-relay\", \"ref\": \"master\", \"path\": \"src/retry/RetryScheduler.ts\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_16_bitbucket_re",
+   "name": "bitbucket_read_file",
+   "content": "  async tick(): Promise<void> {\n    const due = await this.repo.find({\n      where: { status: 'pending', nextAttemptAt: LessThanOrEqual(new Date()) },\n      order: { nextAttemptAt: 'ASC' },\n      take: 500,\n    });\n    for (const retry of due) await this.deliver(retry);\n  }"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_17_TodoWrite",
+     "type": "function",
+     "function": {
+      "name": "TodoWrite",
+      "arguments": "{\"todos\": [{\"id\": \"1\", \"content\": \"Confirm the crash reason from pod status and previous logs\", \"status\": \"completed\"}, {\"id\": \"2\", \"content\": \"Correlate with memory metrics and the latest rollout\", \"status\": \"completed\"}, {\"id\": \"3\", \"content\": \"Read the startup code at the deployed ref\", \"status\": \"completed\"}, {\"id\": \"4\", \"content\": \"Verify the code's assumption against production data\", \"status\": \"in_progress\"}, {\"id\": \"5\", \"content\": \"Write root cause, evidence and a fix\", \"status\": \"pending\"}]}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_17_TodoWrite",
+   "name": "TodoWrite",
+   "content": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[x] Read the startup code at the deployed ref\n[~] Verify the code's assumption against production data\n[ ] Write root cause, evidence and a fix"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_18_prod_postgre",
+     "type": "function",
+     "function": {
+      "name": "prod_postgres_query",
+      "arguments": "{\"database\": \"postbacks\", \"query\": \"SELECT status, count(*) AS rows, pg_size_pretty(sum(pg_column_size(t.*))) AS size FROM postback_retries t GROUP BY status\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_18_prod_postgre",
+   "name": "prod_postgres_query",
+   "content": " status    |   rows    |  size\n-----------+-----------+--------\n pending   | 2,184,113 | 1391 MB\n delivered |   406,920 | 251 MB\n dead      |     3,307 | 2 MB\n(3 rows)"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_19_prod_postgre",
+     "type": "function",
+     "function": {
+      "name": "prod_postgres_query",
+      "arguments": "{\"database\": \"postbacks\", \"query\": \"SELECT date_trunc('hour', created_at) AS hour, count(*) FROM postback_retries WHERE status = 'pending' GROUP BY 1 ORDER BY 1\"}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_19_prod_postgre",
+   "name": "prod_postgres_query",
+   "content": "        hour         |  count\n---------------------+---------\n 2026-10-06 12:00:00 |     214\n 2026-10-06 13:00:00 |  48,771\n 2026-10-06 14:00:00 | 1,021,388\n 2026-10-06 15:00:00 | 1,107,950\n 2026-10-06 16:00:00 |   5,790\n(5 rows)"
+  },
+  {
+   "role": "assistant",
+   "content": null,
+   "tool_calls": [
+    {
+     "id": "call_20_TodoWrite",
+     "type": "function",
+     "function": {
+      "name": "TodoWrite",
+      "arguments": "{\"todos\": [{\"id\": \"1\", \"content\": \"Confirm the crash reason from pod status and previous logs\", \"status\": \"completed\"}, {\"id\": \"2\", \"content\": \"Correlate with memory metrics and the latest rollout\", \"status\": \"completed\"}, {\"id\": \"3\", \"content\": \"Read the startup code at the deployed ref\", \"status\": \"completed\"}, {\"id\": \"4\", \"content\": \"Verify the code's assumption against production data\", \"status\": \"completed\"}, {\"id\": \"5\", \"content\": \"Write root cause, evidence and a fix\", \"status\": \"completed\"}]}"
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_20_TodoWrite",
+   "name": "TodoWrite",
+   "content": "Investigation plan updated:\n[x] Confirm the crash reason from pod status and previous logs\n[x] Correlate with memory metrics and the latest rollout\n[x] Read the startup code at the deployed ref\n[x] Verify the code's assumption against production data\n[x] Write root cause, evidence and a fix"
+  },
+  {
+   "role": "assistant",
+   "content": "## Root cause\n\n`ms-postback-relay` is **OOMKilled on boot** (exit 137, 37 restarts). Release `rc-14-2026-10-06-16-05` changed `RetryScheduler.start()` to load **every pending retry into memory** before serving. Yesterday's partner-gateway outage (13:58–15:47 UTC) left **2,184,113 pending rows (~1.4 GB)** in `postback_retries`. Each pod runs out of its 448 MB heap about 40 s into startup.\n\nThe release alone was harmless (it shipped at 16:09, after the backlog stopped growing), and so was the backlog alone (the `master` build pages through it 500 rows at a time). Together they keep every replica in a crash loop, so **no postbacks have been delivered since the first restart**.\n\n## Evidence\n\n| Signal | Finding |\n|---|---|\n| `kubectl describe` | `Last State: Terminated · OOMKilled · 137`, limit `512Mi`, `--max-old-space-size=448` |\n| Previous logs | `loading pending retries on boot` → heap 441/448 MB → `JavaScript heap out of memory` |\n| Prometheus | Sawtooth from ~90 MiB to 512 MiB in 38–44 s per restart. Flat at 140–170 MiB for 7 days before the rollout |\n| Rollout history | Revision 42 → `rc-14-2026-10-06-16-05` at 2026-10-06 16:09 |\n| Code @ `rc` | `repo.find({ where: { status: 'pending' } })` with no `take`. `master` uses `take: 500` per tick |\n| Postgres | 2.13 M of the pending rows were created 13:00–15:59 on 2026-10-06 |\n\nTempo has no traces for the service: it never finishes booting, so it never exports a span.\n\n## Fix\n\nKeep boot-time scheduling, but stream it in pages instead of materialising the whole table:\n\n```diff\n   async loadPendingRetries(): Promise<void> {\n-    const pending = await this.repo.find({ where: { status: 'pending' } });\n-    for (const retry of pending) this.queue.push(retry);\n+    // Page by id: a backlog after an outage can be millions of rows.\n+    let after = 0;\n+    for (;;) {\n+      const page = await this.repo.find({\n+        where: { status: 'pending', id: MoreThan(after) },\n+        order: { id: 'ASC' },\n+        take: 500,\n+      });\n+      if (page.length === 0) break;\n+      for (const retry of page) this.queue.push(retry.id);\n+      after = page[page.length - 1].id;\n+    }\n   }\n```\n\nQueue ids rather than entities. Even paged, 2.2 M full rows would not fit in 448 MB.\n\n## Unblock now (before the fix ships)\n\n1. Roll back to revision 41: `kubectl rollout undo deployment/ms-postback-relay -n native-prod --to-revision=41`. The `master` build drains the backlog 500 rows per tick.\n2. Or keep `rc-14` and set `RETRY_SCHEDULER_ON_BOOT=false` until the paged loader is merged.\n\nDrill is read-only, so neither has been applied.\n"
+  }
+ ]
+}

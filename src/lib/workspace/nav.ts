@@ -1,4 +1,4 @@
-import { BookMarked, ListChecks, Users, type LucideIcon } from "lucide-react";
+import { BookMarked, ListChecks, type LucideIcon } from "lucide-react";
 import { CHAT_HOME } from "@/lib/routes";
 
 export interface WorkspaceNavItem {
@@ -11,12 +11,13 @@ export interface WorkspaceNavItem {
 /**
  * The workspace's sections — the single source of truth for the chat sidebar's
  * navigation, as `ADMIN_NAV` is for the admin one. Chat has no entry: the
- * "New investigation" button and the Recent list above it are the way in.
+ * "New investigation" button and the Recent list above it are the way in. The
+ * org page has none either: it is reached from the org menu in the sidebar
+ * footer, beside the switcher, where org settings are expected to live.
  */
 export const WORKSPACE_NAV: WorkspaceNavItem[] = [
   { href: "/resolutions", label: "Resolutions", icon: BookMarked },
   { href: "/skills", label: "Skills", icon: ListChecks },
-  { href: "/org", label: "Organization", icon: Users },
 ];
 
 export function isNavActive(item: WorkspaceNavItem, pathname: string): boolean {

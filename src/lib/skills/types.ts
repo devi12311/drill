@@ -78,7 +78,8 @@ function checkName(raw: unknown): string {
   return name;
 }
 
-function checkInput(item: unknown, i: number, seen: Set<string>): SkillInput {
+/** One input row checked as a save checks it; `seen` catches duplicate keys. */
+export function checkInput(item: unknown, i: number, seen: Set<string>): SkillInput {
   const entry = (item ?? {}) as Record<string, unknown>;
   const key = typeof entry.key === "string" ? entry.key.trim() : "";
   if (!INPUT_KEY_PATTERN.test(key))

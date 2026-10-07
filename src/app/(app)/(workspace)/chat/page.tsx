@@ -165,8 +165,13 @@ function ChatPane() {
         status={shown?.status}
         artifactId={shown?.artifactId}
         onConversationCreated={(id) => {
-          // The chat on screen now has an id: adopt it without a reload.
-          setPane((p) => ({ ...p, id, url: id }));
+          // The chat on screen now has an id: adopt it without a reload. Only
+          // the id — `url` must keep tracking what `useSearchParams` has seen,
+          // which lags the replaceState below by a render. Setting it here made
+          // that lagging `c === null` read as "new chat", remounting the pane
+          // empty and then reloading the conversation (a visible page swap).
+          // The URL-follow branch `c === pane.id` adopts the new `?c=` instead.
+          setPane((p) => ({ ...p, id }));
           writeChatUrl(id, "replace");
           void refreshConversations();
         }}

@@ -1,20 +1,24 @@
 "use client";
 
-import type { ReactNode } from "react";
-import { ChevronRight } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ChevronRight, Plus } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { useSkillBuilder } from "@/components/skills/use-skill-builder";
 import { cn } from "@/lib/utils";
 import type { TodoItem, ToolCall } from "@/lib/holmes/types";
+import { isAddableStep, MAX_SKILL_STEPS, stepKey } from "@/lib/skills/conversation-steps";
 
 /** A tool call as it streams in: running until its result arrives. */
 export interface LiveToolCall {
   id: string;
   tool_name: string;
   toolCall?: ToolCall;
+  /** A stored call's identity, which lets the skill builder pick it. */
+  stepKey?: string;
 }
 
 function todosFromParams(call: ToolCall | undefined): TodoItem[] | null {
@@ -81,10 +85,87 @@ function isFailed(call: ToolCall): boolean {
   return call.result.status === "error" || call.result.error !== null;
 }
 
-function ToolCallRow({ call }: { call: ToolCall }) {
-  // Live statuses observed: success, error, no_data (empty but not failed).
-  const failed = isFailed(call);
-  const noData = !failed && call.result.status !== "success";
+/** Live statuses observed: success, error, no_data (empty but not failed). */
+export function callOutcome(call: ToolCall): "ok" | "failed" | "empty" {
+  if (isFailed(call)) return "failed";
+  return call.result.status === "success" ? "ok" : "empty";
+}
+
+export function OutcomeDot({ call }: { call: ToolCall }) {
+  const outcome = callOutcome(call);
+  return (
+    <span
+      className={cn(
+        "size-1.5 shrink-0 rounded-full",
+        outcome === "failed"
+          ? "bg-traffic-red"
+          : outcome === "empty"
+            ? "bg-traffic-yellow"
+            : "bg-traffic-green",
+      )}
+    />
+  );
+}
+
+/**
+ * A call row; while the skill builder is picking, a stored call also gets the
+ * control that adds it as a step — a separate target from the row, which still
+ * opens the call's params and output for inspection.
+ */
+function ToolCallRow({ call, pickKey }: { call: ToolCall; pickKey?: string }) {
+  const builder = useSkillBuilder();
+  const row = <CallDetails call={call} />;
+  if (!builder || !pickKey) return row;
+
+  if (!isAddableStep(call)) {
+    return (
+      <div
+        className="flex items-start gap-1 opacity-50"
+        title="Drill runs this on its own — not a step"
+      >
+        <span className="size-5 shrink-0" />
+        <div className="min-w-0 flex-1">{row}</div>
+      </div>
+    );
+  }
+
+  const number = builder.stepNumber(pickKey);
+  const full = number === null && builder.picked.length >= MAX_SKILL_STEPS;
+  return (
+    <div
+      data-step-row={pickKey}
+      className={cn(
+        "flex items-start gap-1 rounded-sm transition-colors",
+        number !== null && "ring-1 ring-faint-linen/40",
+        builder.flashKey === pickKey && "bg-iron-veil/60 ring-faint-linen",
+      )}
+    >
+      <button
+        type="button"
+        data-pick-key={pickKey}
+        tabIndex={builder.tabKey === pickKey ? 0 : -1}
+        aria-pressed={number !== null}
+        aria-disabled={full || undefined}
+        aria-label={number !== null ? `Remove step ${number}` : `Add ${call.tool_name} as a step`}
+        title={full ? `${MAX_SKILL_STEPS} steps max` : undefined}
+        onFocus={() => builder.setFocusKey(pickKey)}
+        onClick={() => builder.toggle(pickKey)}
+        className={cn(
+          "mt-1 ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-sm border font-mono text-[11px] tabular-nums outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+          number !== null
+            ? "border-faint-linen bg-faint-linen text-deep-ember"
+            : "border-input text-bone-gray hover:text-warm-off-white",
+          full && "opacity-50",
+        )}
+      >
+        {number ?? <Plus className="size-3" />}
+      </button>
+      <div className="min-w-0 flex-1">{row}</div>
+    </div>
+  );
+}
+
+function CallDetails({ call }: { call: ToolCall }) {
   const output = call.result.data ?? call.result.error ?? "(no output)";
   const params = call.result.params;
 
@@ -92,16 +173,7 @@ function ToolCallRow({ call }: { call: ToolCall }) {
     <Collapsible>
       <CollapsibleTrigger className="group flex w-full items-center gap-2.5 rounded-sm px-2 py-1.5 text-left hover:bg-iron-veil/40">
         <ChevronRight className="size-3.5 shrink-0 text-bone-gray transition-transform group-data-[state=open]:rotate-90" />
-        <span
-          className={cn(
-            "size-1.5 shrink-0 rounded-full",
-            failed
-              ? "bg-traffic-red"
-              : noData
-                ? "bg-traffic-yellow"
-                : "bg-traffic-green",
-          )}
-        />
+        <OutcomeDot call={call} />
         <span className="shrink-0 font-mono text-[13px] text-warm-off-white">
           {call.tool_name}
         </span>
@@ -185,16 +257,20 @@ function TimelinePanel({
   rows,
   stopped,
   footer,
+  forceOpen = false,
 }: {
   summary: ReactNode;
   todos: TodoItem[] | null;
   rows: LiveItem[];
   stopped?: boolean;
   footer?: ReactNode;
+  /** Held open (picking steps needs every call in view). */
+  forceOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   return (
     <div className="rounded-lg bg-smoke-charcoal/60 py-1">
-      <Collapsible>
+      <Collapsible open={forceOpen || open} onOpenChange={setOpen}>
         <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2.5 rounded-sm px-2 py-1.5 text-left hover:bg-iron-veil/40">
           <ChevronRight className="size-3.5 shrink-0 text-bone-gray transition-transform group-data-[state=open]:rotate-90" />
           {summary}
@@ -216,21 +292,45 @@ function planFraction(todos: TodoItem[] | null): string {
   return `${todos.filter((t) => t.status === "completed").length}/${todos.length}`;
 }
 
-/** Completed-investigation timeline: one collapsed summary line. */
-export function ToolTimeline({ toolCalls }: { toolCalls: ToolCall[] }) {
+/**
+ * Completed-investigation timeline: one collapsed summary line. While the skill
+ * builder is picking it opens, and the plan widget steps aside for the calls.
+ */
+export function ToolTimeline({
+  toolCalls,
+  messageId,
+}: {
+  toolCalls: ToolCall[];
+  /** The stored message the calls belong to — what makes them pickable. */
+  messageId: string;
+}) {
+  const picking = useSkillBuilder() !== null;
   if (toolCalls.length === 0) return null;
   const todos = latestTodos(toolCalls);
   const steps = toolCalls.filter((c) => c.tool_name !== "TodoWrite");
   const failed = steps.filter(isFailed).length;
-  const rows: LiveItem[] = steps.map((c, i) => ({
-    kind: "call",
-    call: { id: `${c.tool_call_id}-${i}`, tool_name: c.tool_name, toolCall: c },
-  }));
+  // Indexed against the full list: that index is the step's stored identity.
+  const rows: LiveItem[] = toolCalls.flatMap((c, i) =>
+    c.tool_name === "TodoWrite"
+      ? []
+      : [
+          {
+            kind: "call" as const,
+            call: {
+              id: `${c.tool_call_id}-${i}`,
+              tool_name: c.tool_name,
+              toolCall: c,
+              stepKey: stepKey(messageId, i),
+            },
+          },
+        ],
+  );
 
   return (
     <TimelinePanel
-      todos={todos}
+      todos={picking ? null : todos}
       rows={rows}
+      forceOpen={picking}
       summary={
         <>
           <StatusDot state={failed ? "failed" : "ok"} />
@@ -344,7 +444,11 @@ function TimelineRows({
             <span className="h-px flex-1 bg-border" />
           </div>
         ) : item.call.toolCall ? (
-          <ToolCallRow key={`${item.call.id}-${i}`} call={item.call.toolCall} />
+          <ToolCallRow
+            key={`${item.call.id}-${i}`}
+            call={item.call.toolCall}
+            pickKey={item.call.stepKey}
+          />
         ) : (
           <div
             key={`${item.call.id}-${i}`}

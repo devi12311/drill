@@ -1,7 +1,7 @@
 /**
  * Types for the HolmesGPT HTTP API (POST /api/chat).
  * Contract: https://holmesgpt.dev/latest/reference/http-api/
- * Real example payload: fixtures/holmes-response.json
+ * Example payload (synthetic, same shape as a real capture): fixtures/holmes-response.json
  */
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
@@ -30,6 +30,16 @@ export interface ToolCall {
   description: string;
   size?: number;
   result: ToolCallResult;
+}
+
+/**
+ * Drill's own pause-mode tools (lib/holmes/frontend-tools.ts) are labelled with a
+ * "drill-…" toolset. They run on their own every turn, so they are never a step
+ * someone could build a skill from.
+ */
+export function isDrillTool(call: Pick<ToolCall, "toolset_name">): boolean {
+  const toolset = call.toolset_name ?? "";
+  return toolset === "drill" || toolset.startsWith("drill-");
 }
 
 export interface FollowUpAction {

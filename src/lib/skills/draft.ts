@@ -54,11 +54,25 @@ const SKILL_RESPONSE_FORMAT = {
 /** No planning widget for a one-shot authoring task (same as monitoring's fast mode). */
 const BEHAVIOR = { todowrite_instructions: false, todowrite_reminder: false };
 
-function prompt(input: {
-  request: string;
+/** What the draft is written from — an author's request, or a conversation's steps. */
+interface DraftInput {
+  /** A ready prompt section describing what the skill should capture. */
+  source: string;
   current: SkillDraft | null;
   existing: readonly { name: string; description: string }[];
-}): string {
+  /**
+   * Extra rules on top of `validateSkillDraft`; throws with a reason. Its failure
+   * is retried once like a malformed draft, with the reason quoted.
+   */
+  check?: (draft: SkillDraft) => void;
+}
+
+/** The section for a skill drafted from the author's own description. */
+export function requestSource(request: string): string {
+  return `WHAT THE AUTHOR WANTS\n${request}`;
+}
+
+function prompt(input: DraftInput): string {
   const existing = input.existing.length
     ? input.existing.map((s) => `- ${s.name}: ${s.description}`).join("\n")
     : "(none)";
@@ -67,8 +81,7 @@ function prompt(input: {
     : "";
   return `You are writing a SKILL: a step-by-step procedure that you (Holmes) will later follow when investigating this infrastructure. Do NOT investigate anything now — you are only authoring the procedure.
 
-WHAT THE AUTHOR WANTS
-${input.request}
+${input.source}
 ${current}
 HOW TO WRITE IT
 - Use the toolsets you actually have in this deployment and name them exactly (e.g. \`kubernetes/logs\`, \`prometheus/metrics\`, or a database toolset). Never invent a toolset; if a step needs one you lack, say so in the step.
@@ -96,7 +109,7 @@ Return ONLY the JSON object matching the schema.`;
 export async function draftSkill(
   agent: AgentTarget,
   model: string,
-  input: Parameters<typeof prompt>[0],
+  input: DraftInput,
   /** The author cancelled, or closed the page — stop paying for the answer. */
   abort?: AbortSignal,
 ): Promise<SkillDraft> {
@@ -111,8 +124,12 @@ export async function draftSkill(
         abort,
       )
     ).analysis;
-  const parse = (text: string) => validateSkillDraft(JSON.parse(text));
-  // Only a malformed draft is retried; a timeout or a dead agent is not worth
+  const parse = (text: string) => {
+    const draft = validateSkillDraft(JSON.parse(text));
+    input.check?.(draft);
+    return draft;
+  };
+  // Only a malformed or rejected draft is retried; a timeout or a dead agent is not worth
   // paying for twice.
   const first = await answer(ask);
   try {
