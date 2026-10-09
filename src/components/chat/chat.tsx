@@ -32,14 +32,16 @@ import {
   useSkillBuilderState,
 } from "@/components/skills/use-skill-builder";
 import { showsModeSwitch } from "@/components/shell/mode-switch";
+import { isTypingTarget, useShortcut } from "@/components/shell/shortcuts";
 import { useAgentModels } from "@/components/workspace/workspace-provider";
 import { invocationLine } from "@/lib/skills/prompt";
-import type { MessageSkill } from "@/lib/skills/types";
+import { canRunSkill, type MessageSkill } from "@/lib/skills/types";
 import { useSession } from "@/components/session/session-provider";
 import { describeDecisions } from "@/lib/chat/describe";
 import { groupInvestigations, investigationRows } from "@/lib/chat/investigations";
 import { isActiveTurn, type ChatEntry, type TurnSnapshot } from "@/lib/chat/types";
 import { viewTransitionSettled } from "@/components/ui/view-transition";
+import { SHORTCUTS } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import type {
   FollowUpAction,
@@ -81,6 +83,8 @@ export function Chat({
   artifactId,
   onConversationCreated,
   onActivity,
+  initialSkill,
+  onInitialSkillUsed,
 }: {
   agentId: string;
   initialConversationId: string | null;
@@ -93,6 +97,9 @@ export function Chat({
   onConversationCreated: (id: string) => void;
   /** Something the sidebar shows changed (a turn started, settled, stopped). */
   onActivity: () => void;
+  /** A skill name to pick in the composer once (Run ▸ on a skill page). */
+  initialSkill?: string | null;
+  onInitialSkillUsed?: () => void;
 }) {
   const router = useRouter();
   const { user } = useSession();
@@ -100,13 +107,15 @@ export function Chat({
   const [actionError, setActionError] = useState<string | null>(null);
   const models = useAgentModels(agentId);
   const { skills: visibleSkills } = useSkills();
-  // What the server will run for this user: their own and shared skills. An
-  // admin's list also holds other users' private ones, and always-on skills
-  // already apply to every turn.
-  const runnableSkills =
-    visibleSkills?.filter(
-      (s) => !s.alwaysOn && (s.visibility === "shared" || s.createdBy === user.id),
-    ) ?? null;
+  const runnableSkills = visibleSkills?.filter((s) => canRunSkill(s, user.id)) ?? null;
+  // Run ▸ from a skill page: picked once the runnable list has loaded. A name
+  // that is not runnable here (deleted, someone else's, always-on) says so.
+  const pendingSkill = initialSkill && runnableSkills ? initialSkill : null;
+  const skillToRun = pendingSkill
+    ? (runnableSkills?.find((s) => s.name === pendingSkill) ?? null)
+    : null;
+  const [unknownSkill, setUnknownSkill] = useState<string | null>(null);
+  if (pendingSkill && !skillToRun && unknownSkill !== pendingSkill) setUnknownSkill(pendingSkill);
   const [pickedModel, setModel] = useState<string | null>(null);
   // Derived, not stored: the agent's first model IS the default, and a pick
   // the agent no longer serves (or one from another agent) falls back to it.
@@ -120,6 +129,11 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const composerRef = useRef<ComposerHandle>(null);
+  useEffect(() => {
+    if (!pendingSkill) return;
+    if (skillToRun) composerRef.current?.run(skillToRun);
+    onInitialSkillUsed?.();
+  }, [pendingSkill, skillToRun, onInitialSkillUsed]);
   // From Send until the server hands back a turn id: the card shows "Starting…"
   // at once instead of a gap, and it is the same TurnCard the real turn then
   // fills — so the orb that flew in on the first send is never remounted.
@@ -301,6 +315,11 @@ export function Chat({
     }
   }
 
+  function stop() {
+    setStopClickedAt(Date.now());
+    turnAction("cancel");
+  }
+
   function onFollowUp(action: FollowUpAction) {
     send(action.prompt, action.pre_action_notification_text);
   }
@@ -317,6 +336,19 @@ export function Chat({
   // (stopped, then resumed) is newer than the click, so Stop comes back.
   const stopping =
     stopClickedAt != null && view != null && stopClickedAt >= view.statusSince;
+
+  // Esc stops the investigation, as in Claude and Claude Code — after anything
+  // nearer has had it (a dialog, the skill list, a picked skill), and not from
+  // another field. A stray press is cheap: a stopped turn can be resumed.
+  useShortcut(
+    SHORTCUTS.stop.keys,
+    (e) => {
+      const fromField = isTypingTarget(e.target) && !(e.target as Element).closest("[data-composer]");
+      if (fromField) return false;
+      stop();
+    },
+    active && !stopping,
+  );
   const liveStatus =
     shownTurn && lastInvestigation && isActiveTurn(shownTurn.turn.status) ? (
       <TurnStatus
@@ -478,16 +510,15 @@ export function Chat({
               <SkillBuilderBar builder={builder} />
             ) : (
               <>
-                {actionError && (
-                  <p className="mb-2 text-body-sm text-destructive">{actionError}</p>
+                {(actionError || unknownSkill) && (
+                  <p className="mb-2 text-body-sm text-destructive">
+                    {actionError ?? `There is no skill named ${unknownSkill} that you can run here.`}
+                  </p>
                 )}
                 <Composer
                   ref={composerRef}
                   onSend={(ask, skillRun) => (skillRun ? runSkill(ask, skillRun) : send(ask))}
-                  onStop={() => {
-                    setStopClickedAt(Date.now());
-                    turnAction("cancel");
-                  }}
+                  onStop={stop}
                   busy={active}
                   stopping={stopping}
                   status={liveStatus}

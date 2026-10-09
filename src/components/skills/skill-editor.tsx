@@ -6,29 +6,29 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Plus, X } from "lucide-react";
+import { ArrowUp, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { ConfirmButton } from "@/components/ui/confirm-button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Field, FieldGroup } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { StickyBar } from "@/components/ui/sticky-bar";
 import { Textarea } from "@/components/ui/textarea";
 import { useLeaveGuard } from "@/components/ui/use-leave-guard";
-import { Markdown } from "@/components/chat/markdown";
-import { useSession } from "@/components/session/session-provider";
 import { SkillDrafter } from "./skill-drafter";
-import { cn } from "@/lib/utils";
+import { HolmesChange, type DraftField } from "./holmes-change";
+import { SkillInputRows, inputRowId, labelForKey } from "./skill-input-rows";
+import { PROCEDURE_ID, SkillProcedureField } from "./skill-procedure-field";
+import { HttpError, sendJson } from "@/lib/http";
 import { SKILL_SEED_KEY } from "@/lib/skills/conversation-steps";
 import {
   SKILL_LIMITS,
   hasProblems,
   validateSkillDraft,
   skillDraftProblems,
-  toInputKey,
+  toSkillDraft,
   toSkillName,
   unusedInputs,
   type SkillDraft,
@@ -38,7 +38,6 @@ import {
 
 const EMPTY: SkillDraft = { name: "", description: "", body: "", inputs: [] };
 
-type DraftField = "name" | "description" | "inputs" | "body";
 const FIELD_LABELS: Record<DraftField, string> = {
   name: "name",
   description: "description",
@@ -46,22 +45,11 @@ const FIELD_LABELS: Record<DraftField, string> = {
   body: "procedure",
 };
 
-async function send(method: string, url: string, body?: unknown) {
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
-  return json;
-}
-
-function toDraft(skill: SkillView | null): SkillDraft {
-  return skill
-    ? { name: skill.name, description: skill.description, body: skill.body, inputs: skill.inputs }
-    : EMPTY;
-}
+const FIELD_IDS: Record<Exclude<DraftField, "inputs">, string> = {
+  name: "skill-name",
+  description: "skill-description",
+  body: PROCEDURE_ID,
+};
 
 // Field by field rather than JSON.stringify: inputs come back from jsonb, which
 // does not keep object key order (docs/DECISIONS.md, 79).
@@ -100,147 +88,17 @@ function listOf(words: string[]): string {
     : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
 }
 
-/** Marks a field the last Holmes draft rewrote, until it is saved or undone. */
-function HolmesMark({ show }: { show: boolean }) {
-  if (!show) return null;
-  return (
-    <span className="ml-2 rounded-sm bg-smoke-charcoal px-1.5 py-0.5 text-caption-tracked font-normal uppercase text-pale-stone">
-      Holmes
-    </span>
-  );
-}
-
-function InputRows({
-  inputs,
-  onChange,
-  disabled,
-  errors,
-}: {
-  inputs: SkillInput[];
-  onChange: (inputs: SkillInput[]) => void;
-  disabled: boolean;
-  /** Row index → that row's problem, already filtered to what is worth showing. */
-  errors: Record<number, string>;
-}) {
-  const set = (i: number, patch: Partial<SkillInput>) =>
-    onChange(inputs.map((input, idx) => (idx === i ? { ...input, ...patch } : input)));
-  return (
-    <div className="space-y-3">
-      {inputs.map((input, i) => (
-        <div key={i} className="space-y-1">
-          {/* Two lines on a phone: key and label each need their full width. */}
-          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-            <Input
-              value={input.key}
-              onChange={(e) => set(i, { key: toInputKey(e.target.value) })}
-              placeholder="service_name"
-              aria-label={`Input ${i + 1} key`}
-              aria-invalid={errors[i] ? true : undefined}
-              aria-describedby={errors[i] ? `skill-input-${i}-error` : undefined}
-              disabled={disabled}
-              className="w-full font-mono text-[13px] sm:w-48"
-            />
-            <Input
-              value={input.label}
-              onChange={(e) => set(i, { label: e.target.value })}
-              placeholder="Service name"
-              aria-label={`Input ${i + 1} label`}
-              disabled={disabled}
-              className="min-w-0 flex-1"
-            />
-            <label className="flex h-11 shrink-0 items-center gap-2 text-body-sm text-pale-stone sm:h-auto">
-              <Checkbox
-                checked={input.required}
-                onCheckedChange={(v) => set(i, { required: v === true })}
-                disabled={disabled}
-              />
-              required
-            </label>
-            {!disabled && (
-              <button
-                type="button"
-                aria-label={`Remove input ${input.key || i + 1}`}
-                onClick={() => onChange(inputs.filter((_, idx) => idx !== i))}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-sm text-bone-gray outline-none hover:text-traffic-red focus-visible:ring-3 focus-visible:ring-ring/50 sm:size-8"
-              >
-                <X className="size-3.5" />
-              </button>
-            )}
-          </div>
-          {errors[i] && (
-            <p id={`skill-input-${i}-error`} className="text-body-sm text-traffic-red">
-              {errors[i]}
-            </p>
-          )}
-        </div>
-      ))}
-      {!disabled && inputs.length < SKILL_LIMITS.inputs && (
-        <button
-          type="button"
-          onClick={() => onChange([...inputs, { key: "", label: "", required: false }])}
-          className="flex items-center gap-1.5 rounded-sm px-1 py-0.5 text-body-sm text-bone-gray outline-none hover:text-warm-off-white focus-visible:ring-3 focus-visible:ring-ring/50"
-        >
-          <Plus className="size-3.5" />
-          add input
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** Write / Preview, as a real tab set: announced, selected state, arrow keys. */
-function ProcedureTabs({
-  preview,
-  onPreview,
-}: {
-  preview: boolean;
-  onPreview: (preview: boolean) => void;
-}) {
-  const refs = useRef<(HTMLButtonElement | null)[]>([]);
-  const tabs = ["Write", "Preview"] as const;
-  const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    e.preventDefault();
-    const next = preview ? 0 : 1;
-    onPreview(next === 1);
-    refs.current[next]?.focus();
-  };
-  return (
-    <div role="tablist" aria-label="Procedure view" className="flex gap-1" onKeyDown={onKeyDown}>
-      {tabs.map((tab, i) => {
-        const selected = preview === (i === 1);
-        return (
-          <button
-            key={tab}
-            ref={(el) => {
-              refs.current[i] = el;
-            }}
-            type="button"
-            role="tab"
-            id={`skill-tab-${tab.toLowerCase()}`}
-            aria-selected={selected}
-            aria-controls="skill-procedure-panel"
-            tabIndex={selected ? 0 : -1}
-            onClick={() => onPreview(i === 1)}
-            className={cn(
-              "rounded-sm px-2.5 py-1 text-body-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
-              selected
-                ? "bg-iron-veil text-warm-off-white"
-                : "text-bone-gray hover:text-warm-off-white",
-            )}
-          >
-            {tab}
-          </button>
-        );
-      })}
-    </div>
-  );
+/** Into view below the sticky bar, then focused — `focus()` alone can leave it under the bar. */
+function reveal(id: string) {
+  const el = document.getElementById(id);
+  el?.scrollIntoView({ block: "center" });
+  el?.focus({ preventScroll: true });
 }
 
 /**
- * Reviewing a shared skill before importing a copy (`/share/<token>`). The form
+ * Editing a shared skill before importing a copy (`/share/<token>`). The form
  * is the same one; only where it starts and where it saves differ, so the review
- * page owns the target org and "Not now", and the editor owns the fields.
+ * page owns the target org, and the editor owns the fields.
  */
 export interface SkillImport {
   kind: "share";
@@ -250,69 +108,109 @@ export interface SkillImport {
   submitLabel: string;
   /** Why Import is off for this target (already imported there), shown in its place. */
   blockedReason: string | null;
-  /** Beside the submit button: the target-org picker and "Not now". */
+  /** In the bar, beside the import button: the target-org picker. */
   actions: ReactNode;
   submit: (draft: SkillDraft) => Promise<void>;
 }
 
 /**
- * Where a new skill's form starts: blank, the chat skill builder's draft
- * (`/skills/new?from=conversation`, handed over in sessionStorage), or a shared
- * skill under review.
+ * Where a new skill's form starts: blank, a draft handed over in sessionStorage
+ * — the chat's skill builder (`?from=conversation`, marked as Holmes's) or a
+ * duplicated skill (`?from=duplicate`) — or a shared skill under review.
  */
-export type SkillSource = { kind: "conversation" } | SkillImport;
+export type SkillSource = { kind: "conversation" } | { kind: "duplicate" } | SkillImport;
 
 /**
- * Create (`skill` null) or edit one skill. Each field is checked with the same
- * rules the API runs (`skillDraftProblems` shares them with `validateSkillDraft`),
- * so a save only fails for reasons the form could not know (a taken name, a lost
- * permission) — and every other problem is shown beside its own field.
+ * Create (`skill` null) or edit one skill — only editing: reading a skill and
+ * deciding who uses it happen on its page (`SkillDetail`), so this form has one
+ * way to save. Each field is checked with the same rules the API runs
+ * (`skillDraftProblems` shares them with `validateSkillDraft`), so a save only
+ * fails for reasons the form could not know — a taken name, a lost permission.
+ *
+ * The decision lives in a bar pinned to the top: Save and whatever blocks it
+ * stay in view however long the procedure is.
  */
 export function SkillEditor({
   skill,
   source,
+  askHolmes = false,
+  onSaved,
+  onCancel,
 }: {
   skill: SkillView | null;
   source?: SkillSource;
+  /** Open with the Holmes drafter showing ("Describe it to Holmes"). */
+  askHolmes?: boolean;
+  /** An existing skill was saved; a new one navigates to its own page instead. */
+  onSaved?: (skill: SkillView) => void;
+  onCancel: () => void;
 }) {
   const router = useRouter();
-  const { user } = useSession();
   const importing = source?.kind === "share" ? source : null;
   // What the server holds. Moves forward on save, so "unsaved" is always
   // measured against the last save, not against the page load. Under review,
   // the shared version: "changed" then means "your copy will differ from it".
-  const [saved, setSaved] = useState<SkillDraft>(() => importing?.draft ?? toDraft(skill));
+  const [saved, setSaved] = useState<SkillDraft>(() =>
+    importing ? importing.draft : skill ? toSkillDraft(skill) : EMPTY,
+  );
   const [draft, setDraft] = useState<SkillDraft>(saved);
   const [preview, setPreview] = useState(false);
-  // The form before the last Holmes draft replaced it — one step of undo.
+  const [holmesOpen, setHolmesOpen] = useState(askHolmes && !importing);
+  // The form before the last Holmes draft replaced it — per-field revert and Undo all.
   const [beforeDraft, setBeforeDraft] = useState<SkillDraft | null>(null);
   const [holmesFields, setHolmesFields] = useState<DraftField[]>([]);
   const [visited, setVisited] = useState<Set<DraftField>>(new Set());
   const [saving, setSaving] = useState(false);
-  const [justSaved, setJustSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scopeStatus, setScopeStatus] = useState<"saving" | "saved" | null>(null);
-  const [scopeError, setScopeError] = useState<string | null>(null);
-  const readOnly = skill !== null && !skill.editable;
-  // Sharing is an org admin's call, and needs a saved skill to act on.
-  const canShare = user.isOrgAdmin && skill !== null;
+  // A name the server refused as taken since this form opened.
+  const [refusedName, setRefusedName] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState(false);
 
   const problems = useMemo(() => skillDraftProblems(draft), [draft]);
   const blocked = hasProblems(problems);
-  const dirty = changedFields(draft, saved).length > 0;
+  const dirtyFields = changedFields(draft, saved);
+  const dirty = dirtyFields.length > 0;
   // Untouched, a shared skill is still worth importing as it is.
   const submittable = importing ? !blocked && !importing.blockedReason : dirty && !blocked;
-  useLeaveGuard(dirty && !saving && !readOnly);
+  useLeaveGuard(dirty && !saving);
+
+  // A draft handed over in sessionStorage. Read through an external store so the
+  // server render (which has no sessionStorage) and hydration agree, then applied
+  // during render — once per seed — and removed so a reload is a blank form.
+  const seeding =
+    skill === null && (source?.kind === "conversation" || source?.kind === "duplicate")
+      ? source.kind
+      : null;
+  const seed = useSyncExternalStore(noSubscription, readSeed, noSeed);
+  const [appliedSeed, setAppliedSeed] = useState<string | null>(null);
+  if (seeding && seed && seed !== appliedSeed) {
+    setAppliedSeed(seed);
+    const next = parseSeed(seed);
+    if (next) {
+      // The skill builder's draft is Holmes's work, reviewed like any other; a
+      // duplicate is the author's own copy.
+      if (seeding === "conversation") {
+        setBeforeDraft(EMPTY);
+        setHolmesFields(changedFields(next, EMPTY));
+      }
+      setDraft(next);
+    }
+  }
+  useEffect(() => {
+    if (appliedSeed) sessionStorage.removeItem(SKILL_SEED_KEY);
+  }, [appliedSeed]);
 
   // A blank new form is not wrong yet: a field complains once it has been left,
-  // or once it holds something. An existing skill is judged from the start.
-  const judged = skill !== null || importing !== null;
+  // or once it holds something. An existing or handed-over skill is judged at once.
+  const judged = skill !== null || importing !== null || appliedSeed !== null;
   const shows = (field: DraftField, hasValue: boolean) =>
-    !readOnly && (judged || visited.has(field) || hasValue);
+    judged || visited.has(field) || hasValue;
   const nameTaken =
     importing?.takenName === draft.name
       ? `Your organization already has a skill named "${draft.name}" — rename this copy.`
-      : undefined;
+      : refusedName === draft.name
+        ? `Your organization already has a skill named "${draft.name}" — choose another name.`
+        : undefined;
   const fieldError = (field: Exclude<DraftField, "inputs">) =>
     (field === "name" && nameTaken) ||
     (shows(field, draft[field] !== "") ? problems[field] : undefined);
@@ -324,343 +222,308 @@ export function SkillEditor({
   const visit = (field: DraftField) => () =>
     setVisited((v) => (v.has(field) ? v : new Set(v).add(field)));
 
-  /** A Holmes draft replaces the form, with one step of Undo and its fields marked. */
+  // In form order, so "N problems ↑" lands on the first one.
+  const problemIds = [
+    ...(["name", "description"] as const).filter((f) => fieldError(f)).map((f) => FIELD_IDS[f]),
+    ...Object.keys(rowErrors).map((i) => inputRowId(Number(i))),
+    ...(fieldError("body") ? [FIELD_IDS.body] : []),
+  ];
+
+  function showFirstProblem() {
+    const id = problemIds[0];
+    if (!id) return;
+    if (id === FIELD_IDS.body && preview) {
+      setPreview(false);
+      requestAnimationFrame(() => reveal(id));
+    } else reveal(id);
+  }
+
+  /** A Holmes draft fills the form; each field it changed is marked, with its own revert. */
   function applyHolmesDraft(next: SkillDraft) {
     setBeforeDraft(draft);
     setHolmesFields(changedFields(next, draft));
-    setJustSaved(false);
     setDraft(next);
+    setHolmesOpen(false);
   }
 
-  // A draft the chat's skill builder handed over in sessionStorage. Read through
-  // an external store so the server render (which has no sessionStorage) and
-  // hydration agree, then applied during render — once per seed — and removed so
-  // a reload is a blank form rather than the same draft again.
-  const seed = useSyncExternalStore(noSubscription, readSeed, noSeed);
-  const [appliedSeed, setAppliedSeed] = useState<string | null>(null);
-  if (source?.kind === "conversation" && skill === null && seed && seed !== appliedSeed) {
-    setAppliedSeed(seed);
-    const next = parseSeed(seed);
-    if (next) {
-      setBeforeDraft(EMPTY);
-      setHolmesFields(changedFields(next, EMPTY));
-      setDraft(next);
-    }
+  function revertField(field: DraftField) {
+    if (!beforeDraft) return;
+    setDraft((d) => ({ ...d, [field]: beforeDraft[field] }));
+    const rest = holmesFields.filter((f) => f !== field);
+    setHolmesFields(rest);
+    if (rest.length === 0) setBeforeDraft(null);
   }
-  const seeded = appliedSeed !== null || importing !== null;
-  useEffect(() => {
-    if (appliedSeed) sessionStorage.removeItem(SKILL_SEED_KEY);
-  }, [appliedSeed]);
+
+  function undoHolmes() {
+    if (beforeDraft) setDraft(beforeDraft);
+    setBeforeDraft(null);
+    setHolmesFields([]);
+  }
 
   const unused = unusedInputs(draft);
-  const update = (patch: Partial<SkillDraft>) => {
-    setJustSaved(false);
-    setDraft((d) => ({ ...d, ...patch }));
-  };
+  const update = (patch: Partial<SkillDraft>) => setDraft((d) => ({ ...d, ...patch }));
   const hasContent = Boolean(draft.name || draft.description || draft.body || draft.inputs.length);
   const renamed = skill !== null && draft.name !== saved.name;
-  // Only what is marked on screen; an untouched new form is "incomplete", not wrong.
-  const shownProblems =
-    (["name", "description", "body"] as const).filter((f) => fieldError(f)).length +
-    Object.keys(rowErrors).length;
+  const holmesMark = (field: DraftField) =>
+    beforeDraft && holmesFields.includes(field) ? (
+      <HolmesChange
+        field={field}
+        before={beforeDraft}
+        after={draft}
+        onRevert={() => revertField(field)}
+      />
+    ) : null;
 
-  async function run(action: () => Promise<void>) {
+  async function save() {
+    if (saving || !submittable || nameTaken) return;
     setSaving(true);
     setError(null);
     try {
-      await action();
+      if (importing) {
+        await importing.submit(draft);
+        return;
+      }
+      const result = skill
+        ? await sendJson<SkillView>(`/api/skills/${skill.id}`, draft, "PATCH")
+        : await sendJson<SkillView>("/api/skills", draft);
+      // Clean before leaving, so the leave guard has nothing to ask about.
+      const next = toSkillDraft(result);
+      setSaved(next);
+      setDraft(next);
+      setBeforeDraft(null);
+      setHolmesFields([]);
+      // A new skill's page is where it is shared and run from.
+      if (skill) onSaved?.(result);
+      else router.replace(`/skills/${result.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed");
+      if (err instanceof HttpError && err.status === 409) {
+        setRefusedName(draft.name);
+        reveal(FIELD_IDS.name);
+      } else setError(err instanceof Error ? err.message : "Request failed");
     } finally {
       setSaving(false);
     }
   }
 
-  const save = () =>
-    run(async () => {
-      if (importing) return importing.submit(draft);
-      const result: SkillView = skill
-        ? await send("PATCH", `/api/skills/${skill.id}`, draft)
-        : await send("POST", "/api/skills", draft);
-      // Saving finishes the edit, so it leaves for the library (which refetches on
-      // mount). Until that route paints, the form shows the saved copy as clean —
-      // Save disabled, "Saved" beside it — instead of a button that looks dead.
-      const next = toDraft(result);
-      setSaved(next);
-      setDraft(next);
-      setBeforeDraft(null);
-      setHolmesFields([]);
-      setJustSaved(true);
-      router.push("/skills");
-    });
+  // ⌘S / Ctrl+S saves, the editor-wide habit. Read through a ref so the
+  // listener is attached once and still calls this render's `save`.
+  const saveRef = useRef(save);
+  useEffect(() => {
+    saveRef.current = save;
+  });
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void saveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
-  // These save on their own, so they report on their own, beside the checkbox.
-  const setScope = async (patch: { visibility?: "private" | "shared"; alwaysOn?: boolean }) => {
-    setScopeStatus("saving");
-    setScopeError(null);
-    try {
-      await send("PATCH", `/api/skills/${skill!.id}`, patch);
-      setScopeStatus("saved");
-      router.refresh();
-    } catch (err) {
-      setScopeStatus(null);
-      setScopeError(err instanceof Error ? err.message : "Request failed");
-    }
-  };
+  const cancel = () => (dirty ? setDiscarding(true) : onCancel());
 
-  const remove = () =>
-    run(async () => {
-      await send("DELETE", `/api/skills/${skill!.id}`);
-      router.push("/skills");
-    });
+  const status = error ? (
+    <span className="text-traffic-red">{error}</span>
+  ) : importing?.blockedReason ? (
+    <span className="text-bone-gray">{importing.blockedReason}</span>
+  ) : problemIds.length > 0 ? (
+    <button
+      type="button"
+      onClick={showFirstProblem}
+      className="inline-flex items-center gap-1 text-traffic-red underline-offset-2 outline-none hover:underline focus-visible:underline"
+    >
+      {problemIds.length === 1 ? "1 problem" : `${problemIds.length} problems`} to fix
+      <ArrowUp className="size-3.5" />
+    </button>
+  ) : blocked ? (
+    <span className="text-bone-gray">
+      Fill in the name, description and procedure to {importing ? "import" : skill ? "save" : "create"} it.
+    </span>
+  ) : dirty && importing ? (
+    <span className="text-pale-stone">Edited — your copy will differ from the shared one.</span>
+  ) : dirty ? (
+    <span className="inline-flex items-center gap-2 text-pale-stone">
+      <span className="size-1.5 rounded-full bg-pale-stone" />
+      Unsaved: {listOf(dirtyFields.map((f) => FIELD_LABELS[f]))}
+    </span>
+  ) : importing ? (
+    <span className="text-bone-gray">Unchanged — imports exactly as shared.</span>
+  ) : skill ? (
+    <span className="text-bone-gray">No changes yet</span>
+  ) : null;
 
   return (
     <div className="space-y-8">
-      {!readOnly && (
-        <div className="space-y-2">
-          <SkillDrafter
-            // Remounted when a seed lands, so it collapses to its Revise button.
-            key={seeded ? "seeded" : "blank"}
-            startOpen={skill === null && !seeded}
-            current={hasContent ? draft : null}
-            onDraft={applyHolmesDraft}
-          />
+      <StickyBar>
+        <div className="min-w-48 flex-1">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="shrink-0 text-body-sm text-warm-off-white">
+              {importing ? "Editing your copy" : skill ? "Editing" : "New skill"}
+            </span>
+            {skill && (
+              <span className="truncate font-mono text-body-sm text-bone-gray">{saved.name}</span>
+            )}
+          </div>
+          <p aria-live="polite" className="min-h-5 text-body-sm">
+            {saving ? <span className="text-bone-gray">{importing ? "Importing…" : "Saving…"}</span> : status}
+          </p>
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {!importing && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={holmesOpen}
+              onClick={() => setHolmesOpen((v) => !v)}
+            >
+              <Sparkles className="size-4" />
+              Ask Holmes
+            </Button>
+          )}
+          {importing?.actions}
+          <Button variant="secondary" size="sm" onClick={cancel} disabled={saving}>
+            {importing ? "Back to review" : "Cancel"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => void save()}
+            disabled={saving || !submittable || Boolean(nameTaken)}
+            title="⌘S"
+          >
+            {importing ? importing.submitLabel : skill ? "Save" : "Create skill"}
+          </Button>
+        </div>
+      </StickyBar>
+
+      {(holmesOpen || beforeDraft) && (
+        <div className="max-w-[820px] space-y-2">
+          {holmesOpen && (
+            <SkillDrafter
+              current={hasContent ? draft : null}
+              onDraft={applyHolmesDraft}
+              onClose={() => setHolmesOpen(false)}
+            />
+          )}
           {beforeDraft && (
             <p className="text-body-sm text-bone-gray">
               {holmesFields.length
-                ? `Holmes rewrote the ${listOf(holmesFields.map((f) => FIELD_LABELS[f]))} — review before saving.`
+                ? `Holmes wrote the ${listOf(holmesFields.map((f) => FIELD_LABELS[f]))} — review each marked field below.`
                 : "Holmes's draft matched the form — nothing changed."}{" "}
               <button
                 type="button"
-                onClick={() => {
-                  setDraft(beforeDraft);
-                  setBeforeDraft(null);
-                  setHolmesFields([]);
-                }}
+                onClick={undoHolmes}
                 className="text-pale-stone underline-offset-2 outline-none hover:text-warm-off-white hover:underline focus-visible:underline"
               >
-                Undo
+                Undo all
               </button>
             </p>
           )}
         </div>
       )}
 
-      {readOnly && (
-        <p className="rounded-lg border border-border bg-smoked-onyx px-4 py-3 text-body-sm text-pale-stone">
-          This skill is shared with your whole org, so only an org admin can change it.
-        </p>
-      )}
-
-      <FieldGroup title="What Holmes sees in its catalog" purpose="Holmes picks a skill by its description alone — make it specific, or it gets fetched for unrelated problems.">
-        <Field
-          id="skill-name"
-          label={<>Name<HolmesMark show={holmesFields.includes("name")} /></>}
-          description={
-            renamed ? (
-              <>
-                Holmes fetches skills by name. After saving,{" "}
-                <span className="font-mono">{saved.name}</span> no longer exists — earlier
-                chats that mention it will point at nothing.
-              </>
-            ) : (
-              "Lowercase letters, digits and hyphens. Holmes passes it back to fetch the skill."
-            )
-          }
-          error={fieldError("name")}
-        >
-          {(props) => (
-            <Input
-              {...props}
-              value={draft.name}
-              onChange={(e) => update({ name: toSkillName(e.target.value) })}
-              onBlur={visit("name")}
-              placeholder="checkout-latency-investigation"
-              disabled={readOnly}
-              className="font-mono text-[13px]"
-            />
-          )}
-        </Field>
-        <Field
-          id="skill-description"
-          label={<>Description<HolmesMark show={holmesFields.includes("description")} /></>}
-          description="When should Holmes use this? Name the symptom and the inputs it starts from."
-          value={draft.description}
-          limit={SKILL_LIMITS.description}
-          error={fieldError("description")}
-        >
-          {(props) => (
-            <Textarea
-              {...props}
-              value={draft.description}
-              onChange={(e) => update({ description: e.target.value })}
-              onBlur={visit("description")}
-              rows={3}
-              disabled={readOnly}
-            />
-          )}
-        </Field>
-      </FieldGroup>
-
-      <FieldGroup
-        title="Inputs"
-        purpose={
-          <>
-            Values you fill in when you run the skill from the composer. Reference them in the
-            procedure as {"{{key}}"}.
-            <HolmesMark show={holmesFields.includes("inputs")} />
-          </>
-        }
-      >
-        <InputRows
-          inputs={draft.inputs}
-          onChange={(inputs) => update({ inputs })}
-          disabled={readOnly}
-          errors={rowErrors}
-        />
-        {unused.length > 0 && (
-          <p className="text-body-sm text-bone-gray">
-            Not used in the procedure: {unused.map((k) => `{{${k}}}`).join(", ")}
-          </p>
-        )}
-      </FieldGroup>
-
-      <FieldGroup title="Procedure" purpose="Markdown. Steps Holmes follows in order, naming the toolsets to use.">
-        <ProcedureTabs preview={preview} onPreview={setPreview} />
-        <div
-          id="skill-procedure-panel"
-          role="tabpanel"
-          aria-labelledby={preview ? "skill-tab-preview" : "skill-tab-write"}
-        >
-          {preview ? (
-            <div className="min-h-64 rounded-lg border border-border px-4 py-3">
-              <Markdown>{draft.body || "_Nothing written yet._"}</Markdown>
-            </div>
-          ) : (
-            <Field
-              id="skill-body"
-              label={<>Steps<HolmesMark show={holmesFields.includes("body")} /></>}
-              value={draft.body}
-              limit={SKILL_LIMITS.body}
-              error={fieldError("body")}
-            >
-              {(props) => (
-                <Textarea
-                  {...props}
-                  value={draft.body}
-                  onChange={(e) => update({ body: e.target.value })}
-                  onBlur={visit("body")}
-                  rows={22}
-                  disabled={readOnly}
-                  className="font-mono text-[13px] leading-relaxed"
-                />
-              )}
-            </Field>
-          )}
-        </div>
-      </FieldGroup>
-
-      {canShare && (
+      <div className="max-w-[820px] space-y-8">
         <FieldGroup
-          title="Sharing"
-          purpose="Org admins only, and saved as soon as you tick a box — not with the form. A shared skill reaches every member's investigations; always-on puts its whole procedure in every chat turn's system prompt."
+          title="What Holmes sees in its catalog"
+          purpose="Holmes picks a skill by its description alone — make it specific, or it gets fetched for unrelated problems."
         >
-          <label className="flex items-center gap-2.5 text-body-sm text-pale-stone">
-            <Checkbox
-              checked={skill.visibility === "shared"}
-              onCheckedChange={(v) => setScope({ visibility: v === true ? "shared" : "private" })}
-              disabled={scopeStatus === "saving"}
-            />
-            Shared with all users
-          </label>
-          <div className="space-y-1">
-            <label className="flex items-center gap-2.5 text-body-sm text-pale-stone">
-              <Checkbox
-                checked={skill.alwaysOn}
-                onCheckedChange={(v) => setScope({ alwaysOn: v === true })}
-                disabled={scopeStatus === "saving" || skill.visibility !== "shared"}
+          <Field
+            id={FIELD_IDS.name}
+            label="Name"
+            description={
+              renamed ? (
+                <>
+                  Holmes fetches skills by name. After saving,{" "}
+                  <span className="font-mono">{saved.name}</span> no longer exists — earlier
+                  chats that mention it will point at nothing.
+                </>
+              ) : (
+                "Lowercase letters, digits and hyphens. Holmes passes it back to fetch the skill."
+              )
+            }
+            error={fieldError("name")}
+          >
+            {(props) => (
+              <Input
+                {...props}
+                value={draft.name}
+                onChange={(e) => update({ name: toSkillName(e.target.value) })}
+                onBlur={visit("name")}
+                placeholder="checkout-latency-investigation"
+                className="font-mono text-[13px]"
               />
-              Always-on team instruction
-              <span className="text-bone-gray">— costs its full length in tokens on every turn</span>
-            </label>
-            {skill.visibility !== "shared" && (
-              <p className="pl-[26px] text-[12px] text-bone-gray">
-                Share it first — always-on applies to everyone&apos;s turns.
-              </p>
             )}
-          </div>
-          <p aria-live="polite" className="min-h-5 text-body-sm">
-            {scopeError ? (
-              <span className="text-traffic-red">{scopeError}</span>
-            ) : scopeStatus === "saving" ? (
-              <span className="text-bone-gray">Saving…</span>
-            ) : scopeStatus === "saved" ? (
-              <span className="inline-flex items-center gap-1.5 text-bone-gray">
-                <Check className="size-3.5 text-prompt-green" />
-                Sharing saved
-              </span>
-            ) : null}
-          </p>
+          </Field>
+          {holmesMark("name")}
+          <Field
+            id={FIELD_IDS.description}
+            label="Description"
+            description="When should Holmes use this? Name the symptom and the inputs it starts from."
+            value={draft.description}
+            limit={SKILL_LIMITS.description}
+            error={fieldError("description")}
+          >
+            {(props) => (
+              <Textarea
+                {...props}
+                value={draft.description}
+                onChange={(e) => update({ description: e.target.value })}
+                onBlur={visit("description")}
+                rows={3}
+              />
+            )}
+          </Field>
+          {holmesMark("description")}
         </FieldGroup>
-      )}
 
-      <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-5">
-        <p aria-live="polite" className="min-w-0 text-body-sm">
-          {readOnly ? null : error ? (
-            <span className="text-traffic-red">{error}</span>
-          ) : importing?.blockedReason ? (
-            <span className="text-bone-gray">{importing.blockedReason}</span>
-          ) : (dirty || importing) && (blocked || nameTaken) ? (
-            <span className="text-bone-gray">
-              {shownProblems === 0
-                ? "Fill in the empty fields — name, description, procedure and any input keys — to create it."
-                : `Fix ${shownProblems === 1 ? "the field" : `${shownProblems} fields`} marked above to ${importing ? "import" : "save"}.`}
-            </span>
-          ) : dirty && importing ? (
-            <span className="text-pale-stone">Edited — your copy will differ from the shared one.</span>
-          ) : dirty ? (
-            <span className="inline-flex items-center gap-2 text-pale-stone">
-              <span className="size-1.5 rounded-full bg-gold-leaf" />
-              Unsaved changes
-            </span>
-          ) : justSaved ? (
-            <span className="inline-flex items-center gap-1.5 text-bone-gray">
-              <Check className="size-3.5 text-prompt-green" />
-              Saved
-            </span>
-          ) : null}
-        </p>
-        <div className="flex shrink-0 items-center gap-3">
-          {skill?.editable && (
-            <ConfirmButton
-              label="Delete skill"
-              title={`Delete ${skill.name}?`}
-              description="Investigations stop seeing it immediately. Past answers that used it keep their record."
-              confirmLabel="Delete"
-              destructive
-              variant="ghost"
-              disabled={saving}
-              onConfirm={remove}
-            >
-              Delete
-            </ConfirmButton>
+        <FieldGroup
+          title="Inputs"
+          purpose="What you fill in when you run the skill. Name each one; the procedure uses it as {{key}}."
+        >
+          <SkillInputRows
+            inputs={draft.inputs}
+            onChange={(inputs) => update({ inputs })}
+            errors={rowErrors}
+          />
+          {unused.length > 0 && (
+            <p className="text-body-sm text-bone-gray">
+              Not used in the procedure: {unused.map((k) => `{{${k}}}`).join(", ")}
+            </p>
           )}
-          {importing?.actions}
-          {!readOnly && (
-            <Button onClick={save} disabled={saving || !submittable || Boolean(nameTaken)}>
-              {importing
-                ? saving
-                  ? "Importing…"
-                  : importing.submitLabel
-                : saving
-                  ? "Saving…"
-                  : skill
-                    ? "Save"
-                    : "Create skill"}
-            </Button>
-          )}
-        </div>
+          {holmesMark("inputs")}
+        </FieldGroup>
       </div>
+
+      <FieldGroup title="Procedure" purpose="Steps Holmes follows in order, naming the toolsets to use.">
+        <SkillProcedureField
+          value={draft.body}
+          onChange={(body) => update({ body })}
+          onBlur={visit("body")}
+          error={fieldError("body")}
+          label="Steps"
+          inputKeys={draft.inputs.map((i) => i.key).filter(Boolean)}
+          onAddInput={(key) => {
+            if (draft.inputs.length >= SKILL_LIMITS.inputs) return;
+            update({
+              inputs: [...draft.inputs, { key, label: labelForKey(key), required: false }],
+            });
+          }}
+          preview={preview}
+          onPreview={setPreview}
+        />
+        {holmesMark("body")}
+      </FieldGroup>
+
+      <ConfirmDialog
+        open={discarding}
+        onOpenChange={setDiscarding}
+        title="Discard your changes?"
+        description={`Your edits to the ${listOf(dirtyFields.map((f) => FIELD_LABELS[f]))} are not saved.`}
+        confirmLabel="Discard"
+        destructive
+        onConfirm={onCancel}
+      />
     </div>
   );
 }

@@ -22,7 +22,8 @@ import {
   type OrgRole,
 } from "@/lib/orgs/types";
 import { invitePath } from "@/lib/routes";
-import { reloadInto, sendJson } from "./org-actions";
+import { sendJson } from "@/lib/http";
+import { reloadInto } from "./org-actions";
 import { ShareLinkRow } from "@/components/share/share-dialog";
 import type { ShareLinkView } from "@/lib/share/types";
 

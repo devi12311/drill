@@ -13,7 +13,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ORG_NAME_MAX } from "@/lib/orgs/types";
-import { reloadInto, sendJson } from "./org-actions";
+import { sendJson } from "@/lib/http";
+import { reloadInto } from "./org-actions";
 
 /** Start a new org (you become its owner) and switch into it. */
 export function NewOrgForm({ onCancel }: { onCancel?: () => void }) {

@@ -5,6 +5,7 @@ import { BrandMark } from "@/components/shell/brand-mark";
 import { SideNavLink } from "@/components/shell/side-nav-link";
 import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
 import { useSession } from "@/components/session/session-provider";
+import { useNavShortcuts } from "@/components/shell/shortcuts";
 import { isNavItemActive, visibleAdminNav } from "@/lib/admin/nav";
 
 /**
@@ -19,6 +20,8 @@ import { isNavItemActive, visibleAdminNav } from "@/lib/admin/nav";
 export function AdminSidebar() {
   const pathname = usePathname();
   const { user } = useSession();
+  const nav = visibleAdminNav(user.actorIsAdmin);
+  useNavShortcuts(nav.flatMap((group) => group.items));
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
@@ -28,7 +31,7 @@ export function AdminSidebar() {
       />
 
       <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
-        {visibleAdminNav(user.actorIsAdmin).map((group) => (
+        {nav.map((group) => (
           <div key={group.label} className="mt-4 first:mt-0">
             <div className="text-caption-tracked px-3 pb-1.5 uppercase text-bone-gray">
               {group.label}

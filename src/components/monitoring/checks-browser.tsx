@@ -139,6 +139,7 @@ export function ChecksBrowser({
           placeholder="Filter by ID or title"
           className="pl-8"
           aria-label="Filter checks"
+          data-shortcut-focus
           autoComplete="off"
         />
       </div>

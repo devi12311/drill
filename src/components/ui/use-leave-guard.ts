@@ -4,6 +4,18 @@ import { useEffect } from "react";
 
 const MESSAGE = "You have unsaved changes. Leave and discard them?";
 
+/** Mounted guards holding unsaved work — read by navigations that are not links. */
+let dirtyGuards = 0;
+
+/**
+ * For a navigation that is not a link click (a keyboard shortcut, a
+ * `router.push` button): true when nothing unsaved is open, or the user agrees
+ * to discard it. The click listener below cannot see these.
+ */
+export function confirmLeave(): boolean {
+  return dirtyGuards === 0 || window.confirm(MESSAGE);
+}
+
 /**
  * Asks before unsaved work is thrown away. The App Router has no navigation
  * blocker, so in-app links are caught in the capture phase, before Next's own
@@ -13,6 +25,7 @@ const MESSAGE = "You have unsaved changes. Leave and discard them?";
 export function useLeaveGuard(dirty: boolean) {
   useEffect(() => {
     if (!dirty) return;
+    dirtyGuards += 1;
     const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
     const onClick = (e: MouseEvent) => {
       if (e.defaultPrevented || e.button !== 0) return;
@@ -31,6 +44,7 @@ export function useLeaveGuard(dirty: boolean) {
     window.addEventListener("beforeunload", onBeforeUnload);
     document.addEventListener("click", onClick, true);
     return () => {
+      dirtyGuards -= 1;
       window.removeEventListener("beforeunload", onBeforeUnload);
       document.removeEventListener("click", onClick, true);
     };

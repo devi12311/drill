@@ -12,23 +12,18 @@ import type { SkillDraft } from "@/lib/skills/types";
  * "Describe it, Holmes writes it." Sends the description — and the form as it
  * stands, when there is one, so a second pass revises rather than restarts — to
  * the user's Holmes agent, and hands the draft back to the editor. Saving stays
- * the author's step.
+ * the author's step. Whether it shows is the editor's call (Ask Holmes).
  */
 export function SkillDrafter({
   current,
   onDraft,
-  startOpen,
+  onClose,
 }: {
   /** The form's content, or null when it is still empty. */
   current: SkillDraft | null;
   onDraft: (draft: SkillDraft) => void;
-  /**
-   * Open as a panel (a new skill: drafting is the quick start) or as one button
-   * (an existing skill: the skill itself is the page, revising is the aside).
-   */
-  startOpen: boolean;
+  onClose: () => void;
 }) {
-  const [open, setOpen] = useState(startOpen);
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [request, setRequest] = useState("");
@@ -81,15 +76,6 @@ export function SkillDrafter({
     }
   }
 
-  if (!open) {
-    return (
-      <Button variant="ghost" size="sm" onClick={() => setOpen(true)}>
-        <Sparkles className="size-4" />
-        Revise with Holmes
-      </Button>
-    );
-  }
-
   const revising = current !== null;
   return (
     <div className="space-y-3 rounded-lg border border-border bg-smoked-onyx px-4 py-4">
@@ -108,7 +94,7 @@ export function SkillDrafter({
             generate();
           }
         }}
-        autoFocus={!startOpen}
+        autoFocus
         aria-label={revising ? "What to change in the skill" : "What the skill should do"}
         placeholder={
           revising
@@ -120,7 +106,7 @@ export function SkillDrafter({
         <p className="max-w-[56ch] text-body-sm text-bone-gray">
           {busy
             ? "Holmes is writing it from your toolsets — this can take a minute…"
-            : "Holmes writes from this deployment's toolsets and may run a quick lookup to check a tool name. The draft replaces the form; nothing is saved until you save."}
+            : "Holmes writes from this deployment's toolsets and may run a quick lookup to check a tool name. You review each field it changes before saving."}
         </p>
         <div className="flex items-center gap-2">
           {agents && agents.length > 1 && (
@@ -143,11 +129,9 @@ export function SkillDrafter({
               Cancel
             </Button>
           ) : (
-            !startOpen && (
-              <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
-                Close
-              </Button>
-            )
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Close
+            </Button>
           )}
           <Button
             variant="secondary"

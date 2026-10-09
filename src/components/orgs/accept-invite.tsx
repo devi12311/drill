@@ -5,7 +5,8 @@ import Link from "next/link";
 import { CredentialsForm } from "@/components/auth/auth-form";
 import { Button } from "@/components/ui/button";
 import { invitePath, loginUrl } from "@/lib/routes";
-import { reloadInto, sendJson } from "./org-actions";
+import { sendJson } from "@/lib/http";
+import { reloadInto } from "./org-actions";
 
 export function AcceptInvite({ token, orgName }: { token: string; orgName: string }) {
   const [busy, setBusy] = useState(false);

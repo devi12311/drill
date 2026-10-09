@@ -10,6 +10,8 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { useLeaveGuard } from "@/components/ui/use-leave-guard";
+import { useShortcut } from "@/components/shell/shortcuts";
+import { SHORTCUTS } from "@/lib/shortcuts";
 import type { ChatEntry } from "@/lib/chat/types";
 import {
   askedQuestions,
@@ -197,16 +199,15 @@ export function useSkillBuilderState(entries: ChatEntry[], conversationId: strin
     flashTimer.current = setTimeout(() => setFlashKey(null), FLASH_MS);
   }
 
+  // Esc closes the builder from anywhere, like the X: `stop` asks before a
+  // selection is thrown away, so a stray press costs nothing.
+  useShortcut(SHORTCUTS.close.keys, () => stop(), picking);
+
   /**
    * Keyboard picking over the conversation: ↑/↓ between calls, Space (the
-   * button's own) adds, Enter opens the call's output, Esc leaves when nothing
-   * is picked — a stray key must not throw a selection away.
+   * button's own) adds, Enter opens the call's output.
    */
   function onKeyDown(e: KeyboardEvent<HTMLElement>) {
-    if (e.key === "Escape" && pickedKeys.size === 0) {
-      stop();
-      return;
-    }
     const target = e.target as HTMLElement;
     if (!target.dataset.pickKey) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {

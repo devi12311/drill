@@ -46,6 +46,7 @@ export function WorkloadFilter() {
         placeholder="Filter by namespace, name or technology"
         className="pl-8"
         aria-label="Filter workloads"
+        data-shortcut-focus
         aria-busy={pending}
         autoComplete="off"
       />

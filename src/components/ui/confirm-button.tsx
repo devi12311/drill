@@ -1,18 +1,8 @@
 "use client";
 
 import * as React from "react";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
+import { ConfirmDialog, type ConfirmOptions } from "@/components/ui/confirm-dialog";
 
 /**
  * A button whose action is confirmed first, and which can collect a note.
@@ -24,26 +14,15 @@ import { Label } from "@/components/ui/label";
  */
 export function ConfirmButton({
   label,
-  title,
-  description,
-  confirmLabel,
-  destructive,
-  comment,
   disabled,
   variant,
   size,
   className,
-  onConfirm,
   children,
-}: {
+  ...confirm
+}: ConfirmOptions & {
   /** Accessible name for the trigger; `children` may render an icon instead. */
   label: string;
-  title: string;
-  description: React.ReactNode;
-  confirmLabel: string;
-  destructive?: boolean;
-  /** Ask for a note, and pass it to `onConfirm`. */
-  comment?: { label: string; placeholder?: string; required?: boolean };
   disabled?: boolean;
   /**
    * The trigger's look. Defaults to destructive for a destructive action, else
@@ -53,23 +32,15 @@ export function ConfirmButton({
   variant?: React.ComponentProps<typeof Button>["variant"];
   size?: React.ComponentProps<typeof Button>["size"];
   className?: string;
-  onConfirm: (comment: string) => void;
   children?: React.ReactNode;
 }) {
   const [open, setOpen] = React.useState(false);
-  const [note, setNote] = React.useState("");
 
   return (
-    <AlertDialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setNote("");
-      }}
-    >
+    <>
       <Button
         type="button"
-        variant={variant ?? (destructive ? "destructive" : "outline")}
+        variant={variant ?? (confirm.destructive ? "destructive" : "outline")}
         size={size}
         className={className}
         disabled={disabled}
@@ -78,39 +49,7 @@ export function ConfirmButton({
       >
         {children ?? label}
       </Button>
-      <AlertDialogContent>
-        <AlertDialogTitle>{title}</AlertDialogTitle>
-        <AlertDialogDescription>{description}</AlertDialogDescription>
-        {comment && (
-          <div className="space-y-1.5">
-            <Label htmlFor="confirm-comment">
-              {comment.label}
-              {!comment.required && (
-                <span className="ml-1.5 font-normal text-bone-gray">
-                  optional
-                </span>
-              )}
-            </Label>
-            <Textarea
-              id="confirm-comment"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder={comment.placeholder}
-              className="h-20"
-            />
-          </div>
-        )}
-        <AlertDialogFooter>
-          <AlertDialogCancel />
-          <AlertDialogAction
-            destructive={destructive}
-            disabled={comment?.required ? note.trim().length === 0 : undefined}
-            onClick={() => onConfirm(note.trim())}
-          >
-            {confirmLabel}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+      <ConfirmDialog {...confirm} open={open} onOpenChange={setOpen} />
+    </>
   );
 }

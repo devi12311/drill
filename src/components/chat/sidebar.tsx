@@ -16,11 +16,20 @@ import { SideNavLink } from "@/components/shell/side-nav-link";
 import { SidebarUserFooter } from "@/components/shell/sidebar-user-footer";
 import { ConfirmButton } from "@/components/ui/confirm-button";
 import { useSession } from "@/components/session/session-provider";
+import { useGuardedPush, useIsMac, useNavShortcuts, useShortcut } from "@/components/shell/shortcuts";
+import { confirmLeave } from "@/components/ui/use-leave-guard";
 import { useWorkspace } from "@/components/workspace/workspace-provider";
 import { cn } from "@/lib/utils";
 import { CHAT_HOME } from "@/lib/routes";
+import { SHORTCUTS, comboText } from "@/lib/shortcuts";
 import { isInvestigating, type ConversationSummary } from "@/lib/chat/types";
-import { WORKSPACE_NAV, chatUrl, isNavActive, writeChatUrl } from "@/lib/workspace/nav";
+import {
+  WORKSPACE_JUMPS,
+  WORKSPACE_NAV,
+  chatUrl,
+  isNavActive,
+  writeChatUrl,
+} from "@/lib/workspace/nav";
 
 /**
  * One dot per row, most urgent first: something the user must act on outranks
@@ -87,6 +96,35 @@ export function Sidebar() {
   // A row is "open" only on the chat page; elsewhere none is highlighted.
   const openId = onChat ? params.get("c") : null;
   const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
+  const push = useGuardedPush();
+  const mac = useIsMac();
+
+  /** Open a conversation (null: a new one) the way its sidebar link would. */
+  function openChat(conversationId: string | null) {
+    if (!onChat) return push(chatUrl(conversationId));
+    if (!confirmLeave()) return;
+    writeChatUrl(conversationId, "push");
+    // Keep the newly open row in view once it is highlighted.
+    requestAnimationFrame(() =>
+      document.querySelector("[data-recent] [data-active]")?.scrollIntoView({ block: "nearest" }),
+    );
+  }
+
+  useNavShortcuts(WORKSPACE_JUMPS);
+  useShortcut(SHORTCUTS.newInvestigation.keys, () => openChat(null), !!activeAgent);
+  // Alt+↑/↓ steps through Recent (Slack's conversation keys); from no open
+  // conversation, ↓ opens the newest and ↑ the oldest.
+  useShortcut(
+    [SHORTCUTS.prevConversation.keys, SHORTCUTS.nextConversation.keys],
+    (_e, keys) => {
+      const at = conversations.findIndex((c) => c.id === openId);
+      const step = keys === SHORTCUTS.nextConversation.keys ? 1 : -1;
+      const next = at < 0 ? (step > 0 ? 0 : conversations.length - 1) : at + step;
+      const conv = conversations[next];
+      if (conv) openChat(conv.id);
+    },
+    conversations.length > 0,
+  );
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
@@ -131,7 +169,11 @@ export function Sidebar() {
 
         {activeAgent ? (
           <Button asChild variant="secondary" className="w-full justify-start gap-2">
-            <Link href={CHAT_HOME} onClick={onChatClick(onChat, null)}>
+            <Link
+              href={CHAT_HOME}
+              onClick={onChatClick(onChat, null)}
+              title={`New investigation (${comboText(SHORTCUTS.newInvestigation.keys, mac)})`}
+            >
               <Plus className="size-4" />
               New investigation
             </Link>
@@ -170,7 +212,7 @@ export function Sidebar() {
               : "Add a Holmes agent to get started."}
           </div>
         ) : (
-          <div className="mt-2 space-y-0.5">
+          <div data-recent className="mt-2 space-y-0.5">
             {conversations.map((conv) => (
               <div
                 key={conv.id}

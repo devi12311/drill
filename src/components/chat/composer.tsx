@@ -86,6 +86,11 @@ function writeDraft(key: string, value: string) {
 export interface ComposerHandle {
   /** Replace the draft with `text` and focus it, selecting `select` (e.g. a placeholder to type over). */
   fill: (text: string, select?: string) => void;
+  /**
+   * Pick `skill` to run (Run ▸ on a skill page), keeping whatever was typed as
+   * its extra context, and focus its first input.
+   */
+  run: (skill: SkillView) => void;
 }
 
 export function Composer({
@@ -132,6 +137,7 @@ export function Composer({
 }) {
   const [value, setValue] = useState(() => readDraft(draftKey));
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const runPanelRef = useRef<HTMLDivElement>(null);
   // An animated send waits a frame for the snapshot, with the draft still in
   // the box; a second Enter in that frame must not send it twice.
   const sendQueued = useRef(false);
@@ -158,6 +164,13 @@ export function Composer({
         textareaRef.current?.focus();
         textareaRef.current?.setSelectionRange(from, to);
       });
+    },
+    run(skill) {
+      setRun({ skill, values: {} });
+      setHighlight(0);
+      requestAnimationFrame(() =>
+        (runPanelRef.current?.querySelector("input") ?? textareaRef.current)?.focus(),
+      );
     },
   }));
 
@@ -256,7 +269,17 @@ export function Composer({
       )}
       {status && <div className="border-b border-border/60 pb-2.5">{status}</div>}
       {run && (
-        <div className="space-y-2.5 border-b border-border px-4 pb-3 pt-3">
+        <div
+          ref={runPanelRef}
+          // Esc from an input field drops the pick, as it does from the draft.
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            setRun(null);
+            textareaRef.current?.focus();
+          }}
+          className="space-y-2.5 border-b border-border px-4 pb-3 pt-3"
+        >
           <div className="flex items-center justify-between gap-3">
             <span className="font-mono text-body-sm text-warm-off-white">
               /{run.skill.name}
@@ -292,6 +315,8 @@ export function Composer({
       <textarea
         ref={textareaRef}
         data-composer-draft
+        // `/` from anywhere on the page lands here (see FocusInputShortcut).
+        data-shortcut-focus
         value={value}
         onChange={(e) => {
           setValue(e.target.value);

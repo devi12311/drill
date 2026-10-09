@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link2, Share2, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NATIVE_SELECT_CLASS } from "@/components/ui/native-select";
@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { ArtifactForm } from "@/components/resolutions/artifact-form";
 import { useSession } from "@/components/session/session-provider";
-import { sendJson } from "@/components/orgs/org-actions";
+import { sendJson } from "@/lib/http";
 import { formatDateTime } from "@/lib/admin/format";
 import { sharePath } from "@/lib/routes";
 import { scanArtifact, scanSkill, stripArtifactCitations, type ShareFinding } from "@/lib/share/scan";
@@ -42,85 +42,106 @@ const SHOWN_VALUES = 6;
 export function ShareDialog({
   sourceId,
   payload,
+  audiences,
+  open: controlledOpen,
+  onOpenChange,
+  onEditSource,
 }: {
   sourceId: string;
   payload: SharePayload;
+  /**
+   * Who a link may go to; the first is the default. Without it: a skill goes to
+   * colleagues, or (admins) any org; a resolution — every member's already —
+   * only outside.
+   */
+  audiences?: ShareAudience[];
+  /** Opened by its owner (a menu item) instead of by its own Share button. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /** Offered when the scan finds something: leave for the item's editor to take it out. */
+  onEditSource?: () => void;
 }) {
   const { user } = useSession();
-  const [open, setOpen] = useState(false);
-  const [links, setLinks] = useState<ShareLinkView[] | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
-
-  async function load() {
-    setListError(null);
-    try {
-      const res = await fetch(`/api/share-links?sourceId=${encodeURIComponent(sourceId)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setLinks(await res.json());
-    } catch (err) {
-      setListError(err instanceof Error ? err.message : "Could not load links");
-    }
-  }
+  const [ownOpen, setOwnOpen] = useState(false);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : ownOpen;
+  const setOpen = (next: boolean) => (controlled ? onOpenChange?.(next) : setOwnOpen(next));
+  // Bumped when a link is made or revoked, so the list reloads.
+  const [version, setVersion] = useState(0);
+  const reload = () => setVersion((v) => v + 1);
+  const allowed =
+    audiences ??
+    (payload.kind === "skill"
+      ? user.isOrgAdmin
+        ? (["org", "any"] as ShareAudience[])
+        : (["org"] as ShareAudience[])
+      : (["any"] as ShareAudience[]));
 
   return (
     <>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="gap-1.5"
-        onClick={() => {
-          setOpen(true);
-          void load();
-        }}
-      >
-        <Share2 className="size-3.5" />
-        Share
-      </Button>
+      {!controlled && (
+        <Button variant="secondary" size="sm" className="gap-1.5" onClick={() => setOpen(true)}>
+          <Share2 className="size-3.5" />
+          Share
+        </Button>
+      )}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent size="md" className="gap-4">
           <DialogHeader>
-            <DialogTitle>Share this {payload.kind}</DialogTitle>
+            <DialogTitle>Send a copy of this {payload.kind}</DialogTitle>
             <DialogDescription>
               Whoever opens the link signs in, reviews a copy, can edit it, and imports it into
               their own organization — or not, and come back later. The link carries this version;
               later edits are not included.
             </DialogDescription>
           </DialogHeader>
-          <DialogBody className="space-y-6">
-            {/* Remounted per open: a fresh form, never the last link shown. */}
-            {open && (
+          {/* Mounted per open: a fresh form, never the last link shown, and a fresh list. */}
+          {open && (
+            <DialogBody className="space-y-6">
               <NewLink
                 sourceId={sourceId}
                 payload={payload}
                 orgName={user.org.name}
-                allowExternal={user.isOrgAdmin}
-                onCreated={load}
+                audiences={allowed}
+                onCreated={reload}
+                onEditSource={
+                  onEditSource &&
+                  (() => {
+                    setOpen(false);
+                    onEditSource();
+                  })
+                }
               />
-            )}
-            <LiveLinks links={links} error={listError} onRevoked={load} />
-          </DialogBody>
+              <LiveLinks key={version} sourceId={sourceId} onRevoked={reload} />
+            </DialogBody>
+          )}
         </DialogContent>
       </Dialog>
     </>
   );
 }
 
+const AUDIENCE_LABEL: Record<ShareAudience, (orgName: string) => string> = {
+  org: (orgName) => `Colleagues in ${orgName}`,
+  any: () => "Anyone with the link, any organization",
+};
+
 function NewLink({
   sourceId,
   payload,
   orgName,
-  allowExternal,
+  audiences,
   onCreated,
+  onEditSource,
 }: {
   sourceId: string;
   payload: SharePayload;
   orgName: string;
-  allowExternal: boolean;
+  audiences: ShareAudience[];
   onCreated: () => void;
+  onEditSource?: () => void;
 }) {
-  const isSkill = payload.kind === "skill";
-  // A resolution is already every member's: its only audience is outside.
-  const [audience, setAudience] = useState<ShareAudience>(isSkill ? "org" : "any");
+  const [audience, setAudience] = useState<ShareAudience>(audiences[0]);
   const [expiresInDays, setExpiresInDays] = useState<number>(DEFAULT_SHARE_EXPIRY_DAYS);
   const [draft, setDraft] = useState(() =>
     payload.kind === "resolution" ? stripArtifactCitations(payload.draft) : null,
@@ -157,7 +178,8 @@ function NewLink({
     return (
       <section className="space-y-2">
         <p className="text-body-sm text-pale-stone">
-          Copy it now — Drill shows a link only once. Anyone it reaches{" "}
+          Copy it now — Drill keeps only a fingerprint of the link, so it cannot show it to you
+          again. Anyone it reaches{" "}
           {audience === "org" ? `in ${orgName} ` : ""}can import it until it expires or you revoke it.
         </p>
         <CopyField value={link} />
@@ -167,18 +189,21 @@ function NewLink({
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        {isSkill ? (
+        {audiences.length > 1 ? (
           <select
             aria-label="Who the link is for"
             value={audience}
             onChange={(e) => setAudience(e.target.value as ShareAudience)}
             className={NATIVE_SELECT_CLASS}
           >
-            <option value="org">Colleagues in {orgName}</option>
-            {allowExternal && <option value="any">Anyone with the link, any organization</option>}
+            {audiences.map((a) => (
+              <option key={a} value={a}>
+                {AUDIENCE_LABEL[a](orgName)}
+              </option>
+            ))}
           </select>
         ) : (
-          <span className="text-body-sm text-pale-stone">Anyone with the link, any organization</span>
+          <span className="text-body-sm text-pale-stone">{AUDIENCE_LABEL[audience](orgName)}</span>
         )}
         <select
           aria-label="Link lifetime"
@@ -194,7 +219,7 @@ function NewLink({
         </select>
       </div>
 
-      {findings.length > 0 && <Findings findings={findings} />}
+      {findings.length > 0 && <Findings findings={findings} kind={payload.kind} onEditSource={onEditSource} />}
 
       {draft && (
         <div className="space-y-3">
@@ -221,7 +246,15 @@ function NewLink({
 }
 
 /** What identifies the org, before it leaves — a check, not a gate. */
-function Findings({ findings }: { findings: ShareFinding[] }) {
+function Findings({
+  findings,
+  kind,
+  onEditSource,
+}: {
+  findings: ShareFinding[];
+  kind: SharePayload["kind"];
+  onEditSource?: () => void;
+}) {
   return (
     <div className="space-y-2 rounded-lg border border-border bg-smoked-onyx px-4 py-3">
       <p className="flex items-center gap-2 text-body-sm text-pale-stone">
@@ -241,20 +274,43 @@ function Findings({ findings }: { findings: ShareFinding[] }) {
       </ul>
       <p className="text-[12px] text-bone-gray">
         Fine if they mean nothing outside — otherwise edit them out first.
+        {onEditSource && (
+          <>
+            {" "}
+            <button
+              type="button"
+              onClick={onEditSource}
+              className="text-pale-stone underline-offset-2 outline-none hover:text-warm-off-white hover:underline focus-visible:underline"
+            >
+              Edit the {kind} first
+            </button>
+          </>
+        )}
       </p>
     </div>
   );
 }
 
-function LiveLinks({
-  links,
-  error,
-  onRevoked,
-}: {
-  links: ShareLinkView[] | null;
-  error: string | null;
-  onRevoked: () => void;
-}) {
+/** The item's live links, loaded when the dialog opens (remounted to reload). */
+function LiveLinks({ sourceId, onRevoked }: { sourceId: string; onRevoked: () => void }) {
+  const [links, setLinks] = useState<ShareLinkView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/share-links?sourceId=${encodeURIComponent(sourceId)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<ShareLinkView[]>;
+      })
+      .then(
+        (list) => !stale && setLinks(list),
+        (err: Error) => !stale && setError(err.message || "Could not load links"),
+      );
+    return () => {
+      stale = true;
+    };
+  }, [sourceId]);
+
   if (error) return <p className="text-body-sm text-traffic-red">{error}</p>;
   if (!links?.length) return null;
   return (

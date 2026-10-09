@@ -7,7 +7,9 @@ import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NATIVE_SELECT_CLASS } from "@/components/ui/native-select";
 import { ArtifactForm } from "@/components/resolutions/artifact-form";
+import { StickyBar } from "@/components/ui/sticky-bar";
 import { SkillEditor } from "@/components/skills/skill-editor";
+import { SkillReader } from "@/components/skills/skill-reader";
 import { formatDateTime } from "@/lib/admin/format";
 import type { ArtifactDraft } from "@/lib/artifacts/types";
 import type { SkillDraft } from "@/lib/skills/types";
@@ -43,9 +45,11 @@ async function post(url: string, body: unknown) {
 }
 
 /**
- * The recipient's side of a share link: the shared draft in the usual editor,
- * editable, then Import (a private copy in the chosen org) or Not now — which
- * keeps the link usable, so they can come back and import later.
+ * The recipient's side of a share link. A skill is shown to be read — the
+ * warning says to read the whole procedure — with the decision pinned above
+ * it: Import a private copy into the chosen org, Edit before importing (the
+ * usual editor), or Skip, which keeps the link usable for later. A resolution
+ * is reviewed in its editable form under the same bar.
  */
 export function ShareReview({
   token,
@@ -76,6 +80,7 @@ export function ShareReview({
   const [orgId, setOrgId] = useState(defaultOrgId);
   // Names the server refused since the page loaded (someone took it meanwhile).
   const [refused, setRefused] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState(false);
   const target = targets.find((t) => t.orgId === orgId) ?? targets[0];
   const { kind } = payload;
   // Only a copy that still exists blocks importing again.
@@ -84,6 +89,10 @@ export function ShareReview({
       ? target.redemption
       : null;
   const mayImport = !imported && (kind === "skill" || target.isAdmin);
+  const takenName =
+    kind === "skill"
+      ? (refused[target.orgId] ?? (target.nameTaken ? payload.draft.name : null))
+      : null;
 
   async function importDraft(draft: SkillDraft | ArtifactDraft) {
     const { ok, status, data } = await post(`/api/share/${encodeURIComponent(token)}/import`, {
@@ -91,7 +100,9 @@ export function ShareReview({
       draft,
     });
     if (status === 409 && data.field === "name") {
+      // Someone took the name meanwhile: the editor marks it on the Name field.
       setRefused((r) => ({ ...r, [target.orgId]: (draft as SkillDraft).name }));
+      setEditing(true);
       return;
     }
     if (!ok) throw new Error(data.error ?? `HTTP ${status}`);
@@ -125,14 +136,79 @@ export function ShareReview({
       <span className="text-body-sm text-bone-gray">into {target.orgName}</span>
     );
 
-  const notNow = (
-    <Button variant="ghost" onClick={decline}>
-      Not now
+  // Recorded for the sharer's counts, never final: the link still imports later (decision 143).
+  const skip = (
+    <Button variant="ghost" size="sm" onClick={decline} title="You can still import it later from this link">
+      Skip
     </Button>
   );
 
+  if (kind === "skill" && editing)
+    return (
+      <SkillEditor
+        // A new target org is a new review: its own taken name, a clean form.
+        key={target.orgId}
+        skill={null}
+        source={{
+          kind: "share",
+          draft: payload.draft,
+          takenName,
+          submitLabel: "Import as private",
+          blockedReason: imported ? `Already imported into ${target.orgName}.` : null,
+          actions: picker,
+          submit: importDraft,
+        }}
+        onCancel={() => setEditing(false)}
+      />
+    );
+
   return (
     <div className="space-y-8">
+      {kind === "skill" && (
+        <StickyBar>
+          <p aria-live="polite" className="min-w-48 flex-1 text-body-sm">
+            {imported ? (
+              <span className="text-bone-gray">Already imported into {target.orgName}.</span>
+            ) : takenName ? (
+              <span className="text-pale-stone">
+                {target.orgName} already has a skill named{" "}
+                <span className="font-mono">{takenName}</span> — rename this copy before importing.
+              </span>
+            ) : (
+              <span className="text-bone-gray">Read it through, then import a private copy.</span>
+            )}
+          </p>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {picker}
+            {imported ? (
+              // Nothing left to decide for this org; another org in the picker may still import.
+              imported.importedId && (
+                <Button asChild size="sm">
+                  <Link href={itemHref(kind, imported.importedId)}>Open your copy</Link>
+                </Button>
+              )
+            ) : (
+              <>
+                {skip}
+                <Button
+                  variant={takenName ? "default" : "secondary"}
+                  size="sm"
+                  onClick={() => setEditing(true)}
+                >
+                  Edit before importing
+                </Button>
+                {!takenName && (
+                  <ImportButton
+                    label="Import as private"
+                    disabled={false}
+                    onImport={() => importDraft(payload.draft)}
+                  />
+                )}
+              </>
+            )}
+          </div>
+        </StickyBar>
+      )}
       <header className="space-y-3">
         <div className="text-caption-tracked uppercase text-bone-gray">
           Shared {kind} · from {fromOrg}
@@ -162,33 +238,14 @@ export function ShareReview({
       </header>
 
       {kind === "skill" ? (
-        <SkillEditor
-          // A new target org is a new review: its own taken name, a clean form.
-          key={target.orgId}
-          skill={null}
-          source={{
-            kind: "share",
-            draft: payload.draft,
-            takenName:
-              refused[target.orgId] ?? (target.nameTaken ? payload.draft.name : null),
-            submitLabel: "Import as private",
-            blockedReason: imported ? `Already imported into ${target.orgName}.` : null,
-            actions: (
-              <>
-                {picker}
-                {notNow}
-              </>
-            ),
-            submit: importDraft,
-          }}
-        />
+        <SkillReader draft={payload.draft} />
       ) : (
         <ResolutionReview
           draft={payload.draft}
           footer={(draft) => (
             <>
               {picker}
-              {notNow}
+              {skip}
               <ImportButton disabled={!mayImport} onImport={() => importDraft(draft)} />
             </>
           )}
@@ -245,22 +302,33 @@ function ResolutionReview({
   const [draft, setDraft] = useState(shared);
   return (
     <div className="space-y-5">
+      <StickyBar>
+        <p className="min-w-48 flex-1 text-body-sm text-bone-gray">
+          {note ?? "Edit what you need, then import it into your organization."}
+        </p>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">{footer(draft)}</div>
+      </StickyBar>
       <ArtifactForm draft={draft} onChange={setDraft} />
-      <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-5">
-        <p className="min-w-0 text-body-sm text-bone-gray">{note}</p>
-        <div className="flex shrink-0 flex-wrap items-center gap-3">{footer(draft)}</div>
-      </div>
     </div>
   );
 }
 
-function ImportButton({ disabled, onImport }: { disabled: boolean; onImport: () => Promise<void> }) {
+function ImportButton({
+  label = "Import",
+  disabled,
+  onImport,
+}: {
+  label?: string;
+  disabled: boolean;
+  onImport: () => Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
     <>
       {error && <span className="text-body-sm text-traffic-red">{error}</span>}
       <Button
+        size="sm"
         disabled={disabled || busy}
         onClick={async () => {
           setBusy(true);
@@ -273,7 +341,7 @@ function ImportButton({ disabled, onImport }: { disabled: boolean; onImport: () 
           }
         }}
       >
-        {busy ? "Importing…" : "Import"}
+        {busy ? "Importing…" : label}
       </Button>
     </>
   );
