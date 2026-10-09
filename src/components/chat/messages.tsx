@@ -2,7 +2,7 @@
 
 import { useRef, type ReactNode } from "react";
 import { ShieldCheck, ShieldX } from "lucide-react";
-import { Markdown } from "./markdown";
+import { Answer } from "./answer";
 import { InvestigationRail } from "./investigation-rail";
 import { ApprovalCard } from "./approval-card";
 import { StoppedNotice } from "./turn-card";
@@ -204,7 +204,7 @@ function AnswerPart({
   }
   return (
     <>
-      {response.analysis?.trim() && <Markdown>{response.analysis}</Markdown>}
+      {response.analysis?.trim() && <Answer analysis={response.analysis} />}
       {!picking && approval}
     </>
   );

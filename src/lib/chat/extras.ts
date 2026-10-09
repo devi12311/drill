@@ -4,6 +4,8 @@ import {
   RELEVANCE_FLOOR,
   searchArtifacts,
 } from "@/lib/artifacts/search";
+import { answerStyleBlock, type AnswerMode } from "@/lib/chat/answer-style";
+import { getAnswerStyle } from "@/lib/db/org-queries";
 import type { Scope } from "@/lib/db/queries";
 import { usableSkills } from "@/lib/db/skill-queries";
 import { FRONTEND_TOOL_DEFS } from "@/lib/holmes/frontend-tools";
@@ -12,8 +14,8 @@ import { alwaysOnBlock, catalogBlock } from "@/lib/skills/prompt";
 
 /**
  * Everything Drill adds to a live chat request on top of the question: its
- * frontend tools, and a system prompt assembled from the knowledge base and the
- * user's skills. The one place this is built — the stored request carries it
+ * frontend tools, and a system prompt assembled from the user's skills, the
+ * knowledge base and the org's answer style. The one place this is built — the stored request carries it
  * through every pause and automatic resume (lib/chat/resume.ts copies it).
  *
  * Each part degrades on its own: a broken knowledge base or skills table drops
@@ -23,6 +25,7 @@ export async function buildHolmesExtras(input: {
   /** The question searched against past resolutions; absent on a decision. */
   ask: string | null;
   scope: Scope;
+  answerMode: AnswerMode;
 }): Promise<Pick<HolmesChatRequest, "frontend_tools" | "additional_system_prompt" | "enable_tool_approval">> {
   const extras = {
     enable_tool_approval: true,
@@ -32,7 +35,7 @@ export async function buildHolmesExtras(input: {
   // the system prompt for it), so there is nothing to assemble.
   if (input.ask == null) return extras;
 
-  const [knowledge, skills] = await Promise.all([
+  const [knowledge, skills, answerStyle] = await Promise.all([
     searchArtifacts(input.ask, { orgId: input.scope.orgId, limit: 3 })
       .then((hits) => hits.filter((h) => h.score >= RELEVANCE_FLOOR))
       .then((hits) => (hits.length ? buildInjectionPrompt(hits) : null))
@@ -47,7 +50,13 @@ export async function buildHolmesExtras(input: {
         ];
       })
       .catch(() => [null, null]),
+    // Without the rules the mode still applies: it came with the request.
+    getAnswerStyle(input.scope.orgId)
+      .catch(() => ({ answerRules: null }))
+      .then((style) => answerStyleBlock(input.answerMode, style.answerRules)),
   ]);
-  const prompt = [...skills, knowledge].filter(Boolean).join("\n\n");
+  // Answer style last: Holmes appends this after its own style guide, and the
+  // last instruction about the write-up is the one the model follows.
+  const prompt = [...skills, knowledge, answerStyle].filter(Boolean).join("\n\n");
   return prompt ? { ...extras, additional_system_prompt: prompt } : extras;
 }

@@ -27,6 +27,7 @@ const ACTION_LABEL: Record<string, string> = {
   "skill.delete": "Deleted a shared skill",
   "org.created": "Created the organization",
   "org.renamed": "Renamed the organization",
+  "org.answer_style_changed": "Changed the answer style",
   "org.invite.created": "Created an invite",
   "org.invite.revoked": "Revoked an invite",
   "org.invite.accepted": "Joined by invite",

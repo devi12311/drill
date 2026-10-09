@@ -16,6 +16,7 @@ import { ORG_COOKIE } from "./org-cookie";
 import { getUserById, type ManagerScope } from "@/lib/db/queries";
 import { listMemberships, type Membership } from "@/lib/db/org-queries";
 import { isOrgAdmin, type OrgRole } from "@/lib/orgs/types";
+import type { AnswerMode } from "@/lib/chat/answer-style";
 import type { SessionUser } from "./me";
 
 export { SESSION_COOKIE };
@@ -159,6 +160,8 @@ export interface AuthContext extends ManagerScope {
   user: AuthUser;
   orgName: string;
   orgRole: OrgRole;
+  /** The default for an ask that names no answer mode (lib/chat/answer-style.ts). */
+  orgAnswerMode: AnswerMode;
   /** Every org the user is in — the switcher's list, read in the same query. */
   memberships: Membership[];
 }
@@ -180,6 +183,7 @@ async function contextFor(user: AuthUser): Promise<AuthContext | null> {
     orgId: active.orgId,
     orgName: active.orgName,
     orgRole: active.role,
+    orgAnswerMode: active.answerMode,
     isOrgAdmin: isOrgAdmin(active.role),
     memberships,
   };
@@ -259,8 +263,13 @@ export async function getSessionUser(): Promise<SessionUser | null> {
     // Impersonation is only ever honoured for a *currently* admin actor
     // (see getAuthUser), so the flag alone proves the actor is an admin.
     actorIsAdmin: user.role === "admin" || impersonating,
-    org: { id: ctx.orgId, name: ctx.orgName, role: ctx.orgRole },
-    orgs: ctx.memberships.map((m) => ({ id: m.orgId, name: m.orgName, role: m.role })),
+    org: { id: ctx.orgId, name: ctx.orgName, role: ctx.orgRole, answerMode: ctx.orgAnswerMode },
+    orgs: ctx.memberships.map((m) => ({
+      id: m.orgId,
+      name: m.orgName,
+      role: m.role,
+      answerMode: m.answerMode,
+    })),
     isOrgAdmin: ctx.isOrgAdmin,
   };
 }

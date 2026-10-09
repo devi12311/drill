@@ -21,6 +21,7 @@ import {
 } from "./messages";
 import { TurnCard, TurnStatus } from "./turn-card";
 import { freshView, useTurnStream, type TurnView } from "./use-turn-stream";
+import { useAnswerMode } from "./use-answer-mode";
 import { ResolveDialog } from "@/components/resolutions/resolve-dialog";
 import { useSkills } from "@/components/skills/use-skills";
 import {
@@ -117,6 +118,7 @@ export function Chat({
   const [unknownSkill, setUnknownSkill] = useState<string | null>(null);
   if (pendingSkill && !skillToRun && unknownSkill !== pendingSkill) setUnknownSkill(pendingSkill);
   const [pickedModel, setModel] = useState<string | null>(null);
+  const [answerMode, setAnswerMode] = useAnswerMode();
   // Derived, not stored: the agent's first model IS the default, and a pick
   // the agent no longer serves (or one from another agent) falls back to it.
   const model =
@@ -257,6 +259,7 @@ export function Chat({
         body: JSON.stringify({
           ...payload,
           model,
+          answer_mode: answerMode,
           agent_id: agentId,
           conversation_id: conversationIdRef.current ?? undefined,
         }),
@@ -525,6 +528,8 @@ export function Chat({
                   models={models}
                   model={model}
                   onModelChange={setModel}
+                  answerMode={answerMode}
+                  onAnswerModeChange={setAnswerMode}
                   skills={runnableSkills}
                   // Survives leaving for Skills and coming back (the pane remounts).
                   draftKey={initialConversationId ?? `new:${agentId}`}

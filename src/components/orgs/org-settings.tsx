@@ -9,6 +9,7 @@ import { CopyField } from "@/components/ui/copy-field";
 import { NATIVE_SELECT_CLASS } from "@/components/ui/native-select";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { useSession } from "@/components/session/session-provider";
 import { formatDateTime, formatRelative } from "@/lib/admin/format";
@@ -26,6 +27,14 @@ import { sendJson } from "@/lib/http";
 import { reloadInto } from "./org-actions";
 import { ShareLinkRow } from "@/components/share/share-dialog";
 import type { ShareLinkView } from "@/lib/share/types";
+import {
+  ANSWER_MODE_HINT,
+  ANSWER_MODE_LABEL,
+  ANSWER_MODES,
+  ANSWER_RULES_MAX,
+  BRIEF_FORMAT,
+  type AnswerStyle,
+} from "@/lib/chat/answer-style";
 
 function Section({
   title,
@@ -81,10 +90,13 @@ function useMutation() {
 export function OrgSettings({
   members,
   invites,
+  answerStyle,
   shareLinks,
 }: {
   members: OrgMemberView[];
   invites: OrgInviteView[];
+  /** Org admins only — null for a member. */
+  answerStyle: AnswerStyle | null;
   shareLinks: ShareLinkView[];
 }) {
   const { user } = useSession();
@@ -104,6 +116,7 @@ export function OrgSettings({
         </div>
 
         {isOrgAdmin && <RenameOrg current={org.name} />}
+        {isOrgAdmin && answerStyle && <AnswerStyleSettings current={answerStyle} />}
         <Members members={members} />
         {isOrgAdmin && <Invites invites={invites} />}
         {shareLinks.length > 0 && <ShareLinks links={shareLinks} isOrgAdmin={isOrgAdmin} />}
@@ -134,6 +147,92 @@ function RenameOrg({ current }: { current: string }) {
         <Button type="submit" variant="secondary" disabled={!dirty || busy !== null}>
           {busy === "rename" ? "Saving…" : "Save"}
         </Button>
+      </form>
+      {errorLine}
+    </Section>
+  );
+}
+
+/**
+ * How Holmes words answers for everyone here. Only the default mode and the
+ * house rules are editable: the brief format's structure is what the answer
+ * renderer reads, so it ships with the code and is shown read-only.
+ */
+function AnswerStyleSettings({ current }: { current: AnswerStyle }) {
+  const [mode, setMode] = useState(current.answerMode);
+  const [rules, setRules] = useState(current.answerRules ?? "");
+  const { busy, run, errorLine } = useMutation();
+  const dirty = mode !== current.answerMode || rules.trim() !== (current.answerRules ?? "");
+  return (
+    <Section
+      title="Answer style"
+      description="How Holmes writes its final answer. Investigations stay as thorough either way — this only shapes the write-up. Anyone can switch a single ask in the composer."
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          run("answer-style", () =>
+            sendJson("/api/org", { answer_mode: mode, answer_rules: rules }, "PATCH"),
+          );
+        }}
+      >
+        <div>
+          <Label className="mb-2 block">Default for new asks</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {ANSWER_MODES.map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={mode === option}
+                onClick={() => setMode(option)}
+                className={cn(
+                  "rounded-lg border p-4 text-left transition-colors",
+                  mode === option
+                    ? "border-warm-off-white/40 bg-smoke-charcoal"
+                    : "border-border hover:bg-smoke-charcoal",
+                )}
+              >
+                <span className="block text-body-sm text-warm-off-white">
+                  {ANSWER_MODE_LABEL[option]}
+                </span>
+                <span className="mt-1 block text-body-sm text-bone-gray">
+                  {ANSWER_MODE_HINT[option]}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <Label htmlFor="answer-rules" className="mb-2 block">
+            House rules
+          </Label>
+          <Textarea
+            id="answer-rules"
+            rows={4}
+            maxLength={ANSWER_RULES_MAX}
+            value={rules}
+            onChange={(e) => setRules(e.target.value)}
+            placeholder="e.g. Config changes go through the trackerNew helm values — give the values diff, not a kubectl patch."
+            className="max-h-64 font-mono text-body-sm"
+          />
+          <p className="mt-1 text-[12px] text-bone-gray">
+            Added to every ask, in both modes. {rules.length}/{ANSWER_RULES_MAX}
+          </p>
+        </div>
+        <details className="rounded-lg border border-border">
+          <summary className="cursor-pointer px-4 py-2.5 text-body-sm text-pale-stone hover:text-warm-off-white">
+            The brief format Holmes receives
+          </summary>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap border-t border-border bg-smoke-charcoal px-4 py-3 font-mono text-[12px] leading-relaxed text-pale-stone">
+            {BRIEF_FORMAT}
+          </pre>
+        </details>
+        <div className="flex justify-end">
+          <Button type="submit" variant="secondary" disabled={!dirty || busy !== null}>
+            {busy === "answer-style" ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </form>
       {errorLine}
     </Section>

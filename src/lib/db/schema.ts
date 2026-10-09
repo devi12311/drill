@@ -23,6 +23,7 @@ import {
 } from "@/lib/chat/types";
 import type { HolmesChatRequest } from "@/lib/holmes/types";
 import { ORG_ROLES, type OrgRole } from "@/lib/orgs/types";
+import { ANSWER_MODES } from "@/lib/chat/answer-style";
 import {
   SHARE_AUDIENCES,
   SHARE_KINDS,
@@ -89,6 +90,13 @@ export const users = pgTable("users", {
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
+  /**
+   * How Holmes words its answers (lib/chat/answer-style.ts): the default a new
+   * ask starts in, and free-text house rules added to every ask. The answer's
+   * structure is code — the renderer depends on it — so only these are data.
+   */
+  answerMode: text("answer_mode", { enum: ANSWER_MODES }).notNull().default("brief"),
+  answerRules: text("answer_rules"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

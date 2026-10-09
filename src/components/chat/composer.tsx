@@ -16,6 +16,12 @@ import { withViewTransition } from "@/components/ui/view-transition";
 import { parseInvocationLine } from "@/lib/skills/prompt";
 import type { SkillView } from "@/lib/skills/types";
 import { cn } from "@/lib/utils";
+import {
+  ANSWER_MODE_HINT,
+  ANSWER_MODE_LABEL,
+  ANSWER_MODES,
+  type AnswerMode,
+} from "@/lib/chat/answer-style";
 
 const MAX_SUGGESTIONS = 8;
 
@@ -103,6 +109,8 @@ export function Composer({
   models,
   model,
   onModelChange,
+  answerMode,
+  onAnswerModeChange,
   skills,
   draftKey,
   animateSend = false,
@@ -125,6 +133,9 @@ export function Composer({
   /** Null until the agent has served at least one model. */
   model: string | null;
   onModelChange: (model: string) => void;
+  /** How the next answer is written (lib/chat/answer-style.ts). */
+  answerMode: AnswerMode;
+  onAnswerModeChange: (mode: AnswerMode) => void;
   /** Skills that can be run explicitly here; null while loading. */
   skills: SkillView[] | null;
   /** Where the unsent text is kept: the conversation id, or `new:<agentId>`. */
@@ -386,6 +397,20 @@ export function Composer({
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
+        <div role="group" aria-label="Answer style" className="ml-1 mr-auto flex items-center">
+          {ANSWER_MODES.map((option) => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={answerMode === option}
+              title={ANSWER_MODE_HINT[option]}
+              onClick={() => onAnswerModeChange(option)}
+              className="rounded-sm px-2 py-1 font-mono text-[12px] text-bone-gray hover:text-warm-off-white aria-pressed:bg-iron-veil aria-pressed:text-warm-off-white"
+            >
+              {ANSWER_MODE_LABEL[option].toLowerCase()}
+            </button>
+          ))}
+        </div>
         <div className="flex items-center gap-3">
           {blocked && busy && (
             <span className="text-[12px] text-bone-gray">

@@ -3,12 +3,15 @@ import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { db, type DbExecutor } from "./index";
 import { orgInvites, orgMemberships, organizations, users } from "./schema";
 import type { OrgInviteView, OrgMemberView, OrgRole } from "@/lib/orgs/types";
+import type { AnswerMode, AnswerStyle } from "@/lib/chat/answer-style";
 import { hashLinkToken, newLinkToken } from "@/lib/tokens";
 
 export interface Membership {
   orgId: string;
   orgName: string;
   role: OrgRole;
+  /** The org's default answer mode — read here so the composer needs no fetch. */
+  answerMode: AnswerMode;
 }
 
 /** The orgs a user belongs to, oldest membership first (the default active org). */
@@ -18,6 +21,7 @@ export async function listMemberships(userId: string): Promise<Membership[]> {
       orgId: orgMemberships.orgId,
       orgName: organizations.name,
       role: orgMemberships.role,
+      answerMode: organizations.answerMode,
     })
     .from(orgMemberships)
     .innerJoin(organizations, eq(organizations.id, orgMemberships.orgId))
@@ -43,6 +47,18 @@ export async function createOrgWithOwner(
 
 export async function renameOrg(orgId: string, name: string): Promise<void> {
   await db.update(organizations).set({ name }).where(eq(organizations.id, orgId));
+}
+
+export async function getAnswerStyle(orgId: string): Promise<AnswerStyle> {
+  const [row] = await db
+    .select({ answerMode: organizations.answerMode, answerRules: organizations.answerRules })
+    .from(organizations)
+    .where(eq(organizations.id, orgId));
+  return row ?? { answerMode: "brief", answerRules: null };
+}
+
+export async function updateAnswerStyle(orgId: string, style: AnswerStyle): Promise<void> {
+  await db.update(organizations).set(style).where(eq(organizations.id, orgId));
 }
 
 // ---- Members ----

@@ -6,11 +6,14 @@
  * components need this type. Keep it free of server imports.
  */
 import type { OrgRole } from "@/lib/orgs/types";
+import type { AnswerMode } from "@/lib/chat/answer-style";
 
 export interface SessionOrg {
   id: string;
   name: string;
   role: OrgRole;
+  /** What a new ask starts in until the user picks otherwise. */
+  answerMode: AnswerMode;
 }
 
 export interface SessionUser {

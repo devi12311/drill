@@ -4,11 +4,39 @@ import { cn } from "@/lib/utils";
 import { ArtifactChip } from "@/components/resolutions/artifact-chip";
 import { ARTIFACT_MARKER } from "@/lib/artifacts/types";
 import { mapPlaceholders } from "@/lib/templates";
+import { CodeBlock } from "./code-block";
+import { MermaidBlock } from "./mermaid-block";
 
 const ARTIFACT_HREF_PREFIX = "#drill-artifact-";
 const PLACEHOLDER_HREF_PREFIX = "#drill-placeholder-";
 /** Only names a skill input could have; anything else stays literal text. */
 const CHIP_NAME = /^[a-z][a-z0-9_]*$/;
+
+interface HastNode {
+  type: string;
+  value?: string;
+  tagName?: string;
+  properties?: { className?: unknown };
+  children?: HastNode[];
+}
+
+function hastText(node: HastNode): string {
+  return node.value ?? (node.children ?? []).map(hastText).join("");
+}
+
+/**
+ * A fenced block's language and text, read from the `pre > code` hast node —
+ * the `code` element alone cannot tell a fence without a language from inline
+ * code, its `pre` parent can.
+ */
+function fencedBlock(pre: HastNode | undefined): { code: string; lang: string | null } {
+  const code = pre?.children?.find((c) => c.tagName === "code");
+  const classes = code?.properties?.className;
+  const lang = Array.isArray(classes)
+    ? classes.map(String).find((c) => c.startsWith("language-"))?.slice("language-".length)
+    : undefined;
+  return { code: code ? hastText(code).replace(/\n$/, "") : "", lang: lang ?? null };
+}
 
 /**
  * Apply `rewrite` to the prose only: fenced blocks and inline code are left
@@ -128,23 +156,20 @@ export function Markdown({
               {p.children}
             </td>
           ),
-          code: (props) => {
-            const { children, className: codeClass } = props;
-            const isBlock = codeClass?.includes("language-");
-            if (!isBlock) {
-              return (
-                <code className="rounded-sm bg-smoke-charcoal px-1.5 py-0.5 font-mono text-[0.85em] text-gold-leaf">
-                  {children}
-                </code>
-              );
-            }
-            return <code className="font-mono">{children}</code>;
-          },
-          pre: (p) => (
-            <pre className="overflow-x-auto rounded-lg bg-smoke-charcoal p-4 font-mono text-[13px] leading-relaxed text-warm-off-white">
+          // Inline only: `pre` renders fenced blocks itself, from the hast node.
+          code: (p) => (
+            <code className="rounded-sm bg-smoke-charcoal px-1.5 py-0.5 font-mono text-[0.85em] text-gold-leaf">
               {p.children}
-            </pre>
+            </code>
           ),
+          pre: (p) => {
+            const { code, lang } = fencedBlock(p.node as HastNode | undefined);
+            return lang === "mermaid" ? (
+              <MermaidBlock source={code} />
+            ) : (
+              <CodeBlock code={code} lang={lang} />
+            );
+          },
           hr: () => <hr className="border-border" />,
         }}
       >

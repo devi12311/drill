@@ -15,13 +15,15 @@ import type {
 } from "@/lib/holmes/types";
 import { servedModels } from "@/lib/holmes/validate";
 import { describeDecisions } from "@/lib/chat/describe";
+import { isAnswerMode } from "@/lib/chat/answer-style";
 import { buildHolmesExtras } from "@/lib/chat/extras";
 import { getUsableSkill } from "@/lib/db/skill-queries";
 import { invocationLine, renderInvocation } from "@/lib/skills/prompt";
 import { validateSkillValues, type MessageSkill } from "@/lib/skills/types";
 
 /**
- * POST /api/chat — body: { ask, model?, agent_id, conversation_id? }, or
+ * POST /api/chat — body: { ask, model?, agent_id, conversation_id?, answer_mode? }
+ * (`answer_mode` "brief" | "detailed", default the org's — lib/chat/answer-style.ts), or
  * { skill: { id, inputs }, ask?, … } to run a skill explicitly (`ask` is then
  * optional extra context), or { tool_decisions, agent_id, conversation_id,
  * model? } to answer a paused tool approval (see lib/holmes/stream.ts).
@@ -43,6 +45,7 @@ export async function POST(request: Request) {
     conversation_id?: string;
     tool_decisions?: ToolApprovalDecision[];
     skill?: { id?: string; inputs?: Record<string, unknown> };
+    answer_mode?: unknown;
   };
   try {
     body = await request.json();
@@ -68,6 +71,13 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  if (body.answer_mode != null && !isAnswerMode(body.answer_mode)) {
+    return Response.json(
+      { error: "`answer_mode` must be \"brief\" or \"detailed\"" },
+      { status: 400 },
+    );
+  }
+  const answerMode = body.answer_mode ?? ctx.orgAnswerMode;
   if (!body.agent_id) {
     return Response.json({ error: "`agent_id` is required" }, { status: 400 });
   }
@@ -180,7 +190,11 @@ export async function POST(request: Request) {
       holmesReq,
       // The typed text, not the rendered skill: past resolutions are matched on
       // what the user described.
-      await buildHolmesExtras({ ask: paused ? null : typed || userLine, scope: ctx }),
+      await buildHolmesExtras({
+        ask: paused ? null : typed || userLine,
+        scope: ctx,
+        answerMode,
+      }),
     );
   }
 
