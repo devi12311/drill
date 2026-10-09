@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { verifySession, verifyImpersonation } from "@/lib/auth/jwt";
 import { SESSION_COOKIE } from "@/lib/auth/session-cookie";
 import { IMPERSONATION_COOKIE } from "@/lib/auth/impersonation-cookie";
-import { INVITE_PREFIX, isInternalApiPath, loginUrl, LOGIN_PATH } from "@/lib/routes";
+import { INVITE_PREFIX, isInternalApiPath, loginUrl, LOGIN_PATH, SHARE_PREFIX } from "@/lib/routes";
 
 const PUBLIC_PATHS = [LOGIN_PATH, "/register"];
 const ADMIN_API_PREFIX = "/api/admin/";
@@ -67,7 +67,11 @@ export async function proxy(request: NextRequest) {
     }
   }
 
-  return NextResponse.next();
+  const response = NextResponse.next();
+  // A share link's token is its credential: never hand it to another site as
+  // the Referer of a link clicked on the review page.
+  if (pathname.startsWith(SHARE_PREFIX)) response.headers.set("Referrer-Policy", "no-referrer");
+  return response;
 }
 
 export const config = {

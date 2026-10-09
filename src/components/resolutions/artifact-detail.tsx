@@ -6,7 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/chat/markdown";
 import { ArtifactDag } from "./dag";
 import { ArtifactForm } from "./artifact-form";
-import type { ArtifactDraft, ArtifactGraph } from "@/lib/artifacts/types";
+import { useSession } from "@/components/session/session-provider";
+import { ImportedBadge } from "@/components/share/imported-badge";
+import { ShareDialog } from "@/components/share/share-dialog";
+import { artifactToDraft, type ArtifactDraft, type ArtifactGraph } from "@/lib/artifacts/types";
+import type { ImportedFrom } from "@/lib/share/types";
 
 /** Shape of GET /api/artifacts/[id] (artifact row + usernames). */
 export interface ArtifactDetailData {
@@ -21,24 +25,11 @@ export interface ArtifactDetailData {
   resolutionSteps: string[];
   verificationSteps: string[];
   graph: ArtifactGraph;
+  importedFrom: ImportedFrom | null;
   createdAt: string;
   updatedAt: string;
   createdByUsername: string | null;
   lastEditedByUsername: string | null;
-}
-
-function toDraft(a: ArtifactDetailData): ArtifactDraft {
-  return {
-    title: a.title,
-    summary: a.summary,
-    symptoms: a.symptoms,
-    affected_services: a.affectedServices,
-    root_cause: a.rootCause,
-    resolution_steps: a.resolutionSteps,
-    verification_steps: a.verificationSteps,
-    tags: a.tags,
-    graph: a.graph,
-  };
 }
 
 export function ArtifactDetail({
@@ -49,6 +40,7 @@ export function ArtifactDetail({
   currentUsername: string | null;
 }) {
   const router = useRouter();
+  const { user } = useSession();
   const [artifact, setArtifact] = useState(initial);
   const [editing, setEditing] = useState<ArtifactDraft | null>(null);
   const [busy, setBusy] = useState(false);
@@ -130,10 +122,17 @@ export function ArtifactDetail({
         <div className="flex items-start justify-between gap-4">
           <h1 className="text-heading text-warm-off-white">{artifact.title}</h1>
           <div className="flex shrink-0 gap-2">
+            {/* Outside the org only — every member already reads it — so admins only. */}
+            {user.isOrgAdmin && (
+              <ShareDialog
+                sourceId={artifact.id}
+                payload={{ kind: "resolution", draft: artifactToDraft(artifact) }}
+              />
+            )}
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => setEditing(toDraft(artifact))}
+              onClick={() => setEditing(artifactToDraft(artifact))}
             >
               Edit
             </Button>
@@ -161,6 +160,11 @@ export function ArtifactDetail({
           {artifact.lastEditedByUsername &&
             ` · last edited by ${artifact.lastEditedByUsername}`}
         </div>
+        {artifact.importedFrom && (
+          <div className="mt-2">
+            <ImportedBadge from={artifact.importedFrom} />
+          </div>
+        )}
         {error && <p className="mt-2 text-body-sm text-traffic-red">{error}</p>}
       </div>
 

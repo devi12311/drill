@@ -1,3 +1,4 @@
+import type { ImportedFrom } from "@/lib/share/types";
 import { assertPlaceholders, placeholdersIn } from "@/lib/templates";
 
 /**
@@ -25,6 +26,8 @@ export interface SkillView {
   inputs: SkillInput[];
   visibility: SkillVisibility;
   alwaysOn: boolean;
+  /** Set when it arrived through a share link. */
+  importedFrom: ImportedFrom | null;
   createdBy: string | null;
   createdByName: string | null;
   updatedAt: string;

@@ -2,9 +2,12 @@
 
 import { useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Check, Copy, Link2, X } from "lucide-react";
+import { Link2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmButton } from "@/components/ui/confirm-button";
+import { CopyField } from "@/components/ui/copy-field";
+import { NATIVE_SELECT_CLASS } from "@/components/ui/native-select";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSession } from "@/components/session/session-provider";
@@ -20,9 +23,8 @@ import {
 } from "@/lib/orgs/types";
 import { invitePath } from "@/lib/routes";
 import { reloadInto, sendJson } from "./org-actions";
-
-const SELECT_CLASS =
-  "h-8 rounded-sm border border-input bg-transparent px-2 text-body-sm text-pale-stone outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50";
+import { ShareLinkRow } from "@/components/share/share-dialog";
+import type { ShareLinkView } from "@/lib/share/types";
 
 function Section({
   title,
@@ -78,9 +80,11 @@ function useMutation() {
 export function OrgSettings({
   members,
   invites,
+  shareLinks,
 }: {
   members: OrgMemberView[];
   invites: OrgInviteView[];
+  shareLinks: ShareLinkView[];
 }) {
   const { user } = useSession();
   const { org, isOrgAdmin } = user;
@@ -101,6 +105,7 @@ export function OrgSettings({
         {isOrgAdmin && <RenameOrg current={org.name} />}
         <Members members={members} />
         {isOrgAdmin && <Invites invites={invites} />}
+        {shareLinks.length > 0 && <ShareLinks links={shareLinks} isOrgAdmin={isOrgAdmin} />}
       </div>
     </main>
   );
@@ -171,7 +176,7 @@ function Members({ members }: { members: OrgMemberView[] }) {
                       sendJson(`/api/org/members/${m.userId}`, { role: e.target.value }, "PATCH"),
                     )
                   }
-                  className={SELECT_CLASS}
+                  className={cn(NATIVE_SELECT_CLASS, "h-8")}
                 >
                   {/* The current role is always listed, even one this actor could not grant. */}
                   {[...new Set<OrgRole>([m.role, ...roles])].map((r) => (
@@ -236,7 +241,6 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
   const [role, setRole] = useState<OrgRole>("member");
   const [label, setLabel] = useState("");
   const [link, setLink] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const { busy, run, errorLine } = useMutation();
 
   async function create(e: React.FormEvent) {
@@ -246,7 +250,6 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
     );
     if (invite) {
       setLink(`${window.location.origin}${invitePath(invite.token)}`);
-      setCopied(false);
       setLabel("");
     }
   }
@@ -273,7 +276,7 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
           aria-label="Role for the invitee"
           value={role}
           onChange={(e) => setRole(e.target.value as OrgRole)}
-          className={`${SELECT_CLASS} h-9`}
+          className={NATIVE_SELECT_CLASS}
         >
           {roles.map((r) => (
             <option key={r} value={r}>
@@ -289,22 +292,8 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
       {errorLine}
 
       {link && (
-        <div className="mt-4 flex items-center gap-2 rounded-sm border border-border bg-deep-ember px-3 py-2">
-          <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-pale-stone">
-            {link}
-          </code>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="gap-1.5"
-            onClick={() =>
-              navigator.clipboard.writeText(link).then(() => setCopied(true))
-            }
-          >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            {copied ? "Copied" : "Copy"}
-          </Button>
+        <div className="mt-4">
+          <CopyField value={link} />
         </div>
       )}
 
@@ -343,6 +332,27 @@ function Invites({ invites }: { invites: OrgInviteView[] }) {
           </ul>
         </>
       )}
+    </Section>
+  );
+}
+
+/** Live share links: create them from a skill or resolution, revoke them here too. */
+function ShareLinks({ links, isOrgAdmin }: { links: ShareLinkView[]; isOrgAdmin: boolean }) {
+  const router = useRouter();
+  return (
+    <Section
+      title="Share links"
+      description={
+        isOrgAdmin
+          ? "Every live link that hands this organization's skills and resolutions to someone. Revoking stops new imports; copies already made stay where they are."
+          : "Links you created to share your skills. Revoking stops new imports; copies already made stay where they are."
+      }
+    >
+      <ul className="divide-y divide-border">
+        {links.map((l) => (
+          <ShareLinkRow key={l.id} link={l} showTitle onRevoked={() => router.refresh()} />
+        ))}
+      </ul>
     </Section>
   );
 }

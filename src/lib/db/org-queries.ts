@@ -1,9 +1,9 @@
 import "server-only";
-import { createHash, randomBytes } from "node:crypto";
 import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { db, type DbExecutor } from "./index";
 import { orgInvites, orgMemberships, organizations, users } from "./schema";
 import type { OrgInviteView, OrgMemberView, OrgRole } from "@/lib/orgs/types";
+import { hashLinkToken, newLinkToken } from "@/lib/tokens";
 
 export interface Membership {
   orgId: string;
@@ -110,8 +110,6 @@ export async function changeMembership(
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
-
 const pending = () =>
   and(isNull(orgInvites.acceptedAt), gt(orgInvites.expiresAt, sql`now()`));
 
@@ -122,12 +120,12 @@ export async function createInvite(input: {
   label: string | null;
   createdBy: string;
 }): Promise<{ id: string; token: string }> {
-  const token = randomBytes(32).toString("base64url");
+  const { token, tokenHash } = newLinkToken();
   const [row] = await db
     .insert(orgInvites)
     .values({
       ...input,
-      tokenHash: hashToken(token),
+      tokenHash,
       expiresAt: new Date(Date.now() + INVITE_TTL_MS),
     })
     .returning({ id: orgInvites.id });
@@ -177,7 +175,7 @@ export async function findPendingInvite(token: string): Promise<InvitePreview | 
     .from(orgInvites)
     .innerJoin(organizations, eq(organizations.id, orgInvites.orgId))
     .leftJoin(users, eq(users.id, orgInvites.createdBy))
-    .where(and(eq(orgInvites.tokenHash, hashToken(token)), pending()));
+    .where(and(eq(orgInvites.tokenHash, hashLinkToken(token)), pending()));
   return row ?? null;
 }
 
@@ -214,7 +212,7 @@ export async function claimInvite(
   const [claimed] = await tx
     .update(orgInvites)
     .set({ acceptedBy: userId, acceptedAt: new Date() })
-    .where(and(eq(orgInvites.tokenHash, hashToken(token)), pending()))
+    .where(and(eq(orgInvites.tokenHash, hashLinkToken(token)), pending()))
     .returning({ orgId: orgInvites.orgId, role: orgInvites.role });
   if (!claimed) return null;
   await tx

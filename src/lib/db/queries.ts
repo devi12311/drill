@@ -439,11 +439,12 @@ const artifactColumns = {
   resolutionSteps: resolutionArtifacts.resolutionSteps,
   verificationSteps: resolutionArtifacts.verificationSteps,
   graph: resolutionArtifacts.graph,
+  importedFrom: resolutionArtifacts.importedFrom,
   createdAt: resolutionArtifacts.createdAt,
   updatedAt: resolutionArtifacts.updatedAt,
 };
 
-function draftValues(draft: ArtifactDraft) {
+export function draftValues(draft: ArtifactDraft) {
   return {
     title: draft.title,
     summary: draft.summary,
@@ -498,6 +499,7 @@ const inOrg = (orgId: string, artifactId: string) =>
 
 /** Full artifact with resolver/editor usernames, if it belongs to the org. */
 export async function getArtifact(orgId: string, artifactId: string) {
+  if (!isUuid(artifactId)) return null;
   const [row] = await db
     .select({
       ...artifactColumns,
@@ -520,6 +522,7 @@ export async function updateArtifact(
   artifactId: string,
   draft: ArtifactDraft,
 ) {
+  if (!isUuid(artifactId)) return null;
   const [row] = await db
     .update(resolutionArtifacts)
     .set({
@@ -537,6 +540,7 @@ export async function updateArtifact(
  * the linked conversation (if any) flips back to `open`.
  */
 export async function deleteArtifact(scope: Scope, artifactId: string) {
+  if (!isUuid(artifactId)) return "not_found" as const;
   const [existing] = await db
     .select({
       createdBy: resolutionArtifacts.createdBy,

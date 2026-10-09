@@ -24,6 +24,14 @@ import {
 import type { HolmesChatRequest } from "@/lib/holmes/types";
 import { ORG_ROLES, type OrgRole } from "@/lib/orgs/types";
 import {
+  SHARE_AUDIENCES,
+  SHARE_KINDS,
+  type ImportedFrom,
+  type ShareAudience,
+  type ShareKind,
+  type SharePayload,
+} from "@/lib/share/types";
+import {
   SKILL_VISIBILITIES,
   type MessageSkill,
   type SkillInput,
@@ -356,6 +364,8 @@ export const resolutionArtifacts = pgTable("resolution_artifacts", {
   resolutionSteps: jsonb("resolution_steps").$type<string[]>().notNull(),
   verificationSteps: jsonb("verification_steps").$type<string[]>().notNull(),
   graph: jsonb("graph").$type<ArtifactGraph>().notNull(),
+  /** Set when it arrived through a share link from another org. */
+  importedFrom: jsonb("imported_from").$type<ImportedFrom>(),
   // pgvector-ready: unused until an embedding provider is configured.
   embedding: vector("embedding", { dimensions: 1536 }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -385,6 +395,8 @@ export const skills = pgTable("skills", {
     .notNull()
     .default("private"),
   alwaysOn: boolean("always_on").notNull().default(false),
+  /** Set when it arrived through a share link (always private on arrival). */
+  importedFrom: jsonb("imported_from").$type<ImportedFrom>(),
   createdBy: uuid("created_by").references(() => users.id, {
     onDelete: "set null",
   }),
@@ -394,6 +406,62 @@ export const skills = pgTable("skills", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [unique("skills_org_name_unique").on(t.orgId, t.name)]);
+
+/**
+ * A link that hands a frozen copy of a skill or resolution to whoever opens it
+ * (docs/DECISIONS.md — "Share links"). Like an invite, only the token's sha256 is
+ * stored. Unlike one it is not spent: it serves many people until it expires or
+ * is revoked, and each person imports at most once per org they import into.
+ *
+ * `payload` is a snapshot, not a pointer — editing the original never changes
+ * what a reviewed link hands out; sharing a new version means a new link.
+ * `sourceId` has no FK because it names a row in either table; it only powers
+ * "this is already in your org".
+ */
+export const shareLinks = pgTable(
+  "share_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    kind: text("kind", { enum: SHARE_KINDS }).$type<ShareKind>().notNull(),
+    audience: text("audience", { enum: SHARE_AUDIENCES }).$type<ShareAudience>().notNull(),
+    sourceId: uuid("source_id"),
+    title: text("title").notNull(),
+    payload: jsonb("payload").$type<SharePayload>().notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    expiresAt: timestamp("expires_at").notNull(),
+    revokedAt: timestamp("revoked_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("share_links_org_idx").on(t.orgId)],
+);
+
+/**
+ * What one person did with a link, per org they acted for. A decline is not
+ * final — importing later overwrites it; an import is (a second would duplicate
+ * the row it made). `importedId` names the skill/resolution it created.
+ */
+export const shareLinkRedemptions = pgTable(
+  "share_link_redemptions",
+  {
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => shareLinks.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    targetOrgId: uuid("target_org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ["imported", "declined"] }).notNull(),
+    importedId: uuid("imported_id"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.linkId, t.userId, t.targetOrgId] })],
+);
 
 /**
  * A Kubernetes cluster under monitoring. Carries TWO credentials for two

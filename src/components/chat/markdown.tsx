@@ -2,10 +2,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { ArtifactChip } from "@/components/resolutions/artifact-chip";
+import { ARTIFACT_MARKER } from "@/lib/artifacts/types";
 
 const ARTIFACT_HREF_PREFIX = "#drill-artifact-";
-const ARTIFACT_MARKER =
-  /\[\[artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]\]/gi;
 
 /**
  * Rewrite `[[artifact:<uuid>]]` citations into links our `a` renderer turns

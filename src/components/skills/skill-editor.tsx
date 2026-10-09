@@ -7,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Plus, X } from "lucide-react";
@@ -237,6 +238,31 @@ function ProcedureTabs({
 }
 
 /**
+ * Reviewing a shared skill before importing a copy (`/share/<token>`). The form
+ * is the same one; only where it starts and where it saves differ, so the review
+ * page owns the target org and "Not now", and the editor owns the fields.
+ */
+export interface SkillImport {
+  kind: "share";
+  draft: SkillDraft;
+  /** A name the target org already uses — marked on the field before Import fails. */
+  takenName: string | null;
+  submitLabel: string;
+  /** Why Import is off for this target (already imported there), shown in its place. */
+  blockedReason: string | null;
+  /** Beside the submit button: the target-org picker and "Not now". */
+  actions: ReactNode;
+  submit: (draft: SkillDraft) => Promise<void>;
+}
+
+/**
+ * Where a new skill's form starts: blank, the chat skill builder's draft
+ * (`/skills/new?from=conversation`, handed over in sessionStorage), or a shared
+ * skill under review.
+ */
+export type SkillSource = { kind: "conversation" } | SkillImport;
+
+/**
  * Create (`skill` null) or edit one skill. Each field is checked with the same
  * rules the API runs (`skillDraftProblems` shares them with `validateSkillDraft`),
  * so a save only fails for reasons the form could not know (a taken name, a lost
@@ -244,17 +270,18 @@ function ProcedureTabs({
  */
 export function SkillEditor({
   skill,
-  fromConversation = false,
+  source,
 }: {
   skill: SkillView | null;
-  /** `/skills/new?from=conversation`: start from the skill builder's draft. */
-  fromConversation?: boolean;
+  source?: SkillSource;
 }) {
   const router = useRouter();
   const { user } = useSession();
+  const importing = source?.kind === "share" ? source : null;
   // What the server holds. Moves forward on save, so "unsaved" is always
-  // measured against the last save, not against the page load.
-  const [saved, setSaved] = useState<SkillDraft>(() => toDraft(skill));
+  // measured against the last save, not against the page load. Under review,
+  // the shared version: "changed" then means "your copy will differ from it".
+  const [saved, setSaved] = useState<SkillDraft>(() => importing?.draft ?? toDraft(skill));
   const [draft, setDraft] = useState<SkillDraft>(saved);
   const [preview, setPreview] = useState(false);
   // The form before the last Holmes draft replaced it — one step of undo.
@@ -273,17 +300,25 @@ export function SkillEditor({
   const problems = useMemo(() => skillDraftProblems(draft), [draft]);
   const blocked = hasProblems(problems);
   const dirty = changedFields(draft, saved).length > 0;
+  // Untouched, a shared skill is still worth importing as it is.
+  const submittable = importing ? !blocked && !importing.blockedReason : dirty && !blocked;
   useLeaveGuard(dirty && !saving && !readOnly);
 
   // A blank new form is not wrong yet: a field complains once it has been left,
   // or once it holds something. An existing skill is judged from the start.
+  const judged = skill !== null || importing !== null;
   const shows = (field: DraftField, hasValue: boolean) =>
-    !readOnly && (skill !== null || visited.has(field) || hasValue);
+    !readOnly && (judged || visited.has(field) || hasValue);
+  const nameTaken =
+    importing?.takenName === draft.name
+      ? `Your organization already has a skill named "${draft.name}" — rename this copy.`
+      : undefined;
   const fieldError = (field: Exclude<DraftField, "inputs">) =>
-    shows(field, draft[field] !== "") ? problems[field] : undefined;
+    (field === "name" && nameTaken) ||
+    (shows(field, draft[field] !== "") ? problems[field] : undefined);
   const rowErrors = Object.fromEntries(
     Object.entries(problems.inputs).filter(
-      ([i]) => skill !== null || draft.inputs[Number(i)]?.key !== "",
+      ([i]) => judged || draft.inputs[Number(i)]?.key !== "",
     ),
   );
   const visit = (field: DraftField) => () =>
@@ -303,7 +338,7 @@ export function SkillEditor({
   // a reload is a blank form rather than the same draft again.
   const seed = useSyncExternalStore(noSubscription, readSeed, noSeed);
   const [appliedSeed, setAppliedSeed] = useState<string | null>(null);
-  if (fromConversation && skill === null && seed && seed !== appliedSeed) {
+  if (source?.kind === "conversation" && skill === null && seed && seed !== appliedSeed) {
     setAppliedSeed(seed);
     const next = parseSeed(seed);
     if (next) {
@@ -312,7 +347,7 @@ export function SkillEditor({
       setDraft(next);
     }
   }
-  const seeded = appliedSeed !== null;
+  const seeded = appliedSeed !== null || importing !== null;
   useEffect(() => {
     if (appliedSeed) sessionStorage.removeItem(SKILL_SEED_KEY);
   }, [appliedSeed]);
@@ -343,6 +378,7 @@ export function SkillEditor({
 
   const save = () =>
     run(async () => {
+      if (importing) return importing.submit(draft);
       const result: SkillView = skill
         ? await send("PATCH", `/api/skills/${skill.id}`, draft)
         : await send("POST", "/api/skills", draft);
@@ -572,12 +608,16 @@ export function SkillEditor({
         <p aria-live="polite" className="min-w-0 text-body-sm">
           {readOnly ? null : error ? (
             <span className="text-traffic-red">{error}</span>
-          ) : dirty && blocked ? (
+          ) : importing?.blockedReason ? (
+            <span className="text-bone-gray">{importing.blockedReason}</span>
+          ) : (dirty || importing) && (blocked || nameTaken) ? (
             <span className="text-bone-gray">
               {shownProblems === 0
                 ? "Fill in the empty fields — name, description, procedure and any input keys — to create it."
-                : `Fix ${shownProblems === 1 ? "the field" : `${shownProblems} fields`} marked above to save.`}
+                : `Fix ${shownProblems === 1 ? "the field" : `${shownProblems} fields`} marked above to ${importing ? "import" : "save"}.`}
             </span>
+          ) : dirty && importing ? (
+            <span className="text-pale-stone">Edited — your copy will differ from the shared one.</span>
           ) : dirty ? (
             <span className="inline-flex items-center gap-2 text-pale-stone">
               <span className="size-1.5 rounded-full bg-gold-leaf" />
@@ -605,9 +645,18 @@ export function SkillEditor({
               Delete
             </ConfirmButton>
           )}
+          {importing?.actions}
           {!readOnly && (
-            <Button onClick={save} disabled={saving || blocked || !dirty}>
-              {saving ? "Saving…" : skill ? "Save" : "Create skill"}
+            <Button onClick={save} disabled={saving || !submittable || Boolean(nameTaken)}>
+              {importing
+                ? saving
+                  ? "Importing…"
+                  : importing.submitLabel
+                : saving
+                  ? "Saving…"
+                  : skill
+                    ? "Save"
+                    : "Create skill"}
             </Button>
           )}
         </div>

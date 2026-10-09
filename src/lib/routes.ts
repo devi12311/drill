@@ -47,6 +47,17 @@ export function invitePath(token: string): string {
   return `${INVITE_PREFIX}${encodeURIComponent(token)}`;
 }
 
+/**
+ * A share link (a skill or resolution handed to whoever opens it). NOT public,
+ * unlike an invite: it can only be imported into an org, so a signed-out visitor
+ * logs in first and the proxy brings them back here.
+ */
+export const SHARE_PREFIX = "/share/";
+
+export function sharePath(token: string): string {
+  return `${SHARE_PREFIX}${encodeURIComponent(token)}`;
+}
+
 /** The login URL that brings the user back to `path` afterwards. */
 export function loginUrl(path: string): string {
   return `${LOGIN_PATH}?next=${encodeURIComponent(path)}`;

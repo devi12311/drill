@@ -5,6 +5,8 @@ import { getAuthContext } from "@/lib/auth/session";
 import { getSkillView } from "@/lib/db/skill-queries";
 import { SkillScope } from "@/components/skills/skill-badges";
 import { SkillEditor } from "@/components/skills/skill-editor";
+import { ImportedBadge } from "@/components/share/imported-badge";
+import { ShareDialog } from "@/components/share/share-dialog";
 
 /**
  * `/skills/new` creates (`?from=conversation`: from the chat's skill builder);
@@ -24,6 +26,8 @@ export default async function SkillPage({
   const skill =
     id === "new" ? null : await getSkillView(ctx, id).catch(() => null);
   if (id !== "new" && !skill) notFound();
+  // Its author shares it with colleagues; an org admin also beyond the org.
+  const canShareLink = skill !== null && (ctx.isOrgAdmin || skill.createdBy === ctx.userId);
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
@@ -40,8 +44,25 @@ export default async function SkillPage({
             {skill ? <span className="font-mono break-all">{skill.name}</span> : "New skill"}
           </h1>
           {skill && <SkillScope skill={skill} />}
+          {skill?.importedFrom && <ImportedBadge from={skill.importedFrom} />}
+          {canShareLink && (
+            <div className="ml-auto">
+              <ShareDialog
+                sourceId={skill.id}
+                payload={{
+                  kind: "skill",
+                  draft: {
+                    name: skill.name,
+                    description: skill.description,
+                    body: skill.body,
+                    inputs: skill.inputs,
+                  },
+                }}
+              />
+            </div>
+          )}
         </div>
-        <SkillEditor skill={skill} fromConversation={from === "conversation"} />
+        <SkillEditor skill={skill} source={from === "conversation" ? { kind: "conversation" } : undefined} />
       </div>
     </main>
   );

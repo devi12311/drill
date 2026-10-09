@@ -7,6 +7,10 @@
 /** The knowledge-base frontend tool's name — client-safe, so the UI can recognise its calls. */
 export const SEARCH_TOOL_NAME = "search_past_resolutions";
 
+/** A `[[artifact:<uuid>]]` citation in Holmes prose — rendered as a chip in chat. */
+export const ARTIFACT_MARKER =
+  /\[\[artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]\]/gi;
+
 export type ArtifactNodeKind =
   | "service"
   | "component"
@@ -41,6 +45,31 @@ export interface ArtifactDraft {
   verification_steps: string[];
   tags: string[];
   graph: ArtifactGraph;
+}
+
+/** A stored artifact (camelCase row or API shape) back into the editable draft. */
+export function artifactToDraft(a: {
+  title: string;
+  summary: string;
+  symptoms: string[];
+  affectedServices: string[];
+  rootCause: string;
+  resolutionSteps: string[];
+  verificationSteps: string[];
+  tags: string[];
+  graph: ArtifactGraph;
+}): ArtifactDraft {
+  return {
+    title: a.title,
+    summary: a.summary,
+    symptoms: a.symptoms,
+    affected_services: a.affectedServices,
+    root_cause: a.rootCause,
+    resolution_steps: a.resolutionSteps,
+    verification_steps: a.verificationSteps,
+    tags: a.tags,
+    graph: a.graph,
+  };
 }
 
 const NODE_KINDS: ArtifactNodeKind[] = [
@@ -141,4 +170,38 @@ export function parseArtifactDraft(raw: string): ArtifactDraft {
     throw new Error("artifact response is not valid JSON");
   }
   return validateDraft(parsed);
+}
+
+/**
+ * Size caps for an artifact that crosses an org boundary (a share link). The
+ * table has none — a distilled artifact is bounded by Holmes's output — but a
+ * shared one is typed by a person in another org and lands in our search index.
+ */
+export const ARTIFACT_LIMITS = {
+  text: 8_000,
+  listItems: 40,
+  listItem: 1_000,
+  graphNodes: 100,
+  graphEdges: 200,
+} as const;
+
+/** Throws with a message fit for a 400 when a validated draft exceeds `ARTIFACT_LIMITS`. */
+export function assertArtifactSize(draft: ArtifactDraft): void {
+  const L = ARTIFACT_LIMITS;
+  for (const [field, value] of [["summary", draft.summary], ["root cause", draft.root_cause]] as const)
+    if (value.length > L.text) throw new Error(`${field} must be at most ${L.text} characters`);
+  const lists = {
+    symptoms: draft.symptoms,
+    "affected services": draft.affected_services,
+    "resolution steps": draft.resolution_steps,
+    "verification steps": draft.verification_steps,
+    tags: draft.tags,
+  };
+  for (const [field, list] of Object.entries(lists)) {
+    if (list.length > L.listItems) throw new Error(`${field}: at most ${L.listItems} items`);
+    if (list.some((item) => item.length > L.listItem))
+      throw new Error(`${field}: each item must be at most ${L.listItem} characters`);
+  }
+  if (draft.graph.nodes.length > L.graphNodes) throw new Error(`graph: at most ${L.graphNodes} nodes`);
+  if (draft.graph.edges.length > L.graphEdges) throw new Error(`graph: at most ${L.graphEdges} edges`);
 }

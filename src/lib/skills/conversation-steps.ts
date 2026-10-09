@@ -133,12 +133,16 @@ export function templateValues(
 
 // ---- Detected inputs -------------------------------------------------------
 
+/** Identifier shapes — also what the share scanner flags as one org's specifics. */
+export const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+/** Long hex: Mongo ObjectIds, trace and span ids. */
+export const LONG_HEX_PATTERN = /\b[0-9a-f]{16,}\b/gi;
+
 /** Value shapes worth offering as an input, most specific first. */
 const CANDIDATES: { pattern: RegExp; kind: "quoted" | "id" | "date" | "token" }[] = [
   { pattern: /(["'`])([^"'`\n]{2,80})\1/g, kind: "quoted" },
-  { pattern: /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, kind: "id" },
-  // Long hex: Mongo ObjectIds, trace and span ids.
-  { pattern: /\b[0-9a-f]{16,}\b/gi, kind: "id" },
+  { pattern: UUID_PATTERN, kind: "id" },
+  { pattern: LONG_HEX_PATTERN, kind: "id" },
   {
     pattern: /\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/g,
     kind: "date",

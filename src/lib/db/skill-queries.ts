@@ -61,6 +61,7 @@ function toView(
     inputs: row.inputs,
     visibility: row.visibility,
     alwaysOn: row.alwaysOn,
+    importedFrom: row.importedFrom,
     createdBy: row.createdBy,
     createdByName,
     updatedAt: row.updatedAt.toISOString(),
@@ -133,7 +134,7 @@ export class SkillNameTaken extends Error {
   }
 }
 
-function rethrowUnique(err: unknown, name: string): never {
+export function rethrowUnique(err: unknown, name: string): never {
   if (isUniqueViolation(err)) throw new SkillNameTaken(name);
   throw err;
 }

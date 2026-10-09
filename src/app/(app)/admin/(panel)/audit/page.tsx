@@ -33,6 +33,9 @@ const ACTION_LABEL: Record<string, string> = {
   "org.member.role": "Changed a member's role",
   "org.member.removed": "Removed a member",
   "org.member.left": "Left the organization",
+  "share.link.created": "Created a share link",
+  "share.link.revoked": "Revoked a share link",
+  "share.imported": "Imported from a share link",
 };
 
 export default function AdminAuditPage() {
