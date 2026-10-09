@@ -43,6 +43,28 @@ export interface SkillDraft {
   inputs: SkillInput[];
 }
 
+/** The author-editable part of a skill: what the editor starts from and a share link carries. */
+export function toSkillDraft(skill: Pick<SkillView, keyof SkillDraft>): SkillDraft {
+  return {
+    name: skill.name,
+    description: skill.description,
+    body: skill.body,
+    inputs: skill.inputs,
+  };
+}
+
+/**
+ * Whether a run of it from the composer reaches Holmes: the user's own and
+ * shared skills. An admin can see other users' private ones, and an always-on
+ * skill already applies to every turn.
+ */
+export function canRunSkill(
+  skill: Pick<SkillView, "alwaysOn" | "visibility" | "createdBy">,
+  userId: string,
+): boolean {
+  return !skill.alwaysOn && (skill.visibility === "shared" || skill.createdBy === userId);
+}
+
 /** What the message records when a skill was run explicitly. */
 export interface MessageSkill {
   id: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { ShieldCheck, ShieldX } from "lucide-react";
 import { Markdown } from "./markdown";
 import { InvestigationRail } from "./investigation-rail";
@@ -20,6 +20,8 @@ import type {
   ToolCall,
 } from "@/lib/holmes/types";
 import { useSkillBuilder } from "@/components/skills/use-skill-builder";
+import { useCharacterKeys, useShortcut } from "@/components/shell/shortcuts";
+import { DIGIT_KEYS } from "@/lib/shortcuts";
 import { FETCH_SKILL_TOOL_NAME } from "@/lib/skills/prompt";
 import type { MessageSkill } from "@/lib/skills/types";
 import { cn } from "@/lib/utils";
@@ -112,56 +114,54 @@ function CostFooter({ inv }: { inv: InvestigationData }) {
 }
 
 /**
- * An analysis folded to its first lines while steps are picked, so the
- * conversation reads as its calls; "show more" opens one message at a time.
+ * Holmes's suggested next asks. On the latest answer, 1–9 put focus on a chip
+ * and Enter asks it: two keys, never one, because a follow-up starts a paid
+ * investigation and a stray digit must not.
  */
-function FoldedAnalysis({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const [overflows, setOverflows] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && !open) setOverflows(el.scrollHeight > el.clientHeight + 1);
-  }, [text, open]);
-  return (
-    <div>
-      <div ref={ref} className={open ? undefined : "max-h-[4.5em] overflow-hidden"}>
-        <Markdown>{text}</Markdown>
-      </div>
-      {(overflows || open) && (
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          className="mt-1 text-body-sm text-bone-gray underline-offset-2 outline-none hover:text-warm-off-white hover:underline focus-visible:underline"
-        >
-          {open ? "show less" : "show more"}
-        </button>
-      )}
-    </div>
-  );
-}
-
 function FollowUpChips({
   actions,
   onPick,
   disabled,
+  keyed,
 }: {
   actions: FollowUpAction[];
   onPick: (action: FollowUpAction) => void;
   disabled: boolean;
+  /** The chips answer to 1–9 (the latest answer, nothing running). */
+  keyed: boolean;
 }) {
+  const chips = useRef<(HTMLButtonElement | null)[]>([]);
+  const [characterKeys] = useCharacterKeys();
+  const numbered = keyed && !disabled && characterKeys;
+  useShortcut(
+    DIGIT_KEYS,
+    (_e, key) => {
+      const chip = chips.current[Number(key) - 1];
+      if (!chip) return false;
+      chip.focus();
+      chip.scrollIntoView({ block: "nearest" });
+    },
+    keyed && !disabled && actions.length > 0,
+  );
   if (actions.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2">
-      {actions.map((action) => (
+      {actions.map((action, i) => (
         <button
           key={action.id}
+          ref={(el) => {
+            chips.current[i] = el;
+          }}
           type="button"
           disabled={disabled}
           onClick={() => onPick(action)}
-          className="rounded-sm border border-input px-3 py-1.5 text-body-sm text-pale-stone transition-colors hover:bg-iron-veil hover:text-warm-off-white disabled:pointer-events-none disabled:opacity-50"
+          className="flex items-center gap-2 rounded-sm border border-input px-3 py-1.5 text-body-sm text-pale-stone outline-none transition-colors hover:bg-iron-veil hover:text-warm-off-white focus-visible:bg-iron-veil focus-visible:text-warm-off-white focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50"
         >
+          {numbered && i < DIGIT_KEYS.length && (
+            <span aria-hidden className="font-mono text-[11px] text-bone-gray">
+              {i + 1}
+            </span>
+          )}
           {action.action_label}
         </button>
       ))}
@@ -204,12 +204,7 @@ function AnswerPart({
   }
   return (
     <>
-      {response.analysis?.trim() &&
-        (picking ? (
-          <FoldedAnalysis text={response.analysis} />
-        ) : (
-          <Markdown>{response.analysis}</Markdown>
-        ))}
+      {response.analysis?.trim() && <Markdown>{response.analysis}</Markdown>}
       {!picking && approval}
     </>
   );
@@ -304,6 +299,7 @@ export function Investigation({
               actions={final.follow_up_actions ?? []}
               onPick={onFollowUp}
               disabled={busy}
+              keyed={isLatest}
             />
             <CostFooter inv={inv} />
           </>

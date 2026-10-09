@@ -1,69 +1,37 @@
-import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
 import { getAuthContext } from "@/lib/auth/session";
 import { getSkillView } from "@/lib/db/skill-queries";
-import { SkillScope } from "@/components/skills/skill-badges";
-import { SkillEditor } from "@/components/skills/skill-editor";
-import { ImportedBadge } from "@/components/share/imported-badge";
-import { ShareDialog } from "@/components/share/share-dialog";
+import { NewSkill } from "@/components/skills/new-skill";
+import { SkillDetail } from "@/components/skills/skill-detail";
 
 /**
- * `/skills/new` creates (`?from=conversation`: from the chat's skill builder);
- * `/skills/<id>` edits (or shows, when not editable).
+ * `/skills/new` creates (`?start=holmes`: with the Holmes drafter open;
+ * `?from=conversation`: the chat's skill builder; `?from=duplicate`: a copy);
+ * `/skills/<id>` shows one, with editing and sharing as modes of that page.
  */
 export default async function SkillPage({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ from?: string }>;
+  searchParams: Promise<{ from?: string; start?: string }>;
 }) {
   const { id } = await params;
-  const { from } = await searchParams;
+  const { from, start } = await searchParams;
   const ctx = await getAuthContext();
   if (!ctx) redirect("/login");
   const skill =
     id === "new" ? null : await getSkillView(ctx, id).catch(() => null);
   if (id !== "new" && !skill) notFound();
-  // Its author shares it with colleagues; an org admin also beyond the org.
-  const canShareLink = skill !== null && (ctx.isOrgAdmin || skill.createdBy === ctx.userId);
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-[820px] px-6 pb-20 pt-8">
-        <Link
-          href="/skills"
-          className="inline-flex items-center gap-2 text-body-sm text-bone-gray hover:text-warm-off-white"
-        >
-          <ArrowLeft className="size-3.5" />
-          Skills
-        </Link>
-        <div className="mt-6 mb-8 flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h1 className="min-w-0 text-heading text-warm-off-white">
-            {skill ? <span className="font-mono break-all">{skill.name}</span> : "New skill"}
-          </h1>
-          {skill && <SkillScope skill={skill} />}
-          {skill?.importedFrom && <ImportedBadge from={skill.importedFrom} />}
-          {canShareLink && (
-            <div className="ml-auto">
-              <ShareDialog
-                sourceId={skill.id}
-                payload={{
-                  kind: "skill",
-                  draft: {
-                    name: skill.name,
-                    description: skill.description,
-                    body: skill.body,
-                    inputs: skill.inputs,
-                  },
-                }}
-              />
-            </div>
-          )}
-        </div>
-        <SkillEditor skill={skill} source={from === "conversation" ? { kind: "conversation" } : undefined} />
-      </div>
+      {skill ? (
+        // Keyed by the version, so a newer server copy (a refresh) replaces local state.
+        <SkillDetail key={`${skill.id}:${skill.updatedAt}`} skill={skill} />
+      ) : (
+        <NewSkill from={from} start={start} />
+      )}
     </main>
   );
 }

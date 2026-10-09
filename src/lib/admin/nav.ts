@@ -9,10 +9,9 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import type { NavJump } from "@/lib/shortcuts";
 
-export interface AdminNavItem {
-  href: string;
-  label: string;
+export interface AdminNavItem extends NavJump {
   icon: LucideIcon;
   /** Match the href exactly instead of by prefix (needed for `/admin` itself). */
   exact?: boolean;
@@ -30,8 +29,8 @@ export interface AdminNavGroup {
 
 /**
  * The admin panel's information architecture — the single source of truth for
- * the sidebar AND the topbar breadcrumb. Adding a menu means adding one entry
- * here; nothing else needs to know about it.
+ * the sidebar, the topbar breadcrumb and the `g` chords. Adding a menu means
+ * adding one entry here; nothing else needs to know about it.
  */
 export const ADMIN_NAV: AdminNavGroup[] = [
   {
@@ -42,24 +41,25 @@ export const ADMIN_NAV: AdminNavGroup[] = [
         label: "Overview",
         icon: LayoutDashboard,
         exact: true,
+        shortcut: "d",
       },
-      { href: "/admin/cost", label: "Cost & usage", icon: DollarSign },
-      { href: "/admin/activity", label: "Activity", icon: Activity },
-      { href: "/admin/audit", label: "Audit", icon: ScrollText },
+      { href: "/admin/cost", label: "Cost & usage", icon: DollarSign, shortcut: "c" },
+      { href: "/admin/activity", label: "Activity", icon: Activity, shortcut: "a" },
+      { href: "/admin/audit", label: "Audit", icon: ScrollText, shortcut: "l" },
     ],
   },
   {
     label: "Infrastructure",
     items: [
-      { href: "/admin/monitoring", label: "Monitoring", icon: Radar },
-      { href: "/admin/agents", label: "Agent health", icon: Server },
+      { href: "/admin/monitoring", label: "Monitoring", icon: Radar, shortcut: "m" },
+      { href: "/admin/agents", label: "Agent health", icon: Server, shortcut: "h" },
     ],
   },
   {
     label: "Platform",
     items: [
-      { href: "/admin/orgs", label: "Organizations", icon: Building2, platform: true },
-      { href: "/admin/users", label: "Users", icon: Users, platform: true },
+      { href: "/admin/orgs", label: "Organizations", icon: Building2, platform: true, shortcut: "o" },
+      { href: "/admin/users", label: "Users", icon: Users, platform: true, shortcut: "u" },
     ],
   },
 ];

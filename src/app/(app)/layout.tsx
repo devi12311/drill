@@ -2,6 +2,8 @@ import { requireSessionUser } from "@/lib/auth/session";
 import { SessionProvider } from "@/components/session/session-provider";
 import { ImpersonationBanner } from "@/components/admin/impersonation-banner";
 import { ModeSwitch } from "@/components/shell/mode-switch";
+import { ShortcutsProvider } from "@/components/shell/shortcuts";
+import { ShortcutsDialog } from "@/components/shell/shortcuts-dialog";
 
 /**
  * Shell for every authenticated route (chat, resolutions, admin). It resolves
@@ -25,9 +27,12 @@ export default async function AppLayout({
 
   return (
     <SessionProvider user={user}>
-      <ImpersonationBanner />
-      {children}
-      <ModeSwitch />
+      <ShortcutsProvider>
+        <ImpersonationBanner />
+        {children}
+        <ModeSwitch />
+        <ShortcutsDialog />
+      </ShortcutsProvider>
     </SessionProvider>
   );
 }

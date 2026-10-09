@@ -48,8 +48,18 @@ function ChatPane() {
     refreshConversations,
   } = useWorkspace();
   const { user } = useSession();
-  const c = useSearchParams().get("c");
+  const params = useSearchParams();
+  const c = params.get("c");
+  const skillParam = params.get("skill");
   const [pane, setPane] = useState<Pane>(() => freshPane(c, 0));
+  // `?skill=<name>` (Run ▸ on a skill page) picks that skill in a new chat's
+  // composer. Held here rather than in Chat, which remounts when the active
+  // agent settles, and taken out of the URL at once so a reload or a later
+  // "New investigation" does not pick it again.
+  const [runSkill, setRunSkill] = useState(() => (c ? null : skillParam));
+  useEffect(() => {
+    if (skillParam) writeChatUrl(c, "replace");
+  }, [skillParam, c]);
 
   // Follow the URL. Adjusted during render (React's pattern for reacting to a
   // changed input), so a changed `?c=` never paints the old state first.
@@ -176,6 +186,8 @@ function ChatPane() {
           void refreshConversations();
         }}
         onActivity={refreshConversations}
+        initialSkill={runSkill}
+        onInitialSkillUsed={() => setRunSkill(null)}
       />
     </div>
   );

@@ -51,14 +51,35 @@ function RailHeading({ children }: { children: ReactNode }) {
   );
 }
 
-function TodoWidget({ todos }: { todos: TodoItem[] }) {
+/**
+ * The plan. As the rail it takes what it needs up to a cap and scrolls past it,
+ * so a long plan can't squeeze the call list (which takes the rest) to nothing;
+ * while live it keeps the step Holmes is on in view.
+ */
+function TodoWidget({ todos, live }: { todos: TodoItem[]; live: boolean }) {
+  const listRef = useRef<HTMLUListElement>(null);
+  const current = live ? activeStep(todos)?.id : undefined;
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const item = current && list?.querySelector<HTMLElement>(`[data-todo="${current}"]`);
+    // Scroll the list only — scrollIntoView would move the transcript too.
+    if (!list || !item || list.scrollHeight <= list.clientHeight) return;
+    const top = item.offsetTop;
+    if (top < list.scrollTop || top + item.offsetHeight > list.scrollTop + list.clientHeight)
+      list.scrollTop = top - list.clientHeight / 2 + item.offsetHeight / 2;
+  }, [current]);
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 rail:flex rail:max-h-[35cqh] rail:min-h-0 rail:shrink-0 rail:flex-col">
       <RailHeading>Plan · {planFraction(todos)}</RailHeading>
-      <ul className="space-y-1.5 px-2">
+      <ul
+        ref={listRef}
+        // `relative` makes it the items' offsetParent, for the scroll math above.
+        className="relative space-y-1.5 px-2 rail:min-h-0 rail:overflow-y-auto"
+      >
         {sortedTodos(todos).map((todo) => (
           <li
             key={todo.id}
+            data-todo={todo.id}
             className="flex items-baseline gap-2.5 font-mono text-[13px] leading-snug"
           >
             <span
@@ -191,9 +212,10 @@ function ToolCallRow({
     <div
       data-step-row={pickKey}
       className={cn(
+        // A tint, not an outline: the filled number already marks the pick.
         "flex items-start gap-1 rounded-sm transition-colors",
-        number !== null && "ring-1 ring-faint-linen/40",
-        builder.flashKey === pickKey && "bg-iron-veil/60 ring-faint-linen",
+        number !== null && "bg-iron-veil/30",
+        builder.flashKey === pickKey && "bg-iron-veil/70",
       )}
     >
       <button
@@ -207,10 +229,10 @@ function ToolCallRow({
         onFocus={() => builder.setFocusKey(pickKey)}
         onClick={() => builder.toggle(pickKey)}
         className={cn(
-          "mt-1 ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-sm border font-mono text-[11px] tabular-nums outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+          "mt-1 ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-sm font-mono text-[11px] tabular-nums outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
           number !== null
-            ? "border-faint-linen bg-faint-linen text-deep-ember"
-            : "border-input text-bone-gray hover:text-warm-off-white",
+            ? "bg-faint-linen text-deep-ember"
+            : "text-bone-gray hover:bg-iron-veil hover:text-warm-off-white",
           full && "opacity-50",
         )}
       >
@@ -477,13 +499,13 @@ export function InvestigationRail({
         )}
       >
         {shownTodos ? (
-          <TodoWidget todos={shownTodos} />
+          <TodoWidget todos={shownTodos} live={live} />
         ) : (
           live &&
           !picking && <RailHeading>Planning…</RailHeading>
         )}
         {rows.length > 0 && (
-          <div className="flex min-h-0 flex-col gap-2">
+          <div className="flex min-h-0 flex-col gap-2 rail:flex-1">
             <RailHeading>{counts}</RailHeading>
             <div
               ref={listRef}

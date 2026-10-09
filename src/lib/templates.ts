@@ -32,10 +32,15 @@ export function assertPlaceholders(
   }
 }
 
+/** Replace every placeholder with what `fn` makes of its (trimmed) name. */
+export function mapPlaceholders(text: string, fn: (name: string) => string): string {
+  return text.replace(PLACEHOLDER_PATTERN, (_, inner: string) => fn(inner.trim()));
+}
+
 /** Substitute `vars` into `text`; a placeholder with no value becomes "". */
 export function renderTemplate(
   text: string,
   vars: Readonly<Record<string, string>>,
 ): string {
-  return text.replace(PLACEHOLDER_PATTERN, (_, inner: string) => vars[inner.trim()] ?? "");
+  return mapPlaceholders(text, (name) => vars[name] ?? "");
 }

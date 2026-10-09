@@ -81,6 +81,8 @@ export default function ResolutionsPage() {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="symptom, error message, service…"
             className="pl-9"
+            aria-label="Search resolutions"
+            data-shortcut-focus
           />
         </div>
         <select

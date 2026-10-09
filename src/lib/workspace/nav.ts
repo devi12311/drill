@@ -1,10 +1,10 @@
 import { BookMarked, ListChecks, type LucideIcon } from "lucide-react";
 import { CHAT_HOME } from "@/lib/routes";
+import type { NavJump } from "@/lib/shortcuts";
 
-export interface WorkspaceNavItem {
+export interface WorkspaceNavItem extends NavJump {
   /** The section's root; `isActive` matches it and everything under it. */
   href: string;
-  label: string;
   icon: LucideIcon;
 }
 
@@ -16,8 +16,19 @@ export interface WorkspaceNavItem {
  * footer, beside the switcher, where org settings are expected to live.
  */
 export const WORKSPACE_NAV: WorkspaceNavItem[] = [
-  { href: "/resolutions", label: "Resolutions", icon: BookMarked },
-  { href: "/skills", label: "Skills", icon: ListChecks },
+  { href: "/resolutions", label: "Resolutions", icon: BookMarked, shortcut: "r" },
+  { href: "/skills", label: "Skills", icon: ListChecks, shortcut: "s" },
+];
+
+/**
+ * Everywhere a `g` chord reaches in the workspace: the nav, plus the two places
+ * the sidebar reaches another way (chat via "New investigation", the org page
+ * via the footer menu).
+ */
+export const WORKSPACE_JUMPS: NavJump[] = [
+  { href: CHAT_HOME, label: "Chat", shortcut: "c" },
+  ...WORKSPACE_NAV,
+  { href: "/org", label: "Organization", shortcut: "o" },
 ];
 
 export function isNavActive(item: WorkspaceNavItem, pathname: string): boolean {
@@ -29,6 +40,11 @@ export function chatUrl(conversationId: string | null): string {
   return conversationId
     ? `${CHAT_HOME}?c=${encodeURIComponent(conversationId)}`
     : CHAT_HOME;
+}
+
+/** A new chat with `skill` picked in the composer, ready for its inputs. */
+export function skillRunUrl(skillName: string): string {
+  return `${CHAT_HOME}?skill=${encodeURIComponent(skillName)}`;
 }
 
 /**
