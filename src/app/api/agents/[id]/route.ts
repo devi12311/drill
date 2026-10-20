@@ -1,6 +1,7 @@
 import { forbidden, getAuthContext, unauthorized } from "@/lib/auth/session";
 import { clustersUsingAgent } from "@/lib/db/monitoring-queries";
 import { deleteAgent, getAgent, updateAgent } from "@/lib/db/queries";
+import { pushManifestSoon } from "@/lib/git/manifest";
 import { validateAgent } from "@/lib/holmes/validate";
 
 type Context = { params: Promise<{ id: string }> };
@@ -60,6 +61,8 @@ export async function DELETE(_request: Request, context: Context) {
     );
   }
   if (!(await deleteAgent(ctx.orgId, id))) return notFound();
+  // Revokes the deleted agent's code-index access without waiting for the reconcile.
+  pushManifestSoon(ctx.orgId);
   return Response.json({ ok: true });
 }
 

@@ -2,6 +2,7 @@ import {
   Activity,
   Building2,
   DollarSign,
+  FolderGit2,
   LayoutDashboard,
   Radar,
   ScrollText,
@@ -52,6 +53,7 @@ export const ADMIN_NAV: AdminNavGroup[] = [
     label: "Infrastructure",
     items: [
       { href: "/admin/monitoring", label: "Monitoring", icon: Radar, shortcut: "m" },
+      { href: "/admin/git", label: "Git", icon: FolderGit2, shortcut: "r" },
       { href: "/admin/agents", label: "Agent health", icon: Server, shortcut: "h" },
     ],
   },

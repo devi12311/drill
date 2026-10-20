@@ -1,8 +1,10 @@
 import "server-only";
 import { listAgentsToProbe, recordAgentContact } from "@/lib/db/queries";
 import { listClustersToRefresh } from "@/lib/db/monitoring-queries";
+import { listConnectionsToProbe, recordConnectionContact } from "@/lib/db/git-queries";
+import { PROVIDERS } from "@/lib/git/providers";
 import { validateAgent } from "@/lib/holmes/validate";
-import { AGENT_PROBE_MS, CLUSTER_REFRESH_MS } from "@/lib/health";
+import { AGENT_PROBE_MS, CLUSTER_REFRESH_MS, GIT_CONNECTION_PROBE_MS } from "@/lib/health";
 import { refreshInventory } from "@/lib/monitoring/inventory";
 
 /** First pass shortly after boot, so a restarted worker repaints statuses quickly. */
@@ -29,15 +31,27 @@ async function probeAgents() {
   });
 }
 
+async function probeGitConnections() {
+  await eachLimited(await listConnectionsToProbe(), async (c) => {
+    try {
+      if (c.openError) throw new Error(`Stored token cannot be decrypted: ${c.openError}`);
+      await PROVIDERS[c.provider].validate(c);
+      await recordConnectionContact(c.id, null);
+    } catch (err) {
+      await recordConnectionContact(c.id, err instanceof Error ? err.message : String(err));
+    }
+  });
+}
+
 async function refreshClusters() {
   // refreshInventory records its own failure on the row.
   await eachLimited(await listClustersToRefresh(), (c) => refreshInventory(c.id, c.orgId));
 }
 
 /**
- * The periodic checks behind agent and cluster health (lib/health.ts). They live
- * in the worker, beside the lanes, because the web process may run several
- * replicas or none. Several WORKER replicas each check everything — harmless
+ * The periodic checks behind agent, cluster and git connection health
+ * (lib/health.ts). They live in the worker, beside the lanes, because the web
+ * process may run several replicas or none. Several WORKER replicas each check everything — harmless
  * (the probe is free and a rescan is idempotent), just redundant.
  */
 export function startHealthChecks(shutdown: AbortSignal): void {
@@ -58,4 +72,5 @@ export function startHealthChecks(shutdown: AbortSignal): void {
   };
   every("agent probe", AGENT_PROBE_MS, probeAgents);
   every("inventory refresh", CLUSTER_REFRESH_MS, refreshClusters);
+  every("git connection probe", GIT_CONNECTION_PROBE_MS, probeGitConnections);
 }

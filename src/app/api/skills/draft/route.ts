@@ -65,7 +65,7 @@ export async function POST(request: Request) {
       .filter((s) => s.name !== current?.name)
       .map((s) => ({ name: s.name, description: s.description }));
     const draft = await draftSkill(
-      { url: agent.url, apiKey: agent.apiKey },
+      agent,
       model,
       { source: requestSource(ask), current, existing },
       request.signal,

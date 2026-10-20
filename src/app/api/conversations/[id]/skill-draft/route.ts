@@ -127,7 +127,7 @@ export async function POST(request: Request, context: Context) {
       description: s.description,
     }));
     const draft = await draftSkill(
-      { url: agent.url, apiKey: agent.apiKey },
+      agent,
       conversation.model,
       {
         source: conversationSource({

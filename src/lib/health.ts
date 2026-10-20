@@ -23,6 +23,13 @@ export const AGENT_STALE_MS = 4 * AGENT_PROBE_MS;
 export const CLUSTER_REFRESH_MS = 30 * 60_000;
 export const CLUSTER_STALE_MS = 4 * CLUSTER_REFRESH_MS;
 
+/**
+ * Git connections are re-checked against the provider's API. Slow on purpose: the
+ * token rarely changes, and provider rate limits are shared with the repo picker.
+ */
+export const GIT_CONNECTION_PROBE_MS = 30 * 60_000;
+export const GIT_CONNECTION_STALE_MS = 4 * GIT_CONNECTION_PROBE_MS;
+
 export type Health = "ok" | "stale" | "down";
 
 type When = Date | string | null;
@@ -46,6 +53,13 @@ export function clusterHealth(
   now = Date.now(),
 ): Health {
   return health(cluster.lastDiscoveredAt, cluster.discoveryError, CLUSTER_STALE_MS, now);
+}
+
+export function gitConnectionHealth(
+  connection: { lastValidatedAt: When; lastError: string | null },
+  now = Date.now(),
+): Health {
+  return health(connection.lastValidatedAt, connection.lastError, GIT_CONNECTION_STALE_MS, now);
 }
 
 export const HEALTH_DOT: Record<Health, string> = {

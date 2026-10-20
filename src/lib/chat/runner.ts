@@ -113,7 +113,7 @@ export async function executeClaimedTurn(
     for await (const event of streamHolmes(
       request,
       outcome,
-      { url: agent.url, apiKey: agent.apiKey },
+      agent,
       turn.scope,
       controller.signal,
     )) {

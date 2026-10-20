@@ -15,6 +15,7 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type { ArtifactGraph } from "@/lib/artifacts/types";
 import {
   TURN_STATUSES,
@@ -48,6 +49,13 @@ import {
   TARGET_KINDS,
 } from "@/lib/monitoring/types";
 import type { EffectiveCheck } from "@/lib/monitoring/checks";
+import {
+  BRANCH_SYNC_STATES,
+  GIT_PROVIDERS,
+  type BranchSyncState,
+  type GitProvider,
+  type IndexStats,
+} from "@/lib/git/types";
 import type {
   AssessmentOutcome,
   AssessmentRunMeta,
@@ -1153,4 +1161,110 @@ export const monitoringRunFindings = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.runId, t.concernId] })],
+);
+
+// ---- Git: connected accounts → synced repositories → indexed branches ----
+//
+// Drill owns the DESIRED state here; the codegraph gateway (codegraph-gateway/)
+// owns the clones and indexes, and is told what to hold through a per-org manifest
+// built from these rows (lib/git/manifest.ts). Nothing on the gateway is a source of
+// truth Drill would need back.
+
+/**
+ * A GitHub or Bitbucket account the org's repositories come from. The token is
+ * replayed to the provider (listing repos) and handed to the gateway per sync
+ * (cloning), so it is sealed like `holmesAgents.apiKey`, never hashed.
+ */
+export const gitConnections = pgTable(
+  "git_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    provider: text("provider", { enum: GIT_PROVIDERS }).$type<GitProvider>().notNull(),
+    name: text("name").notNull(),
+    /** GitHub owner (org or user) / Bitbucket workspace. */
+    account: text("account").notNull(),
+    /**
+     * Bitbucket only: the Atlassian account email, present when the token is an
+     * Atlassian API token (Basic auth) rather than a workspace/repository access
+     * token (Bearer). Not a secret.
+     */
+    username: text("username"),
+    token: text("token").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    /** Last successful contact with the provider (save, check, or the worker's probe). */
+    lastValidatedAt: timestamp("last_validated_at"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [unique("git_connections_org_name_unique").on(t.orgId, t.name)],
+);
+
+/**
+ * A repository the org syncs. `name` is what the AGENT addresses it by
+ * (list_repositories, code_search …), so it is unique per org; it defaults to the
+ * provider's slug, which is also what the service.name → repo convention matches.
+ * `defaultBranch` is the provider's main branch: always tracked, and what tools use
+ * when the agent names no branch.
+ *
+ * The connection FK has no ON DELETE action, like clusters → agents: a connection
+ * whose repositories are still synced cannot be deleted out from under them.
+ */
+export const gitRepositories = pgTable(
+  "git_repositories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: orgId(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => gitConnections.id),
+    externalId: text("external_id").notNull(),
+    fullName: text("full_name").notNull(),
+    name: text("name").notNull(),
+    cloneUrl: text("clone_url").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // Case-insensitive, like the gateway's name lookup: `API` and `api` would be the
+    // same repository to the agent, and the gateway rejects the pair.
+    uniqueIndex("git_repositories_org_name_unique").on(t.orgId, sql`lower(${t.name})`),
+    unique("git_repositories_connection_external_unique").on(t.connectionId, t.externalId),
+  ],
+);
+
+/**
+ * One tracked branch — its own worktree and index on the gateway — and the git
+ * sync lane's queue: `queued` rows are claimed FOR UPDATE SKIP LOCKED.
+ */
+export const gitRepoBranches = pgTable(
+  "git_repo_branches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    repositoryId: uuid("repository_id")
+      .notNull()
+      .references(() => gitRepositories.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    state: text("state", { enum: BRANCH_SYNC_STATES })
+      .$type<BranchSyncState>()
+      .notNull()
+      .default("queued"),
+    /** The gateway's job for the sync in flight; how the lane recognises its result. */
+    jobId: text("job_id"),
+    /** Commit the gateway's worktree and index were last brought to. */
+    lastSha: text("last_sha"),
+    lastSyncedAt: timestamp("last_synced_at"),
+    error: text("error"),
+    stats: jsonb("stats").$type<IndexStats>(),
+    queuedAt: timestamp("queued_at").notNull().defaultNow(),
+    /** Refreshed while the lane polls; a stale one means its worker died mid-sync. */
+    heartbeatAt: timestamp("heartbeat_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("git_repo_branches_repo_name_unique").on(t.repositoryId, t.name),
+    index("git_repo_branches_queue_idx").on(t.state, t.queuedAt),
+  ],
 );

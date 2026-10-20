@@ -513,7 +513,7 @@ export class AssessmentError extends Error {
  * short turn over existing evidence instead of a whole new investigation.
  */
 export async function runAssessment(input: {
-  cluster: { name: string; holmesUrl: string; holmesApiKey: string };
+  cluster: { name: string; orgId: string; agentId: string; holmesUrl: string; holmesApiKey: string };
   category: MonitorCategory;
   model: string;
   targets: readonly AssessmentTarget[];
@@ -549,7 +549,7 @@ export async function runAssessment(input: {
       checks,
       playbook: depth === "deep" ? playbook : undefined,
     }) + outputContract(responseFormat);
-  const agent = { url: cluster.holmesUrl, apiKey: cluster.holmesApiKey };
+  const agent = { id: cluster.agentId, orgId: cluster.orgId, url: cluster.holmesUrl, apiKey: cluster.holmesApiKey };
 
   // The cluster investigation is wider than any workload's, so it is allowed
   // longer before the transport gives up on it.

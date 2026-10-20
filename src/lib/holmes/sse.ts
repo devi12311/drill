@@ -1,5 +1,6 @@
 import "server-only";
 import { Agent, fetch } from "undici";
+import { codeScopeHeaders } from "@/lib/git/gateway";
 import type {
   HolmesChatRequest,
   HolmesChatResponse,
@@ -33,8 +34,14 @@ const dispatcher = new Agent({
   connect: { timeout: 10_000 },
 });
 
-/** Connection details from the user's holmes_agents row (or a monitoring cluster). */
+/**
+ * Connection details from the org's holmes_agents row (or a monitoring cluster's
+ * agent). `id`/`orgId` name whose investigation it is: they sign the code-index
+ * scope Holmes forwards to the codegraph gateway (lib/git/gateway.ts).
+ */
 export interface AgentTarget {
+  id: string;
+  orgId: string;
   url: string;
   apiKey: string;
 }
@@ -224,6 +231,7 @@ export async function openHolmesStream(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
         Authorization: `Bearer ${agent.apiKey}`,
+        ...(await codeScopeHeaders(agent)),
       },
       body: JSON.stringify({ ...request, stream: true }),
       signal,

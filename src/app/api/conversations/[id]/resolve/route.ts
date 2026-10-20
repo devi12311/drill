@@ -61,7 +61,7 @@ export async function POST(request: Request, context: Context) {
   }
   try {
     const draft = await distillArtifact(
-      { url: agent.url, apiKey: agent.apiKey },
+      agent,
       conversation.model,
       turns,
       note,

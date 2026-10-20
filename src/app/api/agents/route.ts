@@ -1,5 +1,6 @@
 import { forbidden, getAuthContext, unauthorized } from "@/lib/auth/session";
 import { createAgent, listAgents } from "@/lib/db/queries";
+import { pushManifestSoon } from "@/lib/git/manifest";
 import { validateAgent } from "@/lib/holmes/validate";
 
 export async function GET() {
@@ -47,5 +48,7 @@ export async function POST(request: Request) {
   }
 
   const agent = await createAgent(ctx, { name, url, apiKey });
+  // The code-index gateway only honours scopes naming an agent of the org.
+  pushManifestSoon(ctx.orgId);
   return Response.json({ ...agent, models });
 }

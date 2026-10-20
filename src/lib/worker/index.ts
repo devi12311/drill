@@ -1,12 +1,13 @@
 import "server-only";
 import { chatLane } from "@/lib/chat/lane";
+import { gitSyncLane } from "@/lib/git/lane";
 import { startHealthChecks } from "@/lib/health-checks";
 import { monitoringLane } from "@/lib/monitoring/worker";
 import { runLane } from "./lane";
 
 /**
  * The worker: the only process that executes investigations — monitoring runs and
- * chat turns, one lane each (./lane.ts).
+ * chat turns — and repository syncs, one lane each (./lane.ts).
  *
  * Same image and same code as the web server, started from `instrumentation.ts`
  * and selected by `DRILL_ROLE`. It exists so no HTTP request ever waits on an
@@ -43,6 +44,7 @@ export function startWorker(): void {
   const lanes = [
     runLane(monitoringLane, shutdown.signal),
     runLane(chatLane, shutdown.signal),
+    runLane(gitSyncLane, shutdown.signal),
   ];
   startHealthChecks(shutdown.signal);
 
